@@ -1,0 +1,123 @@
+{
+  "name": "ksp-mcp",
+  "version": "0.1.0",
+  "description": "MCP server for KSP automation via kOS and MechJeb",
+  "author": "caseys",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/caseys/ksp-mcp.git"
+  },
+  "homepage": "https://github.com/caseys/ksp-mcp#README.md",
+  "bugs": {
+    "url": "https://github.com/caseys/ksp-mcp/issues"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "type": "module",
+  "main": "dist/lib.js",
+  "module": "dist/lib.js",
+  "types": "dist/lib.d.ts",
+  "bin": {
+    "ksp-mcp": "dist/index.js",
+    "ksp-mcp-check": "dist/scripts/check-setup.js"
+  },
+  "exports": {
+    ".": {
+      "import": "./dist/lib.js",
+      "types": "./dist/lib.d.ts"
+    },
+    "./server": {
+      "import": "./dist/server.js",
+      "types": "./dist/server.d.ts"
+    },
+    "./transport": {
+      "import": "./dist/transport/kos-connection.js",
+      "types": "./dist/transport/kos-connection.d.ts"
+    },
+    "./mechjeb": {
+      "import": "./dist/mechjeb/index.js",
+      "types": "./dist/mechjeb/index.d.ts"
+    },
+    "./config": {
+      "import": "./dist/config.js",
+      "types": "./dist/config.d.ts"
+    },
+    "./daemon": {
+      "import": "./dist/daemon/index.js",
+      "types": "./dist/daemon/index.d.ts"
+    }
+  },
+  "files": [
+    "dist",
+    "src",
+    "README.md",
+    "LICENSE",
+    ".env.example",
+    "tsconfig.json"
+  ],
+  "scripts": {
+    "prepare": "tsc && node dist/scripts/check-setup.js",
+    "build": "tsc",
+    "check": "node dist/scripts/check-setup.js",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/index.js",
+    "start:http": "node dist/index.js --transport http --host 0.0.0.0",
+    "test:connection": "tsx src/tests/test-connection.ts",
+    "test:mechjeb": "tsx src/tests/test-mechjeb.ts",
+    "test:mj-client": "tsx src/tests/test-mechjeb-client.ts",
+    "test:targeting": "tsx src/tests/test-targeting.ts",
+    "launch": "tsx src/tests/test-mechjeb-client.ts --launch",
+    "repl": "tsx src/repl.ts",
+    "ascent": "tsx src/cli/ascent/ascent-to-orbit.ts",
+    "ascent:kos": "tsx src/cli/ascent/ascent-pure-kos.ts",
+    "hohmann": "tsx src/cli/transfer/execute-hohmann.ts",
+    "course-correction": "tsx src/cli/transfer/course-correction.ts",
+    "match-velocities": "tsx src/cli/rendezvous/match-velocities.ts",
+    "circularize": "tsx src/cli/basic/circularize.ts",
+    "ellipticize": "tsx src/cli/basic/ellipticize.ts",
+    "semimajor": "tsx src/cli/basic/semimajor.ts",
+    "eccentricity": "tsx src/cli/orbital/eccentricity.ts",
+    "return-from-moon": "tsx src/cli/transfer/return-from-moon.ts",
+    "change-periapsis": "tsx src/cli/basic/change-periapsis.ts",
+    "change-apoapsis": "tsx src/cli/basic/change-apoapsis.ts",
+    "change-inclination": "tsx src/cli/rendezvous/change-inclination.ts",
+    "kill-rel-vel": "tsx src/cli/rendezvous/kill-rel-vel.ts",
+    "set-target": "tsx src/cli/rendezvous/set-target.ts",
+    "resonant-orbit": "tsx src/cli/transfer/resonant-orbit.ts",
+    "match-plane": "tsx src/cli/rendezvous/match-plane.ts",
+    "interplanetary": "tsx src/cli/transfer/interplanetary.ts",
+    "execute-node": "tsx src/cli/node/execute-node.ts",
+    "longitude": "tsx src/cli/orbital/longitude.ts",
+    "lan": "tsx src/cli/orbital/lan.ts",
+    "daemon": "tsx src/cli/daemon-cli.ts",
+    "daemon:start": "tsx src/daemon/kos-daemon.ts",
+    "daemon:status": "tsx src/cli/daemon-cli.ts status",
+    "daemon:shutdown": "tsx src/cli/daemon-cli.ts shutdown",
+    "kos": "tsx src/cli/daemon-cli.ts exec",
+    "warp": "tsx src/cli/warp/warp.ts",
+    "load-save": "tsx src/cli/save/load-save.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.23.0",
+    "dotenv": "^17.2.3",
+    "typescript": "^5.6.0",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0"
+  },
+  "keywords": [
+    "ksp",
+    "kerbal",
+    "kos",
+    "mechjeb",
+    "mcp",
+    "model-context-protocol",
+    "automation",
+    "space",
+    "game"
+  ]
+}
