@@ -52,42 +52,7 @@ export function createServer(): McpServer {
   });
 
   // Register connection tools
-  server.tool(
-    'connect',
-    'Connect to kOS terminal server and attach to a CPU by ID or label.',
-    {
-      host: z.string().default('127.0.0.1').describe('kOS server host'),
-      port: z.number().default(5410).describe('kOS server port'),
-      cpuId: z.number().optional().describe('CPU ID (numeric). Use either cpuId or cpuLabel, not both.'),
-      cpuLabel: z.string().optional().describe('CPU tag/label (e.g., "guidance"). Use either cpuId or cpuLabel, not both.'),
-      transportType: z.enum(['socket', 'tmux']).optional().describe('Transport type (default: socket)'),
-    },
-    async (args: z.infer<typeof connectInputSchema>) => {
-      try {
-        const state = await handleConnect(args);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: state.connected
-                ? `Connected to ${state.vesselName} (CPU ${state.cpuId}: ${state.cpuTag})`
-                : `Connection failed: ${state.lastError}`,
-            },
-          ],
-        };
-      } catch (error) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-            },
-          ],
-          isError: true,
-        };
-      }
-    }
-  );
+  // Note: 'connect' is intentionally not exposed - all tools auto-connect via ensureConnected()
 
   server.tool(
     'disconnect',
@@ -1451,7 +1416,7 @@ export function createServer(): McpServer {
             type: 'text',
             text: `Quickload initiated for save: ${result.saveName}\n\n` +
               `Note: Connection will reset after load completes. ` +
-              `Use connect to reconnect.`
+              `Connection will auto-reconnect on next tool call.`
           }],
         };
       } else {

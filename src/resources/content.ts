@@ -6,52 +6,17 @@ export const CONNECTION_GUIDE = `# kOS Connection Guide
 
 ## Quick Start
 
-The simplest way to connect to kOS:
+Connection is **automatic** - just call the tools you need:
 
 \`\`\`
-1. connect(cpuLabel: "guidance")
-2. execute(command: "PRINT ALTITUDE.")
-3. disconnect()
+set_target({ name: "Mun" })
+hohmann()
+execute_node()
 \`\`\`
 
-## Available Tools
+All tools auto-connect to the first available kOS CPU. Use \`cpuLabel\` parameter on any tool to target a specific CPU.
 
-### list_cpus
-Discover available kOS CPUs without connecting.
-
-**Parameters:**
-- \`host\` (optional): kOS server host (default: "127.0.0.1")
-- \`port\` (optional): kOS server port (default: 5410)
-- \`transportType\` (optional): "socket" or "tmux" (default: "socket")
-
-**Returns:** Array of CPU info with id, vessel, tag, etc.
-
-**Example:**
-\`\`\`
-list_cpus()
-→ [
-    { id: 1, vessel: "stick 1", tag: "guidance", ... },
-    { id: 2, vessel: "probe 1", tag: "flight", ... }
-  ]
-\`\`\`
-
-### connect
-Connect to a kOS CPU by ID or label.
-
-**Parameters:**
-- \`cpuId\` (optional): Numeric CPU ID (e.g., 1)
-- \`cpuLabel\` (optional): CPU tag/label (e.g., "guidance")
-- \`host\` (optional): kOS server host (default: "127.0.0.1")
-- \`port\` (optional): kOS server port (default: 5410)
-- \`transportType\` (optional): "socket" or "tmux" (default: "socket")
-
-**Note:** Exactly one of \`cpuId\` or \`cpuLabel\` must be provided.
-
-**Examples:**
-\`\`\`
-connect(cpuLabel: "guidance")  // Connect to 'guidance' CPU
-connect(cpuId: 1)               // Connect to CPU #1
-\`\`\`
+## Utility Tools
 
 ### execute
 Execute a kOS command.
@@ -78,81 +43,16 @@ Disconnect from kOS.
 
 **Returns:** \`{ disconnected: true }\`
 
-## Workflows
-
-### Discovery Workflow
-When you don't know which CPUs are available:
-
-\`\`\`
-1. list_cpus()           → See available CPUs
-2. connect(cpuLabel: "guidance")
-3. execute(command: "...")
-4. disconnect()
-\`\`\`
-
-### Direct Connection
-When you know the CPU label:
-
-\`\`\`
-1. connect(cpuLabel: "guidance")
-2. execute(command: "...")
-3. disconnect()
-\`\`\`
-
-### Multiple Commands
-\`\`\`
-1. connect(cpuLabel: "guidance")
-2. execute(command: "SET x TO 42.")
-3. execute(command: "PRINT x.")
-4. disconnect()
-\`\`\`
-
-## Best Practices
-
-1. **Use labels over IDs**: Labels like "guidance" are more descriptive than numeric IDs
-2. **Always disconnect**: Call \`disconnect()\` when done
-3. **Check status**: Use \`status()\` to verify connection state
-4. **Discover first**: Use \`list_cpus()\` when uncertain
-5. **Handle errors**: Check \`success\` field in execute results
-
 ## Troubleshooting
 
 ### "Not connected to kOS"
-- Call \`connect()\` first
 - Check that KSP is running with kOS mod loaded
-- Verify kOS telnet server is enabled
-
-### "No such CPU with label X"
-- Use \`list_cpus()\` to see available CPUs
-- Check CPU tag in KSP (kOS part action menu)
-- Verify spelling of label (case-insensitive)
+- Verify kOS telnet server is enabled on port 5410
+- Use \`list_cpus()\` to verify CPUs are available
 
 ### Connection timeout
-- Ensure kOS telnet server is running on port 5410
-- Check that CPU menu appears when connecting via telnet manually
-- Try \`transportType: "tmux"\` as alternative
-
-## Transport Options
-
-ksp-mcp supports two transport backends:
-
-### Socket Transport (default)
-- Uses Node.js net.Socket for direct TCP connection
-- Event-driven I/O
-- Recommended for most cases
-- No external dependencies
-- Requires: \`transportType: "socket"\` (or omit for default)
-
-### Tmux Transport
-- Uses tmux for session management with nc (netcat)
-- Polling-based I/O
-- Useful for debugging (can attach with \`tmux attach\`)
-- Requires: \`transportType: "tmux"\`
-
-**Example:**
-\`\`\`
-connect(cpuLabel: "guidance", transportType: "tmux")
-\`\`\`
+- Ensure kOS telnet server is running
+- Try calling any tool again (auto-reconnects)
 `;
 
 export const CPU_MENU_FORMAT = `# kOS CPU Menu Format
@@ -223,7 +123,7 @@ Each CPU line follows this pattern:
 
 ## How ksp-mcp Uses This
 
-The \`connect\` tool can connect by:
+Tools auto-connect and can target CPUs by:
 
 1. **CPU ID** (\`cpuId\`): Select by numeric ID (e.g., 1, 2, 3)
 2. **CPU Label** (\`cpuLabel\`): Search for matching tag (e.g., "guidance")
@@ -276,10 +176,7 @@ Rather than expose this complexity, ksp-mcp provides high-level tools that handl
 **Cons:**
 - Can't attach for debugging
 
-**Usage:**
-\`\`\`
-connect(cpuLabel: "guidance")  // Uses socket by default
-\`\`\`
+**Usage:** Default for all tools.
 
 ### 2. Tmux Transport
 
@@ -296,10 +193,7 @@ connect(cpuLabel: "guidance")  // Uses socket by default
 - Requires tmux binary installed
 - More overhead
 
-**Usage:**
-\`\`\`
-connect(cpuLabel: "guidance", transportType: "tmux")
-\`\`\`
+**Usage:** Set \`transportType: "tmux"\` on any tool.
 
 **Debugging:**
 \`\`\`bash
@@ -335,13 +229,12 @@ If you need direct tmux control via MCP tmux tools (\`mcp__tmux__*\`):
 
 Compare to ksp-mcp approach:
 \`\`\`
-1. connect(cpuLabel: "guidance")
-2. execute("PRINT ALTITUDE.")
+execute({ command: "PRINT ALTITUDE." })
 \`\`\`
 
 ## Recommendation
 
-**Use ksp-mcp tools** (\`connect\`, \`execute\`, etc.) for 99% of cases.
+**Use ksp-mcp tools** - connection is automatic.
 
 Only use manual tmux-mcp if:
 - You need to debug the transport layer itself

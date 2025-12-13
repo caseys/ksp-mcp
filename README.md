@@ -215,13 +215,15 @@ npm run kos                 # Execute kOS command via daemon
 
 ## MCP Tools
 
-### Connection
+> **Note:** Connection to kOS is automatic. All tools auto-connect when called.
 
-- **connect** - Connect to kOS terminal server
-- **disconnect** - Disconnect from kOS
+### Connection & Utility
+
 - **status** - Get connection status
+- **disconnect** - Disconnect from kOS
 - **execute** - Execute raw kOS commands
 - **list_cpus** - List available kOS CPUs
+- **telemetry** - Get ship orbit/status info
 
 ### Targeting
 
@@ -282,28 +284,22 @@ npm run kos                 # Execute kOS command via daemon
 ### Using MCP Tools
 
 ```javascript
-// 1. Connect to kOS
-await connect({ cpuLabel: "guidance" });
+// Connection is automatic - just call the tools you need!
 
-// 2. Launch to orbit
+// 1. Launch to orbit
 await launch({ altitude: 150000, inclination: 0 });
 
-// 3. Set target
-await set_target({ name: "Mun", type: "body" });
-
-// 4. Plan Hohmann transfer
-await hohmann({ timeReference: "COMPUTED", capture: false });
-
-// 5. Execute transfer burn
+// 2. Set target and plan transfer
+await set_target({ name: "Mun" });
+await hohmann();
 await execute_node();
 
-// 6. Course correction to optimize periapsis
+// 3. Course correction
 await course_correct({ targetDistance: 50000 });
-
-// 7. Execute course correction
 await execute_node();
 
-// 8. Wait for Mun SOI entry, then circularize
+// 4. Warp to Mun, then circularize
+await warp({ target: "soi" });
 await circularize({ timeRef: "PERIAPSIS" });
 await execute_node();
 ```
