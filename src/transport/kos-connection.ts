@@ -373,18 +373,28 @@ export class KosConnection {
    * Clean up command output (remove echo, prompts, etc.)
    */
   private cleanOutput(command: string, output: string): string {
-    const lines = output.split('\n');
+    // Remove kOS terminal control characters:
+    // - C0 control codes (U+0000-U+001F): NULL, NAK, SYN, ETB, etc.
+    // - Private Use Area (U+E000-U+F8FF): kOS visual formatting
+    const sanitized = output.replace(/[\u0000-\u001F\uE000-\uF8FF]/g, '');
 
-    // Filter out:
-    // - Lines that are just the command echo
-    // - Lines that are just the prompt (>)
-    // - Empty lines at start/end
+    const lines = sanitized.split('\n');
+
+    // Process lines:
+    // - Strip command echo prefix (kOS outputs "COMMAND result" on same line)
+    // - Filter out prompts and empty lines
     return lines
-      .filter(line => {
+      .map(line => {
         const trimmed = line.trim();
-        if (trimmed === command) return false;
-        if (trimmed === '>') return false;
-        if (trimmed === '') return false;
+        // Strip command echo from start of line if present
+        if (trimmed.startsWith(command)) {
+          return trimmed.slice(command.length).trim();
+        }
+        return trimmed;
+      })
+      .filter(line => {
+        if (line === '>') return false;
+        if (line === '') return false;
         return true;
       })
       .join('\n')

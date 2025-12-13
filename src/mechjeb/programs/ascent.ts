@@ -53,11 +53,15 @@ export class AscentHandle {
    * Get current progress of the ascent
    */
   async getProgress(): Promise<AscentProgress> {
-    // Query altitude, apoapsis, periapsis
+    // Query altitude, apoapsis, periapsis with delays between commands
     const altResult = await this.conn.execute('PRINT ALTITUDE.');
+    await delay(500);
     const apoResult = await this.conn.execute('PRINT APOAPSIS.');
+    await delay(500);
     const perResult = await this.conn.execute('PRINT PERIAPSIS.');
+    await delay(500);
     const enabledResult = await this.conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.');
+    await delay(500);
     const statusResult = await this.conn.execute('PRINT SHIP:STATUS.');
 
     const altitude = parseNumber(altResult.output);
@@ -298,7 +302,9 @@ export class AscentProgram {
   async getStatus(): Promise<AscentStatus> {
     const AG = 'ADDONS:MJ:ASCENT';
     const enabledResult = await this.conn.execute(`PRINT ${AG}:ENABLED.`);
+    await delay(500);
     const altResult = await this.conn.execute(`PRINT ${AG}:DESIREDALTITUDE.`);
+    await delay(500);
     const incResult = await this.conn.execute(`PRINT ${AG}:DESIREDINCLINATION.`);
 
     return {

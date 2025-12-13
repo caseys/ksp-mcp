@@ -9,14 +9,14 @@ export const CONNECTION_GUIDE = `# kOS Connection Guide
 The simplest way to connect to kOS:
 
 \`\`\`
-1. kos_connect(cpuLabel: "guidance")
-2. kos_execute(command: "PRINT ALTITUDE.")
-3. kos_disconnect()
+1. connect(cpuLabel: "guidance")
+2. execute(command: "PRINT ALTITUDE.")
+3. disconnect()
 \`\`\`
 
 ## Available Tools
 
-### kos_list_cpus
+### list_cpus
 Discover available kOS CPUs without connecting.
 
 **Parameters:**
@@ -28,14 +28,14 @@ Discover available kOS CPUs without connecting.
 
 **Example:**
 \`\`\`
-kos_list_cpus()
+list_cpus()
 → [
     { id: 1, vessel: "stick 1", tag: "guidance", ... },
     { id: 2, vessel: "probe 1", tag: "flight", ... }
   ]
 \`\`\`
 
-### kos_connect
+### connect
 Connect to a kOS CPU by ID or label.
 
 **Parameters:**
@@ -49,11 +49,11 @@ Connect to a kOS CPU by ID or label.
 
 **Examples:**
 \`\`\`
-kos_connect(cpuLabel: "guidance")  // Connect to 'guidance' CPU
-kos_connect(cpuId: 1)               // Connect to CPU #1
+connect(cpuLabel: "guidance")  // Connect to 'guidance' CPU
+connect(cpuId: 1)               // Connect to CPU #1
 \`\`\`
 
-### kos_execute
+### execute
 Execute a kOS command.
 
 **Parameters:**
@@ -64,16 +64,16 @@ Execute a kOS command.
 
 **Example:**
 \`\`\`
-kos_execute(command: "PRINT SHIP:ALTITUDE.")
+execute(command: "PRINT SHIP:ALTITUDE.")
 → { success: true, output: "123456.789" }
 \`\`\`
 
-### kos_status
+### status
 Get current connection status.
 
 **Returns:** Connection state with cpuId, vessel name, tag, etc.
 
-### kos_disconnect
+### disconnect
 Disconnect from kOS.
 
 **Returns:** \`{ disconnected: true }\`
@@ -84,46 +84,46 @@ Disconnect from kOS.
 When you don't know which CPUs are available:
 
 \`\`\`
-1. kos_list_cpus()           → See available CPUs
-2. kos_connect(cpuLabel: "guidance")
-3. kos_execute(command: "...")
-4. kos_disconnect()
+1. list_cpus()           → See available CPUs
+2. connect(cpuLabel: "guidance")
+3. execute(command: "...")
+4. disconnect()
 \`\`\`
 
 ### Direct Connection
 When you know the CPU label:
 
 \`\`\`
-1. kos_connect(cpuLabel: "guidance")
-2. kos_execute(command: "...")
-3. kos_disconnect()
+1. connect(cpuLabel: "guidance")
+2. execute(command: "...")
+3. disconnect()
 \`\`\`
 
 ### Multiple Commands
 \`\`\`
-1. kos_connect(cpuLabel: "guidance")
-2. kos_execute(command: "SET x TO 42.")
-3. kos_execute(command: "PRINT x.")
-4. kos_disconnect()
+1. connect(cpuLabel: "guidance")
+2. execute(command: "SET x TO 42.")
+3. execute(command: "PRINT x.")
+4. disconnect()
 \`\`\`
 
 ## Best Practices
 
 1. **Use labels over IDs**: Labels like "guidance" are more descriptive than numeric IDs
-2. **Always disconnect**: Call \`kos_disconnect()\` when done
-3. **Check status**: Use \`kos_status()\` to verify connection state
-4. **Discover first**: Use \`kos_list_cpus()\` when uncertain
+2. **Always disconnect**: Call \`disconnect()\` when done
+3. **Check status**: Use \`status()\` to verify connection state
+4. **Discover first**: Use \`list_cpus()\` when uncertain
 5. **Handle errors**: Check \`success\` field in execute results
 
 ## Troubleshooting
 
 ### "Not connected to kOS"
-- Call \`kos_connect()\` first
+- Call \`connect()\` first
 - Check that KSP is running with kOS mod loaded
 - Verify kOS telnet server is enabled
 
 ### "No such CPU with label X"
-- Use \`kos_list_cpus()\` to see available CPUs
+- Use \`list_cpus()\` to see available CPUs
 - Check CPU tag in KSP (kOS part action menu)
 - Verify spelling of label (case-insensitive)
 
@@ -151,7 +151,7 @@ ksp-mcp supports two transport backends:
 
 **Example:**
 \`\`\`
-kos_connect(cpuLabel: "guidance", transportType: "tmux")
+connect(cpuLabel: "guidance", transportType: "tmux")
 \`\`\`
 `;
 
@@ -223,12 +223,12 @@ Each CPU line follows this pattern:
 
 ## How ksp-mcp Uses This
 
-The \`kos_connect\` tool can connect by:
+The \`connect\` tool can connect by:
 
 1. **CPU ID** (\`cpuId\`): Select by numeric ID (e.g., 1, 2, 3)
 2. **CPU Label** (\`cpuLabel\`): Search for matching tag (e.g., "guidance")
 
-The \`kos_list_cpus\` tool parses this menu and returns structured data:
+The \`list_cpus\` tool parses this menu and returns structured data:
 \`\`\`typescript
 [
   {
@@ -278,7 +278,7 @@ Rather than expose this complexity, ksp-mcp provides high-level tools that handl
 
 **Usage:**
 \`\`\`
-kos_connect(cpuLabel: "guidance")  // Uses socket by default
+connect(cpuLabel: "guidance")  // Uses socket by default
 \`\`\`
 
 ### 2. Tmux Transport
@@ -298,7 +298,7 @@ kos_connect(cpuLabel: "guidance")  // Uses socket by default
 
 **Usage:**
 \`\`\`
-kos_connect(cpuLabel: "guidance", transportType: "tmux")
+connect(cpuLabel: "guidance", transportType: "tmux")
 \`\`\`
 
 **Debugging:**
@@ -335,13 +335,13 @@ If you need direct tmux control via MCP tmux tools (\`mcp__tmux__*\`):
 
 Compare to ksp-mcp approach:
 \`\`\`
-1. kos_connect(cpuLabel: "guidance")
-2. kos_execute("PRINT ALTITUDE.")
+1. connect(cpuLabel: "guidance")
+2. execute("PRINT ALTITUDE.")
 \`\`\`
 
 ## Recommendation
 
-**Use ksp-mcp tools** (\`kos_connect\`, \`kos_execute\`, etc.) for 99% of cases.
+**Use ksp-mcp tools** (\`connect\`, \`execute\`, etc.) for 99% of cases.
 
 Only use manual tmux-mcp if:
 - You need to debug the transport layer itself

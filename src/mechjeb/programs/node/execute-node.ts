@@ -40,10 +40,12 @@ export async function executeNode(
   }
 
   // Get initial node count
+  await delay(500);
   const initialCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
   const initialNodeCount = parseInt(initialCountResult.output.match(/\d+/)?.[0] || '1');
 
   // Enable MechJeb node executor
+  await delay(500);
   await conn.execute('SET ADDONS:MJ:NODEEXECUTOR:ENABLED TO TRUE.', 5000);
 
   // Wait for execution with timeout
@@ -97,6 +99,7 @@ export async function getNodeProgress(conn: KosConnection): Promise<ExecuteNodeP
   }
 
   // Get ETA and throttle
+  await delay(500);
   const statusResult = await conn.execute(
     'PRINT "ETA:" + ROUND(NEXTNODE:ETA) + " THR:" + ROUND(THROTTLE * 100).',
     2000

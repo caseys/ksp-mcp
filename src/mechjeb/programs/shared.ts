@@ -4,6 +4,13 @@
 
 import type { KosConnection } from '../../transport/kos-connection.js';
 
+/**
+ * Delay between sequential kOS commands (milliseconds).
+ * kOS telnet needs time to process commands; without delays,
+ * commands can be lost or return garbled output.
+ */
+export const KOS_COMMAND_DELAY_MS = 500;
+
 export interface ManeuverResult {
   success: boolean;
   deltaV?: number;        // m/s
@@ -62,6 +69,14 @@ export function delay(ms: number): Promise<void> {
 }
 
 /**
+ * Standard delay between kOS commands.
+ * Use this between sequential kOS execute calls.
+ */
+export function kosDelay(): Promise<void> {
+  return delay(KOS_COMMAND_DELAY_MS);
+}
+
+/**
  * Query a numeric value from MechJeb (e.g., "23.80  m/s")
  */
 export async function queryNumber(conn: KosConnection, suffix: string): Promise<number> {
@@ -102,10 +117,12 @@ export async function queryNodeInfo(conn: KosConnection): Promise<{ deltaV: numb
   }
 
   // Query deltaV using kOS native NEXTNODE
+  await delay(500);
   const deltaVResult = await conn.execute('PRINT NEXTNODE:DELTAV:MAG.', 2000);
   const deltaV = parseNumber(deltaVResult.output);
 
   // Query time to node (ETA is in seconds)
+  await delay(500);
   const etaResult = await conn.execute('PRINT NEXTNODE:ETA.', 2000);
   const timeToNode = parseNumber(etaResult.output);
 

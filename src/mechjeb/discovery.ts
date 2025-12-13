@@ -8,6 +8,10 @@
 import type { KosConnection } from '../transport/kos-connection.js';
 import type { MechJebModules } from './types.js';
 
+function delay(ms: number): Promise<void> {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
 /**
  * Parse a kOS list output into an array of strings
  * Format: ["value"] = "ITEM1"[1] =["value"] = "ITEM2"...
@@ -64,9 +68,11 @@ export async function discoverModules(conn: KosConnection): Promise<MechJebModul
   }
 
   // Get version
+  await delay(500);
   const version = await getMechJebVersion(conn);
 
   // Query MJ suffixes to see what modules exist
+  await delay(500);
   const result = await conn.execute('PRINT ADDONS:MJ:SUFFIXNAMES.');
   const suffixes = parseSuffixList(result.output);
 

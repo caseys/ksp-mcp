@@ -128,7 +128,30 @@ export class ManeuverProgram {
    */
   async hasTarget(): Promise<boolean> {
     const result = await this.conn.execute('PRINT HASTARGET.', 2000);
-    return result.output.toLowerCase().includes('true');
+    const output = result.output.trim().toLowerCase();
+    // kOS returns "True" or "False" - check for true anywhere in output
+    return output.includes('true');
+  }
+
+  /**
+   * Debug helper to get target state with full details
+   */
+  async getTargetDebugInfo(): Promise<{ hasTarget: boolean; rawOutput: string; targetName?: string }> {
+    const result = await this.conn.execute('PRINT HASTARGET.', 2000);
+    const hasTarget = result.output.trim().toLowerCase().includes('true');
+
+    let targetName: string | undefined;
+    if (hasTarget) {
+      await delay(500);
+      const nameResult = await this.conn.execute('PRINT TARGET:NAME.', 2000);
+      targetName = nameResult.output.trim();
+    }
+
+    return {
+      hasTarget,
+      rawOutput: result.output,
+      targetName
+    };
   }
 
   /**
@@ -155,9 +178,14 @@ export class ManeuverProgram {
     timeRef: string = 'COMPUTED',
     capture: boolean = true
   ): Promise<ManeuverResult> {
-    // Check target exists
-    if (!await this.hasTarget()) {
-      return { success: false, error: 'No target set. Use setTarget() first.' };
+    // Check target exists with debug info
+    const targetDebug = await this.getTargetDebugInfo();
+    if (!targetDebug.hasTarget) {
+      return {
+        success: false,
+        error: `No target set. Use setTarget() first.\n` +
+               `Debug: HASTARGET returned: "${targetDebug.rawOutput.trim()}"`
+      };
     }
 
     const captureStr = capture ? 'TRUE' : 'FALSE';

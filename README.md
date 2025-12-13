@@ -217,107 +217,65 @@ npm run kos                 # Execute kOS command via daemon
 
 ### Connection
 
-- **kos_connect** - Connect to kOS terminal server
-- **kos_disconnect** - Disconnect from kOS
-- **kos_status** - Get connection status
-- **kos_execute** - Execute raw kOS commands
-- **kos_list_cpus** - List available kOS CPUs
+- **connect** - Connect to kOS terminal server
+- **disconnect** - Disconnect from kOS
+- **status** - Get connection status
+- **execute** - Execute raw kOS commands
+- **list_cpus** - List available kOS CPUs
 
 ### Targeting
 
-- **kos_set_target** - Set navigation target (body or vessel)
-- **kos_get_target** - Get current target info
-- **kos_clear_target** - Clear current target
-- **mechjeb_set_target** - Set target via MechJeb
+- **set_target** - Set navigation target (body or vessel)
+- **get_target** - Get current target info
+- **clear_target** - Clear current target
 
 ### Time Control
 
-- **kos_warp** - Control time warp
-  - Parameters: `mode` (rails/physics/cancel), `factor` (warp rate), `ut` (target time)
+- **warp** - Time warp to event (soi, node, periapsis, apoapsis) or seconds
 
 ### Save/Load
 
-- **kos_load_save** - Load a saved game
-- **kos_list_saves** - List available saves
-- **kos_quicksave** - Create a quicksave
+- **load_save** - Load a saved game
+- **list_saves** - List available saves
+- **quicksave** - Create a quicksave
 
-### MechJeb Basic Maneuvers
+### Basic Maneuvers
 
-- **mechjeb_adjust_periapsis** - Change periapsis altitude
-  - Note: Cannot raise Pe above current Ap
-  - Parameters: `altitude` (meters), `timeRef` (APOAPSIS/PERIAPSIS)
+- **adjust_pe** - Change periapsis altitude
+- **adjust_ap** - Change apoapsis altitude
+- **circularize** - Circularize orbit
+- **ellipticize** - Set both periapsis and apoapsis
+- **change_sma** - Change semi-major axis
 
-- **mechjeb_adjust_apoapsis** - Change apoapsis altitude
-  - Parameters: `altitude` (meters), `timeRef` (APOAPSIS/PERIAPSIS)
+### Orbital Adjustments
 
-- **mechjeb_circularize** - Circularize orbit at specific point
-  - Parameters: `timeRef` (APOAPSIS/PERIAPSIS)
+- **change_inc** - Change orbital inclination
+- **change_ecc** - Change orbital eccentricity
+- **change_lan** - Change longitude of ascending node
+- **change_lpe** - Change longitude of periapsis
 
-- **mechjeb_ellipticize** - Set both periapsis and apoapsis
-  - Parameters: `newPe` (meters), `newAp` (meters), `timeRef`
+### Rendezvous
 
-- **mechjeb_change_semimajor** - Change semi-major axis
-  - Parameters: `newSMA` (meters), `timeRef`
+- **match_planes** - Match orbital plane with target
+- **match_velocities** - Match velocity with target
 
-### MechJeb Orbital Adjustments
+### Transfers
 
-- **mechjeb_change_inclination** - Adjust orbital plane inclination
-  - Parameters: `newInclination` (degrees), `timeRef` (EQ_ASCENDING/EQ_DESCENDING/EQ_NEAREST_AD/EQ_HIGHEST_AD)
+- **hohmann** - Plan Hohmann transfer to target
+- **course_correct** - Fine-tune closest approach
+- **resonant_orbit** - Create resonant orbit
+- **return_from_moon** - Return from moon to parent body
+- **interplanetary** - Plan interplanetary transfer
 
-- **mechjeb_change_eccentricity** - Change orbital eccentricity
-  - Parameters: `newEccentricity`, `timeRef`
+### Node Execution
 
-- **mechjeb_change_lan** - Change longitude of ascending node
-  - Parameters: `newLAN` (degrees), `timeRef`
+- **execute_node** - Execute next maneuver node
 
-- **mechjeb_change_longitude_of_periapsis** - Change argument of periapsis
-  - Parameters: `newLongitudeOfPeriapsis` (degrees), `timeRef`
+### Ascent
 
-### MechJeb Rendezvous
-
-- **mechjeb_match_plane** - Match orbital plane with target
-  - Parameters: `timeRef` (REL_ASCENDING/REL_DESCENDING/REL_NEAREST_AD)
-
-- **mechjeb_kill_relative_velocity** - Match velocity with target
-  - Parameters: `timeRef` (CLOSEST_APPROACH recommended)
-
-### MechJeb Transfers
-
-- **mechjeb_hohmann_transfer** - Plan Hohmann transfer to target
-  - Requires target to be set first
-  - Parameters: `timeReference` (COMPUTED/APOAPSIS/PERIAPSIS), `capture` (boolean)
-  - Creates 1-2 nodes depending on capture setting
-
-- **mechjeb_course_correction** - Fine-tune closest approach to target
-  - Optimizes periapsis for bodies or closest approach for vessels
-  - Parameters: `targetDistance` (meters)
-
-- **mechjeb_resonant_orbit** - Create resonant orbit for satellite deployment
-  - Parameters: `resonanceNumerator`, `resonanceDenominator`, `timeRef`
-
-- **mechjeb_return_from_moon** - Plan return from moon to parent body
-  - Parameters: `targetPeA` (meters)
-
-- **mechjeb_interplanetary_transfer** - Plan interplanetary transfer
-  - Parameters: `timeRef` (COMPUTED recommended)
-
-### MechJeb Node Execution
-
-- **mechjeb_execute_node** - Execute next maneuver node
-  - Validates delta-v availability
-  - Enables auto-staging if needed
-  - Warps to node and performs burn
-
-### MechJeb Ascent Guidance
-
-- **mechjeb_launch_to_orbit** - Launch to orbit with MechJeb autopilot
-  - Parameters: `altitude` (meters), `inclination` (degrees), `skipCircularization` (boolean)
-  - Auto-stages during ascent
-
-- **mechjeb_ascent_status** - Get current ascent progress
-  - Returns phase, altitude, apoapsis, periapsis
-
-- **mechjeb_abort_ascent** - Abort current ascent
+- **launch** - Launch to orbit
+- **ascent_status** - Get ascent progress
+- **abort_ascent** - Abort ascent
 
 ## Example Mission Flow
 
@@ -325,37 +283,29 @@ npm run kos                 # Execute kOS command via daemon
 
 ```javascript
 // 1. Connect to kOS
-await kos_connect({ cpuLabel: "guidance" });
+await connect({ cpuLabel: "guidance" });
 
 // 2. Launch to orbit
-await mechjeb_launch_to_orbit({
-  altitude: 150000,  // 150 km
-  inclination: 0
-});
+await launch({ altitude: 150000, inclination: 0 });
 
 // 3. Set target
-await kos_set_target({ name: "Mun", type: "body" });
+await set_target({ name: "Mun", type: "body" });
 
 // 4. Plan Hohmann transfer
-await mechjeb_hohmann_transfer({
-  timeReference: "COMPUTED",
-  capture: false  // We'll do course correction instead
-});
+await hohmann({ timeReference: "COMPUTED", capture: false });
 
 // 5. Execute transfer burn
-await mechjeb_execute_node();
+await execute_node();
 
 // 6. Course correction to optimize periapsis
-await mechjeb_course_correction({
-  targetDistance: 50000  // 50 km periapsis
-});
+await course_correct({ targetDistance: 50000 });
 
 // 7. Execute course correction
-await mechjeb_execute_node();
+await execute_node();
 
 // 8. Wait for Mun SOI entry, then circularize
-await mechjeb_circularize({ timeRef: "PERIAPSIS" });
-await mechjeb_execute_node();
+await circularize({ timeRef: "PERIAPSIS" });
+await execute_node();
 ```
 
 ### Using Library API

@@ -51,6 +51,104 @@ export async function handleConnect(
   return await connection.connect();
 }
 
+export interface EnsureConnectedOptions {
+  cpuId?: number;
+  cpuLabel?: string;
+}
+
+// Delay helper
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+// Delay after new connection to let kOS stabilize
+const POST_CONNECT_DELAY_MS = 500;
+
+// Health check timeout - shorter to detect stale connections faster
+const HEALTH_CHECK_TIMEOUT_MS = 1500;
+
+/**
+ * Verify connection is healthy by executing a simple command.
+ * Returns true if the connection is working, false if stale.
+ */
+async function isConnectionHealthy(conn: KosConnection): Promise<boolean> {
+  try {
+    const result = await conn.execute('PRINT 1.', HEALTH_CHECK_TIMEOUT_MS);
+    // A healthy connection returns output containing "1"
+    // Check both success and output to catch timeout cases
+    return result.success && result.output.includes('1');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Force close the connection and reset state.
+ * Used when health check fails to ensure clean reconnection.
+ */
+async function forceDisconnect(): Promise<void> {
+  if (connection) {
+    try {
+      await connection.disconnect();
+    } catch {
+      // Ignore disconnect errors - we're forcing a reset
+    }
+    connection = null;
+  }
+}
+
+/**
+ * Ensure connection is established, auto-connecting if needed.
+ * @param options Optional CPU selection (cpuId or cpuLabel)
+ * @returns The connected KosConnection
+ * @throws Error if connection fails
+ *
+ * Behavior:
+ * - If not connected: connects to specified CPU or CPU 0 if not specified
+ * - If connected and no options: verifies connection health, reconnects if stale
+ * - If connected but different CPU requested: reconnects to requested CPU
+ * - After new connection: waits 500ms for kOS to stabilize
+ */
+export async function ensureConnected(options?: EnsureConnectedOptions): Promise<KosConnection> {
+  const conn = getConnection();
+  const state = conn.getState();
+
+  // Check if we need to reconnect to a different CPU
+  const needsReconnect = options && (
+    (options.cpuId !== undefined && options.cpuId !== state.cpuId) ||
+    (options.cpuLabel !== undefined && options.cpuLabel !== state.cpuTag)
+  );
+
+  if (conn.isConnected() && !needsReconnect) {
+    // Verify connection is actually healthy (not stale)
+    if (await isConnectionHealthy(conn)) {
+      return conn;
+    }
+    // Connection is stale - force close before reconnecting
+    console.log('[ensureConnected] Connection stale, forcing disconnect and reconnecting...');
+    await forceDisconnect();
+  }
+
+  // Connect (or reconnect) with specified options
+  try {
+    const connectResult = await handleConnect({
+      cpuId: options?.cpuId,
+      cpuLabel: options?.cpuLabel,
+    });
+
+    if (!connectResult.connected) {
+      throw new Error(`Auto-connect failed: ${connectResult.lastError || 'Unknown error'}`);
+    }
+
+    // Wait for kOS to stabilize after new connection
+    await delay(POST_CONNECT_DELAY_MS);
+
+    return getConnection();
+  } catch (error) {
+    // If connection failed, force cleanup and re-throw
+    await forceDisconnect();
+    throw error;
+  }
+}
+
 export async function handleDisconnect(): Promise<{ disconnected: boolean }> {
   const conn = getConnection();
   await conn.disconnect();
@@ -78,22 +176,22 @@ export async function handleExecute(
 
 // Tool definitions for MCP registration
 export const connectionToolDefinitions = {
-  kos_connect: {
+  connect: {
     description: 'Connect to kOS terminal server and attach to a CPU',
     inputSchema: connectInputSchema,
     handler: handleConnect,
   },
-  kos_disconnect: {
+  disconnect: {
     description: 'Disconnect from kOS terminal',
     inputSchema: z.object({}),
     handler: handleDisconnect,
   },
-  kos_status: {
+  status: {
     description: 'Get current kOS connection status',
     inputSchema: z.object({}),
     handler: handleStatus,
   },
-  kos_execute: {
+  execute: {
     description: 'Execute a raw kOS command (for advanced use)',
     inputSchema: executeInputSchema,
     handler: handleExecute,

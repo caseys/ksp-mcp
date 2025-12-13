@@ -66,7 +66,9 @@ export {
   handleExecute,
   handleStatus,
   getConnection,
+  ensureConnected,
 } from './tools/connection-tools.js';
+export type { EnsureConnectedOptions } from './tools/connection-tools.js';
 
 // =============================================================================
 // Monitoring

@@ -9,6 +9,7 @@ import {
   handleStatus,
   handleExecute,
   getConnection,
+  ensureConnected,
 } from './tools/connection-tools.js';
 import {
   listCpusInputSchema,
@@ -52,8 +53,8 @@ export function createServer(): McpServer {
 
   // Register connection tools
   server.tool(
-    'kos_connect',
-    'Connect to kOS terminal server and attach to a CPU by ID or label. Returns vessel name and CPU info.',
+    'connect',
+    'Connect to kOS terminal server and attach to a CPU by ID or label.',
     {
       host: z.string().default('127.0.0.1').describe('kOS server host'),
       port: z.number().default(5410).describe('kOS server port'),
@@ -89,7 +90,7 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_disconnect',
+    'disconnect',
     'Disconnect from kOS terminal',
     {},
     async () => {
@@ -113,7 +114,7 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_status',
+    'status',
     'Get current kOS connection status',
     {},
     async () => {
@@ -130,8 +131,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_list_cpus',
-    'List available kOS CPUs without connecting. Useful for discovering CPU tags/labels.',
+    'list_cpus',
+    'List available kOS CPUs without connecting.',
     listCpusInputSchema.shape,
     async (args) => {
       try {
@@ -161,8 +162,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_execute',
-    'Execute a raw kOS command and return the output. Use for advanced operations or debugging.',
+    'execute',
+    'Execute a raw kOS command and return the output.',
     {
       command: z.string().describe('kOS command to execute'),
       timeout: z.number().default(5000).describe('Command timeout in milliseconds'),
@@ -187,31 +188,52 @@ export function createServer(): McpServer {
     }
   );
 
+  // Telemetry Tool
+  server.tool(
+    'telemetry',
+    'Get current ship telemetry including orbit, SOI, maneuver nodes, and encounters.',
+    {
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const telemetry = await getShipTelemetry(conn);
+        return {
+          content: [{ type: 'text', text: telemetry }],
+        };
+      } catch (error) {
+        return {
+          content: [{
+            type: 'text',
+            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
+          }],
+          isError: true,
+        };
+      }
+    }
+  );
+
   // MechJeb Maneuver Tools
   server.tool(
-    'mechjeb_adjust_periapsis',
-    'Create a maneuver node to change periapsis using MechJeb. ' +
-    'NOTE: Cannot raise periapsis above current apoapsis (orbital mechanics).',
+    'adjust_pe',
+    'Create a maneuver node to change periapsis. Cannot raise periapsis above current apoapsis.',
     {
       altitude: z.number().describe('Target periapsis altitude in meters'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.adjustPeriapsis(args.altitude, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
@@ -219,8 +241,7 @@ export function createServer(): McpServer {
                 `  Target Pe: ${args.altitude / 1000} km\n` +
                 `  Time ref: ${args.timeRef}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -242,28 +263,23 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_adjust_apoapsis',
-    'Create a maneuver node to change apoapsis using MechJeb.',
+    'adjust_ap',
+    'Create a maneuver node to change apoapsis.',
     {
       altitude: z.number().describe('Target apoapsis altitude in meters'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('PERIAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.adjustApoapsis(args.altitude, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
@@ -271,8 +287,7 @@ export function createServer(): McpServer {
                 `  Target Ap: ${args.altitude / 1000} km\n` +
                 `  Time ref: ${args.timeRef}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -294,35 +309,29 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_circularize',
-    'Create a maneuver node to circularize the orbit using MechJeb.',
+    'circularize',
+    'Create a maneuver node to circularize the orbit.',
     {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to circularize (usually at apoapsis or periapsis)'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.circularize(args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Circularization node created:\n` +
                 `  Time ref: ${args.timeRef}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -344,50 +353,10 @@ export function createServer(): McpServer {
   );
 
   // Target and Transfer Tools
-  server.tool(
-    'mechjeb_set_target',
-    'Set the navigation target for transfer maneuvers.',
-    {
-      target: z.string().describe('Target name (e.g., "Mun", "Minmus", or vessel name)'),
-      type: z.enum(['body', 'vessel']).default('body').describe('Target type: body for celestial bodies, vessel for spacecraft'),
-    },
-    async (args) => {
-      try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
-        const maneuver = new ManeuverProgram(conn);
-        const success = await maneuver.setTarget(args.target, args.type);
-
-        if (success) {
-          return {
-            content: [{ type: 'text', text: `Target set to ${args.target}` }],
-          };
-        } else {
-          return {
-            content: [{ type: 'text', text: `Failed to set target to ${args.target}. Make sure the name is correct.` }],
-            isError: true,
-          };
-        }
-      } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
-      }
-    }
-  );
 
   server.tool(
-    'mechjeb_hohmann_transfer',
-    'Plan a Hohmann transfer to the current target. Requires a target to be set first (use mechjeb_set_target).',
+    'hohmann',
+    'Plan a Hohmann transfer to the current target. Requires a target to be set first.',
     {
       timeReference: z.enum(['COMPUTED', 'PERIAPSIS', 'APOAPSIS'])
         .default('COMPUTED')
@@ -395,32 +364,32 @@ export function createServer(): McpServer {
       capture: z.boolean()
         .default(true)
         .describe('Include capture/insertion burn (creates 2 nodes). If false, only transfer burn (1 node)'),
+      includeTelemetry: z.boolean()
+        .default(false)
+        .describe('Include ship telemetry in response (slower but more info)'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.hohmannTransfer(args.timeReference, args.capture);
 
         if (result.success) {
           const nodeCount = args.capture ? 2 : 1;
-          const telemetry = await getShipTelemetry(conn);
+          let text = `Hohmann transfer planned!\n` +
+            `  Nodes created: ${nodeCount}\n` +
+            `  Delta-V (first node): ${result.deltaV?.toFixed(1)} m/s\n` +
+            `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
+            `Use execute_node to execute the maneuver.`;
+
+          if (args.includeTelemetry) {
+            text += '\n\n' + await getShipTelemetry(conn);
+          }
+
           return {
-            content: [{
-              type: 'text',
-              text: `Hohmann transfer planned!\n` +
-                `  Nodes created: ${nodeCount}\n` +
-                `  Delta-V (first node): ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
-                `Use mechjeb_execute_node to execute the maneuver.\n` +
-                telemetry
-            }],
+            content: [{ type: 'text', text }],
           };
         } else {
           return {
@@ -441,20 +410,19 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_course_correction',
-    'Fine-tune closest approach to target. Optimizes periapsis for body targets or closest approach for vessel targets. Requires target to be set first.',
+    'course_correct',
+    'Fine-tune closest approach to target. Requires target to be set first.',
     {
       targetDistance: z.number().describe('Target periapsis (bodies) or closest approach (vessels) in meters'),
+      includeTelemetry: z.boolean()
+        .default(false)
+        .describe('Include ship telemetry in response (slower but more info)'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.courseCorrection(args.targetDistance);
@@ -466,17 +434,18 @@ export function createServer(): McpServer {
           };
         }
 
-        const telemetry = await getShipTelemetry(conn);
+        let text = `Course correction planned!\n` +
+              `  Target approach: ${args.targetDistance / 1000} km\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
+              `Use execute_node to execute.`;
+
+        if (args.includeTelemetry) {
+          text += '\n\n' + await getShipTelemetry(conn);
+        }
+
         return {
-          content: [{
-            type: 'text',
-            text: `Course correction planned!\n` +
-                  `  Target approach: ${args.targetDistance / 1000} km\n` +
-                  `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                  `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
-                  `Use mechjeb_execute_node to execute.\n` +
-                  telemetry
-          }],
+          content: [{ type: 'text', text }],
         };
       } catch (error) {
         return {
@@ -491,23 +460,19 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_change_inclination',
-    'Change orbital inclination. Most efficient when executed at equatorial crossings (ascending/descending nodes).',
+    'change_inc',
+    'Change orbital inclination.',
     {
       newInclination: z.number().describe('Target inclination in degrees'),
       timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])
         .default('EQ_NEAREST_AD')
         .describe('When to execute: at ascending node, descending node, nearest AN/DN, or highest AD'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.changeInclination(args.newInclination, args.timeRef);
@@ -519,7 +484,6 @@ export function createServer(): McpServer {
           };
         }
 
-        const telemetry = await getShipTelemetry(conn);
         return {
           content: [{
             type: 'text',
@@ -528,8 +492,7 @@ export function createServer(): McpServer {
                   `  Execution point: ${args.timeRef}\n` +
                   `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
                   `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
-                  `Use mechjeb_execute_node to execute.\n` +
-                  telemetry
+                  `Use execute_node to execute.`
           }],
         };
       } catch (error) {
@@ -546,28 +509,23 @@ export function createServer(): McpServer {
 
   // New Modular MechJeb Operations
   server.tool(
-    'mechjeb_ellipticize',
-    'Create a maneuver node to set both periapsis and apoapsis in a single burn.',
+    'ellipticize',
+    'Set both periapsis and apoapsis in a single burn.',
     {
       periapsis: z.number().describe('Target periapsis altitude in meters'),
       apoapsis: z.number().describe('Target apoapsis altitude in meters'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await ellipticize(conn, args.periapsis, args.apoapsis, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
@@ -575,8 +533,7 @@ export function createServer(): McpServer {
                 `  Target Pe: ${args.periapsis / 1000} km\n` +
                 `  Target Ap: ${args.apoapsis / 1000} km\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -598,35 +555,29 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_change_semimajor',
-    'Create a maneuver node to change the orbital semi-major axis.',
+    'change_sma',
+    'Change the orbital semi-major axis.',
     {
       semiMajorAxis: z.number().describe('Target semi-major axis in meters'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await changeSemiMajorAxis(conn, args.semiMajorAxis, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Semi-major axis change node created:\n` +
                 `  Target SMA: ${args.semiMajorAxis / 1000} km\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -648,35 +599,29 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_change_eccentricity',
-    'Create a maneuver node to change orbital eccentricity.',
+    'change_ecc',
+    'Change orbital eccentricity.',
     {
       eccentricity: z.number().min(0).max(0.99).describe('Target eccentricity (0 = circular, <1 = elliptical)'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await changeEccentricity(conn, args.eccentricity, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Eccentricity change node created:\n` +
                 `  Target eccentricity: ${args.eccentricity}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -698,35 +643,29 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_change_lan',
-    'Create a maneuver node to change the Longitude of Ascending Node (LAN).',
+    'change_lan',
+    'Change the Longitude of Ascending Node (LAN).',
     {
       lan: z.number().describe('Target LAN in degrees (0 to 360)'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await changeLAN(conn, args.lan, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `LAN change node created:\n` +
                 `  Target LAN: ${args.lan}°\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -748,35 +687,29 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_change_longitude_of_periapsis',
-    'Create a maneuver node to change the Longitude of Periapsis.',
+    'change_lpe',
+    'Change the Longitude of Periapsis.',
     {
       longitude: z.number().describe('Target longitude in degrees (-180 to 180)'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await changeLongitudeOfPeriapsis(conn, args.longitude, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Longitude of periapsis change node created:\n` +
                 `  Target longitude: ${args.longitude}°\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -798,34 +731,28 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_match_plane',
-    'Create a maneuver node to match orbital plane with the target. Requires a target to be set first.',
+    'match_planes',
+    'Match orbital plane with the target. Requires a target to be set first.',
     {
       timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])
         .default('REL_NEAREST_AD')
         .describe('When to execute: nearest AN/DN, highest AN/DN, ascending node, or descending node'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await matchPlane(conn, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Plane match node created:\n` +
                 `  Execution point: ${args.timeRef}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -847,34 +774,28 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_kill_relative_velocity',
-    'Create a maneuver node to match velocity with the target. Requires a target to be set first.',
+    'match_velocities',
+    'Match velocity with the target. Requires a target to be set first.',
     {
       timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])
         .default('CLOSEST_APPROACH')
         .describe('When to execute: at closest approach or after X seconds'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await killRelativeVelocity(conn, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Kill relative velocity node created:\n` +
                 `  Execution point: ${args.timeRef}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -896,36 +817,30 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_resonant_orbit',
-    'Create a maneuver node to establish a resonant orbit. Useful for satellite constellation deployment.',
+    'resonant_orbit',
+    'Establish a resonant orbit for satellite constellation deployment.',
     {
       numerator: z.number().int().positive().describe('Numerator of resonance ratio (e.g., 2 for 2:3)'),
       denominator: z.number().int().positive().describe('Denominator of resonance ratio (e.g., 3 for 2:3)'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await resonantOrbit(conn, args.numerator, args.denominator, args.timeRef);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Resonant orbit node created:\n` +
                 `  Resonance: ${args.numerator}:${args.denominator}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -947,32 +862,26 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_return_from_moon',
-    'Create a maneuver node to return from a moon to its parent body.',
+    'return_from_moon',
+    'Return from a moon to its parent body.',
     {
       targetPeriapsis: z.number().describe('Target periapsis at parent body in meters (e.g., 100000 for 100km)'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await returnFromMoon(conn, args.targetPeriapsis);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Return from moon node created:\n` +
                 `  Target periapsis: ${args.targetPeriapsis / 1000} km\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -994,34 +903,28 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_interplanetary_transfer',
-    'Create a maneuver node for an interplanetary transfer. Requires a target planet to be set first.',
+    'interplanetary',
+    'Interplanetary transfer. Requires a target planet to be set first.',
     {
       waitForPhaseAngle: z.boolean()
         .default(true)
         .describe('If true, waits for optimal phase angle. If false, transfers immediately.'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await interplanetaryTransfer(conn, args.waitForPhaseAngle);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Interplanetary transfer node created:\n` +
                 `  Wait for phase angle: ${args.waitForPhaseAngle}\n` +
                 `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s\n` +
-                telemetry
+                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
             }],
           };
         } else {
@@ -1044,33 +947,33 @@ export function createServer(): McpServer {
 
   // Node Execution Tool
   server.tool(
-    'mechjeb_execute_node',
-    'Execute the next maneuver node using MechJeb autopilot. Enables the node executor and monitors until completion.',
+    'execute_node',
+    'Execute the next maneuver node. Monitors until completion.',
     {
       timeoutSeconds: z.number()
         .default(240)
         .describe('Maximum time to wait for node execution in seconds (default: 240 = 4 minutes)'),
+      includeTelemetry: z.boolean()
+        .default(false)
+        .describe('Include ship telemetry in response (slower but more info)'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const result = await executeNode(conn, args.timeoutSeconds * 1000);
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
+          let text = `Node executed successfully!\n` +
+            `  Nodes executed: ${result.nodesExecuted}`;
+
+          if (args.includeTelemetry) {
+            text += '\n\n' + await getShipTelemetry(conn);
+          }
+
           return {
-            content: [{
-              type: 'text',
-              text: `Node executed successfully!\n` +
-                `  Nodes executed: ${result.nodesExecuted}\n` +
-                telemetry
-            }],
+            content: [{ type: 'text', text }],
           };
         } else {
           return {
@@ -1092,23 +995,18 @@ export function createServer(): McpServer {
 
   // MechJeb Ascent Guidance Tools
   server.tool(
-    'mechjeb_launch_to_orbit',
-    'Launch to orbit using MechJeb ascent guidance. Configures and enables autopilot, triggers first stage. ' +
-    'Use mechjeb_ascent_status to monitor progress.',
+    'launch',
+    'Launch to orbit. Triggers first stage and monitors ascent.',
     {
       altitude: z.number().describe('Target orbit altitude in meters (e.g., 100000 for 100km)'),
       inclination: z.number().default(0).describe('Target orbit inclination in degrees'),
       skipCircularization: z.boolean().default(false).describe('Skip circularization burn (leaves in elliptical orbit)'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         const ascent = new AscentProgram(conn);
         currentAscentHandle = await ascent.launchToOrbit({
@@ -1119,7 +1017,6 @@ export function createServer(): McpServer {
           autoWarp: true,
         });
 
-        const telemetry = await getShipTelemetry(conn);
         return {
           content: [{
             type: 'text',
@@ -1127,8 +1024,7 @@ export function createServer(): McpServer {
               `  Target altitude: ${args.altitude / 1000} km\n` +
               `  Target inclination: ${args.inclination}°\n` +
               `  Skip circularization: ${args.skipCircularization}\n\n` +
-              `MechJeb ascent guidance enabled. Use mechjeb_ascent_status to monitor progress.\n` +
-              telemetry
+              `MechJeb ascent guidance enabled. Use ascent_status to monitor progress.`
           }],
         };
       } catch (error) {
@@ -1144,18 +1040,15 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_ascent_status',
+    'ascent_status',
     'Get current ascent progress including phase, altitude, apoapsis, and periapsis.',
-    {},
-    async () => {
+    {
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
+    },
+    async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         // Use current handle if available, otherwise create temporary one
         let progress;
@@ -1233,18 +1126,15 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'mechjeb_abort_ascent',
-    'Abort the current ascent guidance. Disables MechJeb autopilot.',
-    {},
-    async () => {
+    'abort_ascent',
+    'Abort the current ascent guidance.',
+    {
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
+    },
+    async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         if (currentAscentHandle) {
           await currentAscentHandle.abort();
@@ -1274,22 +1164,18 @@ export function createServer(): McpServer {
 
   // Targeting Tools
   server.tool(
-    'kos_set_target',
-    'Set the target for maneuvers (celestial body or vessel). Required for Hohmann transfers, rendezvous, etc.',
+    'set_target',
+    'Set the target (celestial body or vessel).',
     {
       name: z.string().describe('Name of target (e.g., "Mun", "Minmus", vessel name)'),
       type: z.enum(['auto', 'body', 'vessel']).default('auto')
         .describe('Target type: "auto" tries name directly, "body" for celestial bodies, "vessel" for ships'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         let cmd: string;
         if (args.type === 'body') {
@@ -1345,18 +1231,15 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_get_target',
+    'get_target',
     'Get information about the current target.',
-    {},
-    async () => {
+    {
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
+    },
+    async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         const result = await conn.execute(
           'IF HASTARGET { ' +
@@ -1378,7 +1261,7 @@ export function createServer(): McpServer {
           return {
             content: [{
               type: 'text',
-              text: 'No target currently set.\n\nUse kos_set_target to set a target.'
+              text: 'No target currently set.\n\nUse set_target to set a target.'
             }],
           };
         }
@@ -1402,18 +1285,15 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_clear_target',
+    'clear_target',
     'Clear the current target.',
-    {},
-    async () => {
+    {
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
+    },
+    async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         await conn.execute('UNSET TARGET.');
 
@@ -1501,9 +1381,8 @@ export function createServer(): McpServer {
 
   // Time Warp Tool
   server.tool(
-    'kos_warp',
-    'Time warp to a specific event (node, SOI change, periapsis, apoapsis) or forward by seconds. ' +
-    'Essential for interplanetary missions to skip long coast phases.',
+    'warp',
+    'Time warp to an event: "soi" (SOI change), "node" (next maneuver), "periapsis", "apoapsis", or a number of seconds.',
     {
       target: z.enum(['node', 'soi', 'periapsis', 'apoapsis'])
         .or(z.number())
@@ -1511,16 +1390,12 @@ export function createServer(): McpServer {
       leadTime: z.number()
         .default(60)
         .describe('Seconds before target to stop warping (default: 60)'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = getConnection();
-        if (!conn.isConnected()) {
-          return {
-            content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-            isError: true,
-          };
-        }
+        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         let result;
         if (typeof args.target === 'number') {
@@ -1530,14 +1405,12 @@ export function createServer(): McpServer {
         }
 
         if (result.success) {
-          const telemetry = await getShipTelemetry(conn);
           return {
             content: [{
               type: 'text',
               text: `Warp complete!\n` +
                 `  Body: ${result.body}\n` +
-                `  Altitude: ${(result.altitude || 0) / 1000} km\n` +
-                telemetry
+                `  Altitude: ${(result.altitude || 0) / 1000} km`
             }],
           };
         } else {
@@ -1560,20 +1433,15 @@ export function createServer(): McpServer {
 
   // Save/Load Tools (using kuniverse library)
   server.tool(
-    'kos_load_save',
-    'Load a KSP quicksave. Uses KUNIVERSE:QUICKLOADFROM to reload the game state. ' +
-    'Note: Connection will be reset after load.',
+    'load_save',
+    'Load a KSP quicksave. Connection will be reset after load.',
     {
       saveName: z.string().describe('Name of the quicksave to load (e.g., "test-in-orbit")'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
-      const conn = getConnection();
-      if (!conn.isConnected()) {
-        return {
-          content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-          isError: true,
-        };
-      }
+      const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
       const result = await quickload(conn, args.saveName);
 
@@ -1583,7 +1451,7 @@ export function createServer(): McpServer {
             type: 'text',
             text: `Quickload initiated for save: ${result.saveName}\n\n` +
               `Note: Connection will reset after load completes. ` +
-              `Use kos_connect to reconnect.`
+              `Use connect to reconnect.`
           }],
         };
       } else {
@@ -1596,17 +1464,14 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_list_saves',
+    'list_saves',
     'List available KSP quicksaves.',
-    {},
-    async () => {
-      const conn = getConnection();
-      if (!conn.isConnected()) {
-        return {
-          content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-          isError: true,
-        };
-      }
+    {
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
+    },
+    async (args) => {
+      const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
       const result = await listQuicksaves(conn);
 
@@ -1630,19 +1495,15 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'kos_quicksave',
+    'quicksave',
     'Create a KSP quicksave with the given name.',
     {
       saveName: z.string().describe('Name for the quicksave'),
+      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
+      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
-      const conn = getConnection();
-      if (!conn.isConnected()) {
-        return {
-          content: [{ type: 'text', text: 'Error: Not connected to kOS. Use kos_connect first.' }],
-          isError: true,
-        };
-      }
+      const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
       const result = await quicksave(conn, args.saveName);
 
