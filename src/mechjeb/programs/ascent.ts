@@ -51,24 +51,23 @@ export class AscentHandle {
 
   /**
    * Get current progress of the ascent
+   * Optimized: single atomic query instead of 5 sequential commands
    */
   async getProgress(): Promise<AscentProgress> {
-    // Query altitude, apoapsis, periapsis with delays between commands
-    const altResult = await this.conn.execute('PRINT ALTITUDE.');
-    await delay(500);
-    const apoResult = await this.conn.execute('PRINT APOAPSIS.');
-    await delay(500);
-    const perResult = await this.conn.execute('PRINT PERIAPSIS.');
-    await delay(500);
-    const enabledResult = await this.conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.');
-    await delay(500);
-    const statusResult = await this.conn.execute('PRINT SHIP:STATUS.');
+    // Single atomic query for all progress values
+    const result = await this.conn.execute(
+      'PRINT "PROG|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ADDONS:MJ:ASCENT:ENABLED + "|" + SHIP:STATUS.',
+      3000
+    );
 
-    const altitude = parseNumber(altResult.output);
-    const apoapsis = parseNumber(apoResult.output);
-    const periapsis = parseNumber(perResult.output);
-    const enabled = enabledResult.output.includes('True');
-    const shipStatus = statusResult.output.toLowerCase();
+    // Parse "PROG|alt|apo|per|enabled|status" format
+    const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|(.+?)(?:\s*>|$)/i);
+
+    const altitude = match ? parseFloat(match[1]) : 0;
+    const apoapsis = match ? parseFloat(match[2]) : 0;
+    const periapsis = match ? parseFloat(match[3]) : 0;
+    const enabled = match ? match[4].toLowerCase() === 'true' : false;
+    const shipStatus = match ? match[5].toLowerCase().trim() : 'unknown';
 
     // Determine phase
     let phase: AscentProgress['phase'];
@@ -96,7 +95,7 @@ export class AscentHandle {
       apoapsis,
       periapsis,
       enabled,
-      shipStatus: statusResult.output.trim()
+      shipStatus: match ? match[5].trim() : 'Unknown'
     };
   }
 
@@ -298,21 +297,24 @@ export class AscentProgram {
 
   /**
    * Get current ascent status
+   * Optimized: single atomic query instead of 3 sequential commands
    */
   async getStatus(): Promise<AscentStatus> {
-    const AG = 'ADDONS:MJ:ASCENT';
-    const enabledResult = await this.conn.execute(`PRINT ${AG}:ENABLED.`);
-    await delay(500);
-    const altResult = await this.conn.execute(`PRINT ${AG}:DESIREDALTITUDE.`);
-    await delay(500);
-    const incResult = await this.conn.execute(`PRINT ${AG}:DESIREDINCLINATION.`);
+    // Single atomic query for all ascent status values
+    const result = await this.conn.execute(
+      'PRINT "ASC|" + ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:DESIREDALTITUDE + "|" + ADDONS:MJ:ASCENT:DESIREDINCLINATION.',
+      3000
+    );
+
+    // Parse "ASC|enabled|altitude|inclination" format
+    const match = result.output.match(/ASC\|(True|False)\|([\d.]+)\|([\d.-]+)/i);
 
     return {
-      enabled: enabledResult.output.includes('True'),
+      enabled: match ? match[1].toLowerCase() === 'true' : false,
       ascentType: 'GT',  // Gravity Turn is the default
       settings: {
-        desiredAltitude: parseNumber(altResult.output),
-        desiredInclination: parseNumber(incResult.output)
+        desiredAltitude: match ? parseFloat(match[2]) : 0,
+        desiredInclination: match ? parseFloat(match[3]) : 0
       }
     };
   }
@@ -359,7 +361,7 @@ export class AscentProgram {
     );
 
     // Verify autopilot engaged (separate query for reliable output)
-    await delay(500);  // Brief delay for state to update
+    await delay(200);  // Brief delay for MechJeb state to update
     const verifyResult = await this.conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.');
     const engaged = verifyResult.output.toLowerCase().includes('true');
     if (!engaged) {

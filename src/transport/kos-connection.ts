@@ -202,16 +202,22 @@ export class KosConnection {
     }
 
     try {
-      // Clear any pending output
+      // Clear any pending output and wait briefly for socket buffer to drain
       await this.transport.read();
+      await new Promise(r => setTimeout(r, 10));
+      await this.transport.read();  // Second read to catch any stragglers
 
       // Send command
       await this.transport.send(command);
 
-      // Wait for prompt to return (indicates command completed)
+      // Wait for ETB (End Transmission Block, \u0017) which kOS sends after command output
+      // kOS uses control characters, not a '>' prompt:
+      // - \u0015 (NAK) before command echo
+      // - \u0016 (SYN) between echo and result
+      // - \u0017 (ETB) at end of output
       let output: string;
       try {
-        output = await this.transport.waitFor(/>\s*$/, timeoutMs);
+        output = await this.transport.waitFor(/\u0017$/, timeoutMs);
       } catch {
         // Timeout - read whatever we have
         output = await this.transport.read();

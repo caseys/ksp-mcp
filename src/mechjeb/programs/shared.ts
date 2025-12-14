@@ -108,25 +108,28 @@ export async function queryNumberWithRetry(
  * Returns deltaV and timeToNode for the next maneuver node
  *
  * Uses kOS's NEXTNODE instead of MechJeb INFO suffixes which return "N/A"
+ * Optimized: single command instead of 3 sequential queries
  */
 export async function queryNodeInfo(conn: KosConnection): Promise<{ deltaV: number; timeToNode: number }> {
-  // Check if node exists first
-  const hasNodeResult = await conn.execute('PRINT HASNODE.', 2000);
-  if (!hasNodeResult.output.includes('True')) {
-    return { deltaV: 0, timeToNode: 0 };
+  // Single atomic query: check for node and get values in one command
+  const result = await conn.execute(
+    'IF HASNODE { PRINT "NODE|" + NEXTNODE:DELTAV:MAG + "|" + NEXTNODE:ETA. } ELSE { PRINT "NONODE". }',
+    3000
+  );
+
+  // Parse "NODE|deltaV|eta" format
+  // The command echo contains "NONODE" as string literal, so we must check for
+  // the actual result pattern first
+  const match = result.output.match(/NODE\|([\d.]+)\|([\d.]+)/);
+  if (match) {
+    return {
+      deltaV: parseFloat(match[1]),
+      timeToNode: parseFloat(match[2])
+    };
   }
 
-  // Query deltaV using kOS native NEXTNODE
-  await delay(500);
-  const deltaVResult = await conn.execute('PRINT NEXTNODE:DELTAV:MAG.', 2000);
-  const deltaV = parseNumber(deltaVResult.output);
-
-  // Query time to node (ETA is in seconds)
-  await delay(500);
-  const etaResult = await conn.execute('PRINT NEXTNODE:ETA.', 2000);
-  const timeToNode = parseNumber(etaResult.output);
-
-  return { deltaV, timeToNode };
+  // No node data found - either no node exists or output was empty/error
+  return { deltaV: 0, timeToNode: 0 };
 }
 
 /**
@@ -135,6 +138,35 @@ export async function queryNodeInfo(conn: KosConnection): Promise<{ deltaV: numb
 export async function queryTime(conn: KosConnection, suffix: string): Promise<number> {
   const result = await conn.execute(`PRINT ${suffix}.`, 2000);
   return parseTimeString(result.output);
+}
+
+/**
+ * Sanitize kOS output for error messages.
+ * Removes command echoes and extracts meaningful failure reasons.
+ */
+function sanitizeError(rawOutput: string): string {
+  // If output contains command echo, give generic message
+  // Check this FIRST because command echo may contain FALSE as parameter
+  if (rawOutput.includes('SET ') || rawOutput.includes('PRINT ')) {
+    return 'Planner did not return success';
+  }
+
+  const errorPatterns = [
+    { pattern: /No target/i, message: 'No target set' },
+    { pattern: /Cannot find/i, message: 'Command not found - MechJeb may not be available' },
+    { pattern: /Syntax error/i, message: 'kOS syntax error' },
+    { pattern: /^False$/i, message: 'Planner returned False' },  // Exact match only
+  ];
+
+  for (const { pattern, message } of errorPatterns) {
+    if (pattern.test(rawOutput)) {
+      return message;
+    }
+  }
+
+  // Return cleaned output (limit length)
+  const cleaned = rawOutput.trim().substring(0, 100);
+  return cleaned || 'Unknown error';
 }
 
 /**
@@ -149,7 +181,7 @@ export async function executeManeuverCommand(
 
   const success = result.output.includes('True');
   if (!success) {
-    return { success: false, error: result.output };
+    return { success: false, error: sanitizeError(result.output) };
   }
 
   // Use kOS native NEXTNODE instead of broken MechJeb INFO suffixes

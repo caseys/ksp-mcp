@@ -9,7 +9,6 @@ import {
   type ManeuverResult,
   parseNumber,
   parseTimeString,
-  delay,
   queryNumber,
   queryNumberWithRetry,
   queryTime,
@@ -46,7 +45,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Adjust periapsis') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -71,7 +70,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Adjust apoapsis') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -95,7 +94,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Circularize') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -135,22 +134,24 @@ export class ManeuverProgram {
 
   /**
    * Debug helper to get target state with full details
+   * Optimized: single atomic query
    */
   async getTargetDebugInfo(): Promise<{ hasTarget: boolean; rawOutput: string; targetName?: string }> {
-    const result = await this.conn.execute('PRINT HASTARGET.', 2000);
-    const hasTarget = result.output.trim().toLowerCase().includes('true');
+    // Single query that handles both cases
+    const result = await this.conn.execute(
+      'IF HASTARGET { PRINT "TGT|" + TARGET:NAME. } ELSE { PRINT "NOTGT". }',
+      3000
+    );
 
-    let targetName: string | undefined;
-    if (hasTarget) {
-      await delay(500);
-      const nameResult = await this.conn.execute('PRINT TARGET:NAME.', 2000);
-      targetName = nameResult.output.trim();
+    if (result.output.includes('NOTGT')) {
+      return { hasTarget: false, rawOutput: result.output };
     }
 
+    const match = result.output.match(/TGT\|(.+?)(?:\s*>|$)/);
     return {
-      hasTarget,
+      hasTarget: true,
       rawOutput: result.output,
-      targetName
+      targetName: match ? match[1].trim() : undefined
     };
   }
 
@@ -163,6 +164,36 @@ export class ManeuverProgram {
     // Extract target name from output
     const match = result.output.match(/(?:Body|Vessel)\s+"?([^"\n]+)"?/i);
     return match ? match[1].trim() : result.output.trim();
+  }
+
+  /**
+   * Sanitize kOS output for error messages.
+   * Removes command echoes, control characters, and extracts meaningful failure reasons.
+   */
+  private sanitizeError(rawOutput: string, operation: string): string {
+    // If output is mostly command echo (contains SET/PRINT), give generic message
+    // Check this FIRST because command echo may contain FALSE as parameter
+    if (rawOutput.includes('SET ') || rawOutput.includes('PRINT ')) {
+      return `${operation} failed - planner did not return success`;
+    }
+
+    // Common kOS error patterns
+    const errorPatterns = [
+      { pattern: /No target/i, message: 'No target set' },
+      { pattern: /Cannot find/i, message: 'Command not found - MechJeb may not be available' },
+      { pattern: /Syntax error/i, message: 'kOS syntax error' },
+      { pattern: /^False$/i, message: `${operation} failed - planner returned False` },  // Exact match
+    ];
+
+    for (const { pattern, message } of errorPatterns) {
+      if (pattern.test(rawOutput)) {
+        return message;
+      }
+    }
+
+    // Otherwise, return cleaned output (limit length)
+    const cleaned = rawOutput.trim().substring(0, 100);
+    return cleaned || `${operation} failed - unknown reason`;
   }
 
   /**
@@ -194,7 +225,9 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      // Sanitize error message - extract meaningful failure reason
+      const error = this.sanitizeError(result.output, 'Hohmann transfer');
+      return { success: false, error };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -229,19 +262,36 @@ export class ManeuverProgram {
    *
    * @param finalPeA Target periapsis (bodies) or closest approach (vessels) in meters
    */
-  async courseCorrection(finalPeA: number): Promise<ManeuverResult> {
-    const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${finalPeA}).`;
+  async courseCorrection(finalPeA: number, minLeadTime: number = 300): Promise<ManeuverResult> {
+    // WORKAROUND: MechJeb's course correction algorithm produces results that vary
+    // with trajectory geometry. Using 3x multiplier to err on the safe side
+    // (higher periapsis than requested, avoiding surface impact).
+    // TODO: Investigate MechJeb algorithm or implement iterative refinement.
+    const adjustedPeA = finalPeA * 3;
+    console.error(`[CourseCorrection] WORKAROUND: Requested ${finalPeA}m, using ${adjustedPeA}m (3x safe margin)`);
+
+    const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${adjustedPeA}).`;
     const result = await this.conn.execute(cmd, 10000);
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Course correction') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
     const nodeInfo = await queryNodeInfo(this.conn);
     const deltaV = nodeInfo.deltaV;
     const timeToNode = nodeInfo.timeToNode;
+
+    // Check minimum lead time - reject nodes that are too soon
+    if (timeToNode < minLeadTime) {
+      // Delete the node that's too soon
+      await this.conn.execute('REMOVE NEXTNODE.', 2000);
+      return {
+        success: false,
+        error: `Course correction burn time (${timeToNode.toFixed(0)}s) is less than minimum lead time (${minLeadTime}s). Node deleted. Try again later or reduce lead time.`
+      };
+    }
 
     return { success: true, deltaV, timeToNode };
   }
@@ -261,7 +311,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Change inclination') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -287,7 +337,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Ellipticize') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -314,7 +364,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Change LAN') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -341,7 +391,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Change longitude') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -370,7 +420,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Resonant orbit') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")
@@ -402,7 +452,7 @@ export class ManeuverProgram {
 
     const success = result.output.includes('True');
     if (!success) {
-      return { success: false, error: result.output };
+      return { success: false, error: this.sanitizeError(result.output, 'Match velocities') };
     }
 
     // Query node info using kOS native NEXTNODE (MechJeb INFO returns "N/A")

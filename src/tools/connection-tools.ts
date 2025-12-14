@@ -165,10 +165,8 @@ export async function handleStatus(): Promise<ConnectionState> {
 export async function handleExecute(
   input: z.infer<typeof executeInputSchema>
 ): Promise<CommandResult> {
-  const conn = getConnection();
-  if (!conn.isConnected()) {
-    return { success: false, output: '', error: 'Not connected to kOS' };
-  }
+  // Auto-connect if needed
+  const conn = await ensureConnected();
 
   // Output is automatically tracked in KosConnection.execute()
   return await conn.execute(input.command, input.timeout);

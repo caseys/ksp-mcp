@@ -22,7 +22,7 @@ import {
 } from './resources/content.js';
 import { ManeuverProgram } from './mechjeb/programs/maneuver.js';
 import { AscentProgram, AscentHandle } from './mechjeb/programs/ascent.js';
-import { getShipTelemetry } from './mechjeb/telemetry.js';
+import { getShipTelemetry, type ShipTelemetryOptions } from './mechjeb/telemetry.js';
 // New modular operations
 import { ellipticize, changeSemiMajorAxis } from './mechjeb/programs/basic/index.js';
 import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from './mechjeb/programs/orbital/index.js';
@@ -37,12 +37,57 @@ import { listQuicksaves, quicksave, quickload } from './kuniverse/index.js';
 // Track current ascent handle for status/abort
 let currentAscentHandle: AscentHandle | null = null;
 
+const INLINE_TELEMETRY_OPTIONS: ShipTelemetryOptions = {
+  timeoutMs: 2500,  // Per-query timeout (max 2 queries = 5s max)
+};
+
+const FULL_TELEMETRY_OPTIONS: ShipTelemetryOptions = {
+  timeoutMs: 3000,  // Per-query timeout for standalone telemetry (max 2 queries = 6s max)
+};
+
 /**
  * Clear the current ascent handle.
  * Called when disconnecting to prevent stale handle issues.
  */
 export function clearAscentHandle(): void {
   currentAscentHandle = null;
+}
+
+/**
+ * Helper to create a success response with structured content.
+ */
+function successResponse(
+  action: string,
+  text: string,
+  data?: Record<string, unknown>
+) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    structuredContent: {
+      status: 'success' as const,
+      action,
+      ...data
+    }
+  };
+}
+
+/**
+ * Helper to create an error response with structured content.
+ */
+function errorResponse(
+  action: string,
+  text: string,
+  reason: string
+) {
+  return {
+    content: [{ type: 'text' as const, text }],
+    isError: true,
+    structuredContent: {
+      status: 'error' as const,
+      action,
+      reason
+    }
+  };
 }
 
 export function createServer(): McpServer {
@@ -61,19 +106,10 @@ export function createServer(): McpServer {
     async () => {
       try {
         await handleDisconnect();
-        return {
-          content: [{ type: 'text', text: 'Disconnected from kOS' }],
-        };
+        return successResponse('disconnect', 'Disconnected successfully.');
       } catch (error) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-            },
-          ],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('disconnect', `Disconnect failed: ${reason}`, reason);
       }
     }
   );
@@ -84,14 +120,26 @@ export function createServer(): McpServer {
     {},
     async () => {
       const state = await handleStatus();
-      return {
-        content: [
-          {
-            type: 'text',
-            text: JSON.stringify(state, null, 2),
-          },
-        ],
-      };
+      return successResponse('status', JSON.stringify(state, null, 2), { ...state });
+    }
+  );
+
+  server.tool(
+    'clear_nodes',
+    'Remove all maneuver nodes',
+    {},
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        await conn.execute(
+          'SET _N TO ALLNODES:LENGTH. UNTIL NOT HASNODE { REMOVE NEXTNODE. } PRINT "Cleared " + _N + " node(s)".',
+          5000
+        );
+        return successResponse('clear_nodes', 'Maneuver nodes cleared!');
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('clear_nodes', `Clear nodes failed: ${reason}`, reason);
+      }
     }
   );
 
@@ -102,26 +150,13 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const cpus = await handleListCpus(args);
-        return {
-          content: [
-            {
-              type: 'text',
-              text: cpus.length > 0
-                ? `Found ${cpus.length} CPU(s):\n` + JSON.stringify(cpus, null, 2)
-                : 'No CPUs found',
-            },
-          ],
-        };
+        const text = cpus.length > 0
+          ? `Found ${cpus.length} CPU(s):\n` + JSON.stringify(cpus, null, 2)
+          : 'No CPUs found';
+        return successResponse('list_cpus', text, { cpus });
       } catch (error) {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-            },
-          ],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('list_cpus', `List CPUs failed: ${reason}`, reason);
       }
     }
   );
@@ -136,19 +171,10 @@ export function createServer(): McpServer {
     async (args) => {
       const result = await handleExecute(args);
       if (result.success) {
-        return {
-          content: [{ type: 'text', text: result.output || '(no output)' }],
-        };
+        return successResponse('execute', result.output || '(no output)', { output: result.output });
       } else {
-        return {
-          content: [
-            {
-              type: 'text',
-              text: `Error: ${result.error}\nOutput: ${result.output}`,
-            },
-          ],
-          isError: true,
-        };
+        const reason = result.error ?? 'Unknown error';
+        return errorResponse('execute', `Execute failed: ${reason}\nOutput: ${result.output}`, reason);
       }
     }
   );
@@ -164,18 +190,12 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
-        const telemetry = await getShipTelemetry(conn);
-        return {
-          content: [{ type: 'text', text: telemetry }],
-        };
+        const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
+        // telemetry is a formatted string; include raw text in data too
+        return successResponse('telemetry', telemetry, { telemetry });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('telemetry', `Telemetry failed: ${reason}`, reason);
       }
     }
   );
@@ -199,30 +219,25 @@ export function createServer(): McpServer {
         const result = await maneuver.adjustPeriapsis(args.altitude, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Maneuver node created:\n` +
-                `  Target Pe: ${args.altitude / 1000} km\n` +
-                `  Time ref: ${args.timeRef}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('adjust_pe',
+            `Periapsis change planned!\n` +
+              `  Target Pe: ${args.altitude / 1000} km\n` +
+              `  Time ref: ${args.timeRef}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetAltitude: args.altitude,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('adjust_pe', `Periapsis change failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('adjust_pe', `Periapsis change failed: ${reason}`, reason);
       }
     }
   );
@@ -245,30 +260,25 @@ export function createServer(): McpServer {
         const result = await maneuver.adjustApoapsis(args.altitude, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Maneuver node created:\n` +
-                `  Target Ap: ${args.altitude / 1000} km\n` +
-                `  Time ref: ${args.timeRef}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('adjust_ap',
+            `Apoapsis change planned!\n` +
+              `  Target Ap: ${args.altitude / 1000} km\n` +
+              `  Time ref: ${args.timeRef}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetAltitude: args.altitude,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('adjust_ap', `Apoapsis change failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('adjust_ap', `Apoapsis change failed: ${reason}`, reason);
       }
     }
   );
@@ -290,29 +300,23 @@ export function createServer(): McpServer {
         const result = await maneuver.circularize(args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Circularization node created:\n` +
-                `  Time ref: ${args.timeRef}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('circularize',
+            `Circularization planned!\n` +
+              `  Time ref: ${args.timeRef}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('circularize', `Circularization failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('circularize', `Circularization failed: ${reason}`, reason);
       }
     }
   );
@@ -346,30 +350,25 @@ export function createServer(): McpServer {
           let text = `Hohmann transfer planned!\n` +
             `  Nodes created: ${nodeCount}\n` +
             `  Delta-V (first node): ${result.deltaV?.toFixed(1)} m/s\n` +
-            `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
-            `Use execute_node to execute the maneuver.`;
+            `  Time to node: ${result.timeToNode?.toFixed(0)} s`;
 
           if (args.includeTelemetry) {
-            text += '\n\n' + await getShipTelemetry(conn);
+            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
           }
 
-          return {
-            content: [{ type: 'text', text }],
-          };
+          return successResponse('hohmann', text, {
+            nodesCreated: nodeCount,
+            capture: args.capture,
+            timeReference: args.timeReference,
+            deltaV: result.deltaV,
+            timeToNode: result.timeToNode
+          });
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to plan transfer: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('hohmann', `Hohmann transfer failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('hohmann', `Hohmann transfer failed: ${reason}`, reason);
       }
     }
   );
@@ -379,6 +378,9 @@ export function createServer(): McpServer {
     'Fine-tune closest approach to target. Requires target to be set first.',
     {
       targetDistance: z.number().describe('Target periapsis (bodies) or closest approach (vessels) in meters'),
+      minLeadTime: z.number()
+        .default(300)
+        .describe('Minimum seconds before burn (default: 300s). Node rejected if too soon.'),
       includeTelemetry: z.boolean()
         .default(false)
         .describe('Include ship telemetry in response (slower but more info)'),
@@ -390,36 +392,29 @@ export function createServer(): McpServer {
         const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
         const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.courseCorrection(args.targetDistance);
+        const result = await maneuver.courseCorrection(args.targetDistance, args.minLeadTime);
 
         if (!result.success) {
-          return {
-            content: [{ type: 'text', text: `Error: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('course_correct', `Course correction failed: ${result.error}`, result.error ?? 'Unknown error');
         }
 
         let text = `Course correction planned!\n` +
               `  Target approach: ${args.targetDistance / 1000} km\n` +
               `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
-              `Use execute_node to execute.`;
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`;
 
         if (args.includeTelemetry) {
-          text += '\n\n' + await getShipTelemetry(conn);
+          text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
         }
 
-        return {
-          content: [{ type: 'text', text }],
-        };
+        return successResponse('course_correct', text, {
+          targetDistance: args.targetDistance,
+          deltaV: result.deltaV,
+          timeToNode: result.timeToNode
+        });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('course_correct', `Course correction failed: ${reason}`, reason);
       }
     }
   );
@@ -443,31 +438,25 @@ export function createServer(): McpServer {
         const result = await maneuver.changeInclination(args.newInclination, args.timeRef);
 
         if (!result.success) {
-          return {
-            content: [{ type: 'text', text: `Error: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('change_inc', `Inclination change failed: ${result.error}`, result.error ?? 'Unknown error');
         }
 
-        return {
-          content: [{
-            type: 'text',
-            text: `Inclination change planned!\n` +
-                  `  Target inclination: ${args.newInclination}°\n` +
-                  `  Execution point: ${args.timeRef}\n` +
-                  `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                  `  Time to node: ${result.timeToNode?.toFixed(0)} s\n\n` +
-                  `Use execute_node to execute.`
-          }],
-        };
+        return successResponse('change_inc',
+          `Inclination change planned!\n` +
+            `  Target inclination: ${args.newInclination}°\n` +
+            `  Execution point: ${args.timeRef}\n` +
+            `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+            `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+          {
+            targetInclination: args.newInclination,
+            timeRef: args.timeRef,
+            deltaV: result.deltaV,
+            timeToNode: result.timeToNode
+          }
+        );
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('change_inc', `Inclination change failed: ${reason}`, reason);
       }
     }
   );
@@ -491,30 +480,26 @@ export function createServer(): McpServer {
         const result = await ellipticize(conn, args.periapsis, args.apoapsis, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Ellipticize node created:\n` +
-                `  Target Pe: ${args.periapsis / 1000} km\n` +
-                `  Target Ap: ${args.apoapsis / 1000} km\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('ellipticize',
+            `Orbit reshape planned!\n` +
+              `  Target Pe: ${args.periapsis / 1000} km\n` +
+              `  Target Ap: ${args.apoapsis / 1000} km\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetPe: args.periapsis,
+              targetAp: args.apoapsis,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('ellipticize', `Orbit reshape failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('ellipticize', `Orbit reshape failed: ${reason}`, reason);
       }
     }
   );
@@ -536,29 +521,24 @@ export function createServer(): McpServer {
         const result = await changeSemiMajorAxis(conn, args.semiMajorAxis, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Semi-major axis change node created:\n` +
-                `  Target SMA: ${args.semiMajorAxis / 1000} km\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('change_sma',
+            `SMA change planned!\n` +
+              `  Target SMA: ${args.semiMajorAxis / 1000} km\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetSMA: args.semiMajorAxis,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('change_sma', `SMA change failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('change_sma', `SMA change failed: ${reason}`, reason);
       }
     }
   );
@@ -580,29 +560,24 @@ export function createServer(): McpServer {
         const result = await changeEccentricity(conn, args.eccentricity, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Eccentricity change node created:\n` +
-                `  Target eccentricity: ${args.eccentricity}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('change_ecc',
+            `Eccentricity change planned!\n` +
+              `  Target eccentricity: ${args.eccentricity}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetEccentricity: args.eccentricity,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('change_ecc', `Eccentricity change failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('change_ecc', `Eccentricity change failed: ${reason}`, reason);
       }
     }
   );
@@ -624,29 +599,24 @@ export function createServer(): McpServer {
         const result = await changeLAN(conn, args.lan, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `LAN change node created:\n` +
-                `  Target LAN: ${args.lan}°\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('change_lan',
+            `LAN change planned!\n` +
+              `  Target LAN: ${args.lan}°\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetLAN: args.lan,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('change_lan', `LAN change failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('change_lan', `LAN change failed: ${reason}`, reason);
       }
     }
   );
@@ -668,29 +638,24 @@ export function createServer(): McpServer {
         const result = await changeLongitudeOfPeriapsis(conn, args.longitude, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Longitude of periapsis change node created:\n` +
-                `  Target longitude: ${args.longitude}°\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('change_lpe',
+            `Periapsis longitude change planned!\n` +
+              `  Target longitude: ${args.longitude}°\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetLongitude: args.longitude,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('change_lpe', `Periapsis longitude change failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('change_lpe', `Periapsis longitude change failed: ${reason}`, reason);
       }
     }
   );
@@ -711,29 +676,23 @@ export function createServer(): McpServer {
         const result = await matchPlane(conn, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Plane match node created:\n` +
-                `  Execution point: ${args.timeRef}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('match_planes',
+            `Plane match planned!\n` +
+              `  Execution point: ${args.timeRef}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('match_planes', `Plane match failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('match_planes', `Plane match failed: ${reason}`, reason);
       }
     }
   );
@@ -754,29 +713,23 @@ export function createServer(): McpServer {
         const result = await killRelativeVelocity(conn, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Kill relative velocity node created:\n` +
-                `  Execution point: ${args.timeRef}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('match_velocities',
+            `Velocity match planned!\n` +
+              `  Execution point: ${args.timeRef}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('match_velocities', `Velocity match failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('match_velocities', `Velocity match failed: ${reason}`, reason);
       }
     }
   );
@@ -799,29 +752,25 @@ export function createServer(): McpServer {
         const result = await resonantOrbit(conn, args.numerator, args.denominator, args.timeRef);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Resonant orbit node created:\n` +
-                `  Resonance: ${args.numerator}:${args.denominator}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('resonant_orbit',
+            `Resonant orbit planned!\n` +
+              `  Resonance: ${args.numerator}:${args.denominator}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              numerator: args.numerator,
+              denominator: args.denominator,
+              timeRef: args.timeRef,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('resonant_orbit', `Resonant orbit failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('resonant_orbit', `Resonant orbit failed: ${reason}`, reason);
       }
     }
   );
@@ -840,29 +789,23 @@ export function createServer(): McpServer {
         const result = await returnFromMoon(conn, args.targetPeriapsis);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Return from moon node created:\n` +
-                `  Target periapsis: ${args.targetPeriapsis / 1000} km\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('return_from_moon',
+            `Moon return planned!\n` +
+              `  Target periapsis: ${args.targetPeriapsis / 1000} km\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              targetPeriapsis: args.targetPeriapsis,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('return_from_moon', `Moon return failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('return_from_moon', `Moon return failed: ${reason}`, reason);
       }
     }
   );
@@ -883,29 +826,23 @@ export function createServer(): McpServer {
         const result = await interplanetaryTransfer(conn, args.waitForPhaseAngle);
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Interplanetary transfer node created:\n` +
-                `  Wait for phase angle: ${args.waitForPhaseAngle}\n` +
-                `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-                `  Time to node: ${result.timeToNode?.toFixed(0)} s`
-            }],
-          };
+          return successResponse('interplanetary',
+            `Interplanetary transfer planned!\n` +
+              `  Wait for phase angle: ${args.waitForPhaseAngle}\n` +
+              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
+              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
+            {
+              waitForPhaseAngle: args.waitForPhaseAngle,
+              deltaV: result.deltaV,
+              timeToNode: result.timeToNode
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Failed to create maneuver node: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('interplanetary', `Interplanetary transfer failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('interplanetary', `Interplanetary transfer failed: ${reason}`, reason);
       }
     }
   );
@@ -934,26 +871,16 @@ export function createServer(): McpServer {
             `  Nodes executed: ${result.nodesExecuted}`;
 
           if (args.includeTelemetry) {
-            text += '\n\n' + await getShipTelemetry(conn);
+            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
           }
 
-          return {
-            content: [{ type: 'text', text }],
-          };
+          return successResponse('execute_node', text, { nodesExecuted: result.nodesExecuted });
         } else {
-          return {
-            content: [{ type: 'text', text: `Node execution failed: ${result.error}\n  Nodes executed: ${result.nodesExecuted}` }],
-            isError: true,
-          };
+          return errorResponse('execute_node', `Node execution failed: ${result.error}\n  Nodes executed: ${result.nodesExecuted}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('execute_node', `Node execution failed: ${reason}`, reason);
       }
     }
   );
@@ -982,24 +909,20 @@ export function createServer(): McpServer {
           autoWarp: true,
         });
 
-        return {
-          content: [{
-            type: 'text',
-            text: `Launch initiated!\n` +
-              `  Target altitude: ${args.altitude / 1000} km\n` +
-              `  Target inclination: ${args.inclination}°\n` +
-              `  Skip circularization: ${args.skipCircularization}\n\n` +
-              `MechJeb ascent guidance enabled. Use ascent_status to monitor progress.`
-          }],
-        };
+        return successResponse('launch',
+          `Launch initiated!\n` +
+            `  Target altitude: ${args.altitude / 1000} km\n` +
+            `  Target inclination: ${args.inclination}°\n` +
+            `  Skip circularization: ${args.skipCircularization}`,
+          {
+            targetAltitude: args.altitude,
+            inclination: args.inclination,
+            skipCircularization: args.skipCircularization
+          }
+        );
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('launch', `Launch failed: ${reason}`, reason);
       }
     }
   );
@@ -1066,26 +989,26 @@ export function createServer(): McpServer {
           unknown: 'Unknown phase',
         };
 
-        return {
-          content: [{
-            type: 'text',
-            text: `Ascent Status:\n` +
-              `  Phase: ${progress.phase} (${phaseDescriptions[progress.phase] || progress.phase})\n` +
-              `  Altitude: ${Math.round(progress.altitude / 1000)} km\n` +
-              `  Apoapsis: ${Math.round(progress.apoapsis / 1000)} km\n` +
-              `  Periapsis: ${Math.round(progress.periapsis / 1000)} km\n` +
-              `  MechJeb enabled: ${progress.enabled}\n` +
-              `  Ship status: ${progress.shipStatus}`
-          }],
-        };
+        return successResponse('ascent_status',
+          `Ascent Status:\n` +
+            `  Phase: ${progress.phase} (${phaseDescriptions[progress.phase] || progress.phase})\n` +
+            `  Altitude: ${Math.round(progress.altitude / 1000)} km\n` +
+            `  Apoapsis: ${Math.round(progress.apoapsis / 1000)} km\n` +
+            `  Periapsis: ${Math.round(progress.periapsis / 1000)} km\n` +
+            `  MechJeb enabled: ${progress.enabled}\n` +
+            `  Ship status: ${progress.shipStatus}`,
+          {
+            phase: progress.phase,
+            altitude: progress.altitude,
+            apoapsis: progress.apoapsis,
+            periapsis: progress.periapsis,
+            mechjebEnabled: progress.enabled,
+            shipStatus: progress.shipStatus
+          }
+        );
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('ascent_status', `Ascent status failed: ${reason}`, reason);
       }
     }
   );
@@ -1109,20 +1032,10 @@ export function createServer(): McpServer {
           await conn.execute('SET ADDONS:MJ:ASCENTGUIDANCE:ENABLED TO FALSE.');
         }
 
-        return {
-          content: [{
-            type: 'text',
-            text: 'Ascent guidance disabled. Manual control restored.'
-          }],
-        };
+        return successResponse('abort_ascent', 'Ascent guidance disabled.');
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('abort_ascent', `Abort ascent failed: ${reason}`, reason);
       }
     }
   );
@@ -1142,55 +1055,61 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
-        let cmd: string;
+        // Build the SET TARGET command based on type
+        let setCmd: string;
         if (args.type === 'body') {
-          cmd = `SET TARGET TO BODY("${args.name}").`;
+          setCmd = `SET TARGET TO BODY("${args.name}").`;
         } else if (args.type === 'vessel') {
-          cmd = `SET TARGET TO VESSEL("${args.name}").`;
+          setCmd = `SET TARGET TO VESSEL("${args.name}").`;
         } else {
-          cmd = `SET TARGET TO "${args.name}".`;
+          setCmd = `SET TARGET TO "${args.name}".`;
         }
 
-        const result = await conn.execute(cmd, 5000);
+        // Single atomic kOS command that:
+        // 1. Sets the target
+        // 2. Waits up to 10s for HASTARGET to become true (with timeout escape)
+        // 3. Prints result with target info if successful
+        // Note: Use | separator to avoid matching command echo (which contains TARGET:NAME)
+        const atomicCmd = [
+          setCmd,
+          'SET _T0 TO TIME:SECONDS.',
+          'UNTIL HASTARGET OR TIME:SECONDS > _T0 + 10 { WAIT 0.25. }',
+          'IF HASTARGET { PRINT "TARGET_OK|" + TARGET:NAME + "|" + TARGET:TYPENAME. }',
+          'IF NOT HASTARGET { PRINT "TARGET_FAILED". }',
+        ].join(' ');
 
-        // Verify target was set by checking HASTARGET directly
-        const verifyResult = await conn.execute('PRINT HASTARGET.');
+        const result = await conn.execute(atomicCmd, 15000);
+        const output = result.output?.trim() ?? '';
 
-        if (!verifyResult.output.includes('True')) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Failed to set target "${args.name}"\n` +
-                `The target may not exist or may not be loaded.`
-            }],
-            isError: true,
-          };
+        // Check for success FIRST (command echo contains "TARGET_FAILED" text, so can't check that first)
+        const okMatch = output.match(/TARGET_OK\|([^|]+)\|(\w+)/);
+        if (okMatch) {
+          const [, targetName, targetType] = okMatch;
+          return successResponse('set_target',
+            `Target set successfully!\n\nName: ${targetName}\nType: ${targetType}`,
+            { name: targetName, type: targetType }
+          );
         }
 
-        // Get target info
-        const infoResult = await conn.execute(
-          'PRINT "Target: " + TARGET:NAME + " (" + TARGET:TYPENAME + ")". ' +
-          'IF TARGET:TYPENAME = "Body" { ' +
-          '  PRINT "Radius: " + ROUND(TARGET:RADIUS / 1000, 1) + " km". ' +
-          '} ELSE IF TARGET:TYPENAME = "Vessel" { ' +
-          '  PRINT "Distance: " + ROUND(TARGET:DISTANCE / 1000, 1) + " km". ' +
-          '}'
-        );
+        // Check for explicit failure (only in actual output, not command echo)
+        // The actual TARGET_FAILED output appears at the end, after the command echo
+        if (output.endsWith('TARGET_FAILED') || output.match(/TARGET_FAILED[^"]*$/)) {
+          return errorResponse('set_target',
+            `Failed to set target "${args.name}". The target may not exist or may not be loaded.`,
+            'Target not found or not loaded'
+          );
+        }
 
-        return {
-          content: [{
-            type: 'text',
-            text: `Target set successfully!\n\n${infoResult.output.trim()}`
-          }],
-        };
+        // Fallback: command ran but unclear result - check for errors
+        if (output.toLowerCase().includes('error')) {
+          return errorResponse('set_target', `Failed to set target "${args.name}".\n${output}`, output);
+        }
+
+        // No clear marker but no error - assume success
+        return successResponse('set_target', 'Target set successfully!', { name: args.name, type: args.type });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('set_target', `Target set failed: ${reason}`, reason);
       }
     }
   );
@@ -1223,28 +1142,13 @@ export function createServer(): McpServer {
         );
 
         if (result.output.includes('No target set')) {
-          return {
-            content: [{
-              type: 'text',
-              text: 'No target currently set.\n\nUse set_target to set a target.'
-            }],
-          };
+          return successResponse('get_target', 'No target currently set.', { hasTarget: false });
         }
 
-        return {
-          content: [{
-            type: 'text',
-            text: result.output.trim()
-          }],
-        };
+        return successResponse('get_target', result.output.trim(), { hasTarget: true });
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('get_target', `Get target failed: ${reason}`, reason);
       }
     }
   );
@@ -1262,20 +1166,10 @@ export function createServer(): McpServer {
 
         await conn.execute('UNSET TARGET.');
 
-        return {
-          content: [{
-            type: 'text',
-            text: 'Target cleared successfully.'
-          }],
-        };
+        return successResponse('clear_target', 'Target cleared successfully.');
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('clear_target', `Clear target failed: ${reason}`, reason);
       }
     }
   );
@@ -1370,28 +1264,23 @@ export function createServer(): McpServer {
         }
 
         if (result.success) {
-          return {
-            content: [{
-              type: 'text',
-              text: `Warp complete!\n` +
-                `  Body: ${result.body}\n` +
-                `  Altitude: ${(result.altitude || 0) / 1000} km`
-            }],
-          };
+          return successResponse('warp',
+            `Warp complete!\n` +
+              `  Body: ${result.body}\n` +
+              `  Altitude: ${(result.altitude || 0) / 1000} km`,
+            {
+              target: args.target,
+              leadTime: args.leadTime,
+              body: result.body,
+              altitude: result.altitude
+            }
+          );
         } else {
-          return {
-            content: [{ type: 'text', text: `Warp failed: ${result.error}` }],
-            isError: true,
-          };
+          return errorResponse('warp', `Warp failed: ${result.error}`, result.error ?? 'Unknown error');
         }
       } catch (error) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Error: ${error instanceof Error ? error.message : String(error)}`,
-          }],
-          isError: true,
-        };
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('warp', `Warp failed: ${reason}`, reason);
       }
     }
   );
@@ -1411,19 +1300,12 @@ export function createServer(): McpServer {
       const result = await quickload(conn, args.saveName);
 
       if (result.success) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Quickload initiated for save: ${result.saveName}\n\n` +
-              `Note: Connection will reset after load completes. ` +
-              `Connection will auto-reconnect on next tool call.`
-          }],
-        };
+        return successResponse('load_save',
+          `Quickload initiated: ${result.saveName}`,
+          { saveName: result.saveName }
+        );
       } else {
-        return {
-          content: [{ type: 'text', text: `Error: ${result.error}` }],
-          isError: true,
-        };
+        return errorResponse('load_save', `Load save failed: ${result.error}`, result.error ?? 'Unknown error');
       }
     }
   );
@@ -1444,17 +1326,9 @@ export function createServer(): McpServer {
         const savesList = result.saves.length > 0
           ? result.saves.map(s => `  - ${s}`).join('\n')
           : '  (no quicksaves found)';
-        return {
-          content: [{
-            type: 'text',
-            text: `Available quicksaves:\n${savesList}`
-          }],
-        };
+        return successResponse('list_saves', `Available quicksaves:\n${savesList}`, { saves: result.saves });
       } else {
-        return {
-          content: [{ type: 'text', text: `Error: ${result.error}` }],
-          isError: true,
-        };
+        return errorResponse('list_saves', `List saves failed: ${result.error}`, result.error ?? 'Unknown error');
       }
     }
   );
@@ -1473,17 +1347,9 @@ export function createServer(): McpServer {
       const result = await quicksave(conn, args.saveName);
 
       if (result.success) {
-        return {
-          content: [{
-            type: 'text',
-            text: `Quicksave created: ${result.saveName}`
-          }],
-        };
+        return successResponse('quicksave', `Quicksave created: ${result.saveName}`, { saveName: result.saveName });
       } else {
-        return {
-          content: [{ type: 'text', text: `Error: ${result.error}` }],
-          isError: true,
-        };
+        return errorResponse('quicksave', `Quicksave failed: ${result.error}`, result.error ?? 'Unknown error');
       }
     }
   );

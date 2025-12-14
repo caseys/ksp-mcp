@@ -68,11 +68,9 @@ export async function discoverModules(conn: KosConnection): Promise<MechJebModul
   }
 
   // Get version
-  await delay(500);
   const version = await getMechJebVersion(conn);
 
   // Query MJ suffixes to see what modules exist
-  await delay(500);
   const result = await conn.execute('PRINT ADDONS:MJ:SUFFIXNAMES.');
   const suffixes = parseSuffixList(result.output);
 
