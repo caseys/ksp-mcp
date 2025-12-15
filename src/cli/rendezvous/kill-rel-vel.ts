@@ -30,17 +30,16 @@ async function main() {
     await conn.connect();
     console.log('   Connected!\n');
 
-    // Set target using library
+    // Set target using library ('auto' tries body first, then vessel)
     console.log(`2. Setting target to ${targetName}...`);
     const maneuver = new ManeuverProgram(conn);
-    // Try as body first, fall back to vessel
-    let success = await maneuver.setTarget(targetName, 'body');
-    if (!success) {
-      success = await maneuver.setTarget(targetName, 'vessel');
-    }
+    const targetResult = await maneuver.setTarget(targetName, 'auto');
 
-    const currentTarget = await maneuver.getTarget();
-    console.log(`   Target set to: ${currentTarget || 'none'}\n`);
+    if (!targetResult.success) {
+      console.log(`   ERROR: ${targetResult.error ?? 'Failed to set target'}`);
+      return;
+    }
+    console.log(`   Target set to: ${targetResult.name} (${targetResult.type})\n`);
 
     // Check relative velocity
     console.log('3. Checking relative velocity...');

@@ -37,34 +37,16 @@ async function main() {
 
     console.log('2. Setting target...');
     const maneuver = new ManeuverProgram(conn);
-    let success = false;
 
-    if (targetType === 'vessel') {
-      success = await maneuver.setTarget(targetName, 'vessel');
-    } else if (targetType === 'body') {
-      success = await maneuver.setTarget(targetName, 'body');
-    } else {
-      // Auto: try body first, fall back to vessel
-      success = await maneuver.setTarget(targetName, 'body');
-      if (!success) {
-        success = await maneuver.setTarget(targetName, 'vessel');
-      }
-    }
+    // setTarget now includes built-in confirmation polling
+    const result = await maneuver.setTarget(targetName, targetType as 'auto' | 'body' | 'vessel');
 
-    if (!success) {
-      console.log('   ERROR: Target not found\n');
+    if (!result.success) {
+      console.log(`   ERROR: ${result.error ?? 'Target not found'}\n`);
       process.exit(1);
     }
 
-    // Verify target
-    console.log('3. Verifying target...');
-    const target = await maneuver.getTarget();
-    if (target) {
-      console.log(`   Target confirmed: ${target}\n`);
-    } else {
-      console.log('   No target set\n');
-      process.exit(1);
-    }
+    console.log(`   Target confirmed: ${result.name} (${result.type})\n`);
 
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : String(error));

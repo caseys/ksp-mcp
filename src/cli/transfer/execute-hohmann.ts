@@ -32,12 +32,15 @@ async function main() {
     console.log(`   Periapsis: ${(orbit.periapsis / 1000).toFixed(1)} km`);
     console.log(`   Apoapsis: ${(orbit.apoapsis / 1000).toFixed(1)} km\n`);
 
-    // Set target first
+    // Set target first (setTarget includes confirmation)
     console.log('3. Setting target to Mun...');
     const maneuver = new ManeuverProgram(conn);
-    await maneuver.setTarget('Mun', 'body');
-    const target = await maneuver.getTarget();
-    console.log(`   Target: ${target || 'none'}\n`);
+    const targetResult = await maneuver.setTarget('Mun', 'body');
+    if (!targetResult.success) {
+      console.log(`   ERROR: ${targetResult.error ?? 'Failed to set target'}`);
+      return;
+    }
+    console.log(`   Target: ${targetResult.name} (${targetResult.type})\n`);
 
     // Create Hohmann transfer using library
     console.log('4. Creating transfer node...');

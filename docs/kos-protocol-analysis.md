@@ -198,6 +198,32 @@ ee 80 94 ee 80 94 ee 80 94  = scroll up 3 lines
 - TELEPORTCURSOR positions text at specific row/col
 
 ### Layer 3: Application Output
+
+## Command Completion Strategy (Sentinel-based)
+
+Commit `b580d62d8936221f33926aafe947df9d99769243` introduced an explicit sentinel workflow inside `KosConnection.execute()` so callers no longer have to guess when kOS finished running a command. The flow is:
+
+1. Drain any pending bytes from the transport to start clean.
+2. Send the user command exactly as provided.
+3. Immediately send a second command: `PRINT "__MCP_DONE_<token>".` where `<token>` is a random hex string unique per request.
+4. Wait for a line that contains only the sentinel token (regex built by `buildSentinelPattern`). This indicates kOS executed both commands and flushed the output.
+5. If the sentinel is never seen within the timeout, fall back to the classic prompt-based wait (`/>\s*$/`) and finally to `read()` of whatever remains buffered.
+6. Strip command echoes, prompt text, Unicode terminal commands, and the sentinel line itself during `cleanOutput()` so the caller receives only the payload from the original command.
+
+### Why Sentinels Matter
+
+- kOS frequently emits scrollback or partial prompts; waiting on `>` or a fixed delay was unreliable.
+- Long-running commands (e.g., MechJeb planners) can produce intermittent output; the sentinel gives a deterministic "done" marker regardless of timing.
+- Because the sentinel is injected only after the user command, we know that all earlier output (including any intermediate `PRINT`s inside the command) has already been flushed before the sentinel line appears.
+
+### Best Practices for New Code
+
+- **Always** go through `KosConnection.execute()` (or higher-level helpers) so the sentinel handling stays centralized. Do not call the transport directly unless you also replicate the sentinel/prompt wait logic.
+- When you need to run multiple kOS statements, wrap them into a single atomic string (e.g., `'SET X TO 1. PRINT X.'`), send it once, and let the sentinel follow automatically. Avoid issuing multiple `execute()` calls in a tight loop when the statements depend on each other; batching them ensures the sentinel corresponds to the complete block.
+- If a command intentionally disconnects or suspends kOS output (e.g., quickload, reboot), pass `{ fireAndForget: true }` so `execute()` skips sentinel injection and returns immediately after sending.
+- When parsing responses, remember that `result.output` has already had the sentinel and echoes removed, but echoed text from inside multi-line commands may still appear. Prefer structured markers (e.g., `PRINT "KEY|" + VALUE.`) and parse line-by-line, ignoring any lines that still contain quotes to avoid command-echo contamination.
+
+Following the sentinel pattern keeps higher-level features (like new ManeuverProgram helpers) from regressing into prompt-based heuristics. If future contributors need to tweak how completion works, they only need to update `KosConnection`.
 - Plain text with CRLF line endings
 - Command echo followed by result
 - This is what we want to parse!

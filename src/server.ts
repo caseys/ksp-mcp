@@ -1089,59 +1089,18 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const maneuver = new ManeuverProgram(conn);
 
-        // Build the SET TARGET command based on type
-        let setCmd: string;
-        if (args.type === 'body') {
-          setCmd = `SET TARGET TO BODY("${args.name}").`;
-        } else if (args.type === 'vessel') {
-          setCmd = `SET TARGET TO VESSEL("${args.name}").`;
-        } else {
-          setCmd = `SET TARGET TO "${args.name}".`;
+        const result = await maneuver.setTarget(args.name, args.type);
+        if (!result.success) {
+          const errorMsg = result.error ?? `Failed to set target "${args.name}"`;
+          return errorResponse('set_target', errorMsg, errorMsg);
         }
 
-        // Single atomic kOS command that:
-        // 1. Sets the target
-        // 2. Waits up to 10s for HASTARGET to become true (with timeout escape)
-        // 3. Prints result with target info if successful
-        // Note: Use | separator to avoid matching command echo (which contains TARGET:NAME)
-        const atomicCmd = [
-          setCmd,
-          'SET _T0 TO TIME:SECONDS.',
-          'UNTIL HASTARGET OR TIME:SECONDS > _T0 + 10 { WAIT 0.25. }',
-          'IF HASTARGET { PRINT "TARGET_OK|" + TARGET:NAME + "|" + TARGET:TYPENAME. }',
-          'IF NOT HASTARGET { PRINT "TARGET_FAILED". }',
-        ].join(' ');
-
-        const result = await conn.execute(atomicCmd, 15000);
-        const output = result.output?.trim() ?? '';
-
-        // Check for success FIRST (command echo contains "TARGET_FAILED" text, so can't check that first)
-        const okMatch = output.match(/TARGET_OK\|([^|]+)\|(\w+)/);
-        if (okMatch) {
-          const [, targetName, targetType] = okMatch;
-          return successResponse('set_target',
-            `Target set successfully!\n\nName: ${targetName}\nType: ${targetType}`,
-            { name: targetName, type: targetType }
-          );
-        }
-
-        // Check for explicit failure (only in actual output, not command echo)
-        // The actual TARGET_FAILED output appears at the end, after the command echo
-        if (output.endsWith('TARGET_FAILED') || output.match(/TARGET_FAILED[^"]*$/)) {
-          return errorResponse('set_target',
-            `Failed to set target "${args.name}". The target may not exist or may not be loaded.`,
-            'Target not found or not loaded'
-          );
-        }
-
-        // Fallback: command ran but unclear result - check for errors
-        if (output.toLowerCase().includes('error')) {
-          return errorResponse('set_target', `Failed to set target "${args.name}".\n${output}`, output);
-        }
-
-        // No clear marker but no error - assume success
-        return successResponse('set_target', 'Target set successfully!', { name: args.name, type: args.type });
+        return successResponse('set_target',
+          `Target set successfully!\n\nName: ${result.name}\nType: ${result.type}`,
+          { name: result.name, type: result.type }
+        );
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         return errorResponse('set_target', `Target set failed: ${reason}`, reason);
@@ -1159,28 +1118,14 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const maneuver = new ManeuverProgram(conn);
 
-        const result = await conn.execute(
-          'IF HASTARGET { ' +
-          '  PRINT "Target: " + TARGET:NAME. ' +
-          '  PRINT "Type: " + TARGET:TYPENAME. ' +
-          '  PRINT "Distance: " + ROUND(TARGET:DISTANCE / 1000, 1) + " km". ' +
-          '  IF TARGET:TYPENAME = "Body" { ' +
-          '    PRINT "Radius: " + ROUND(TARGET:RADIUS / 1000, 1) + " km". ' +
-          '    PRINT "Orbital altitude: " + ROUND(TARGET:ALTITUDE / 1000, 1) + " km". ' +
-          '  } ELSE IF TARGET:TYPENAME = "Vessel" { ' +
-          '    PRINT "Relative velocity: " + ROUND(TARGET:VELOCITY:ORBIT:MAG, 1) + " m/s". ' +
-          '  } ' +
-          '} ELSE { ' +
-          '  PRINT "No target set". ' +
-          '}'
-        );
-
-        if (result.output.includes('No target set')) {
+        const info = await maneuver.getTargetInfo();
+        if (!info.hasTarget) {
           return successResponse('get_target', 'No target currently set.', { hasTarget: false });
         }
 
-        return successResponse('get_target', result.output.trim(), { hasTarget: true });
+        return successResponse('get_target', info.details ?? '', { ...info });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         return errorResponse('get_target', `Get target failed: ${reason}`, reason);
@@ -1199,9 +1144,19 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
 
-        await conn.execute('UNSET TARGET.');
+        const maneuver = new ManeuverProgram(conn);
+        const result = await maneuver.clearTarget();
 
-        return successResponse('clear_target', 'Target cleared successfully.');
+        if (result.cleared) {
+          return successResponse('clear_target', 'Target cleared successfully.');
+        }
+
+        // Command executed but target not cleared - known kOS bug
+        const message = result.warning
+          ? `Clear target command sent.\n\nWARNING: ${result.warning}`
+          : 'Clear target command sent, but target may still be set.';
+
+        return successResponse('clear_target', message, { cleared: false, warning: result.warning });
       } catch (error) {
         const reason = error instanceof Error ? error.message : String(error);
         return errorResponse('clear_target', `Clear target failed: ${reason}`, reason);

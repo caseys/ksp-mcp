@@ -35,12 +35,15 @@ async function main() {
     await conn.connect();
     console.log('   Connected!\n');
 
-    // Set target using library
+    // Set target using library (setTarget includes confirmation)
     console.log('2. Setting target...');
     const maneuver = new ManeuverProgram(conn);
-    await maneuver.setTarget(targetName, 'body');
-    const target = await maneuver.getTarget();
-    console.log(`   Target: ${target || 'none'}\n`);
+    const targetResult = await maneuver.setTarget(targetName, 'body');
+    if (!targetResult.success) {
+      console.log(`   ERROR: ${targetResult.error ?? 'Failed to set target'}`);
+      return;
+    }
+    console.log(`   Target: ${targetResult.name} (${targetResult.type})\n`);
 
     // Show current state
     console.log('3. Current position...');

@@ -8,7 +8,7 @@ export { MechJebClient } from './mechjeb-client.js';
 // Programs
 export { AscentProgram, AscentHandle } from './programs/ascent.js';
 export { ManeuverProgram } from './programs/maneuver.js';
-export type { ManeuverResult } from './programs/maneuver.js';
+export type { ManeuverResult, SetTargetResult, GetTargetInfo, ClearTargetResult } from './programs/maneuver.js';
 
 // Node execution
 export {

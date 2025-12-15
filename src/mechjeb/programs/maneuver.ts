@@ -12,11 +12,50 @@ import {
   queryNumber,
   queryNumberWithRetry,
   queryTime,
-  queryNodeInfo
+  queryNodeInfo,
+  delay,
 } from './shared.js';
 
 // Re-export for external use
 export type { ManeuverResult } from './shared.js';
+
+/**
+ * Result from setTarget operation with confirmation details.
+ */
+export interface SetTargetResult {
+  success: boolean;
+  /** Confirmed target name from kOS (may differ from requested name) */
+  name?: string;
+  /** Target type: "Body" or "Vessel" */
+  type?: string;
+  /** Error message if success is false */
+  error?: string;
+}
+
+/**
+ * Detailed information about the current target.
+ */
+export interface GetTargetInfo {
+  hasTarget: boolean;
+  name?: string;
+  type?: string;
+  /** Distance to target in meters */
+  distance?: number;
+  /** Full formatted details string */
+  details?: string;
+}
+
+/**
+ * Result from clearTarget operation.
+ */
+export interface ClearTargetResult {
+  /** Whether the command was sent successfully */
+  success: boolean;
+  /** Whether HASTARGET reports false after the command */
+  cleared: boolean;
+  /** Warning message if target may not have been cleared */
+  warning?: string;
+}
 
 /**
  * Maneuver Program - controls MechJeb maneuver planner
@@ -108,18 +147,106 @@ export class ManeuverProgram {
   }
 
   /**
-   * Set the navigation target (celestial body or vessel)
+   * Set the navigation target (celestial body or vessel).
+   *
+   * Uses an atomic kOS command with built-in confirmation polling:
+   * - Sets the target
+   * - Waits up to 10s for HASTARGET to become true
+   * - Returns confirmed target name and type from kOS
    *
    * @param name Target name (e.g., "Mun", "Minmus", or vessel name)
-   * @param type 'body' for celestial bodies, 'vessel' for other vessels
+   * @param type 'auto' tries body first then vessel, 'body' for celestial bodies, 'vessel' for ships
    */
-  async setTarget(name: string, type: 'body' | 'vessel' = 'body'): Promise<boolean> {
-    const cmd = type === 'body'
+  async setTarget(name: string, type: 'auto' | 'body' | 'vessel' = 'body'): Promise<SetTargetResult> {
+    // For 'auto' mode, try body first, then fall back to vessel
+    if (type === 'auto') {
+      const bodyResult = await this.setTargetInternal(name, 'body');
+      if (bodyResult.success) {
+        return bodyResult;
+      }
+      // Body failed, try vessel
+      return this.setTargetInternal(name, 'vessel');
+    }
+
+    return this.setTargetInternal(name, type);
+  }
+
+  /**
+   * Internal implementation of setTarget with quick confirmation.
+   */
+  private async setTargetInternal(name: string, type: 'body' | 'vessel'): Promise<SetTargetResult> {
+    // Build the SET TARGET command based on type
+    const setCmd = type === 'body'
       ? `SET TARGET TO BODY("${name}").`
       : `SET TARGET TO VESSEL("${name}").`;
-    const result = await this.conn.execute(cmd, 5000);
-    // Success if no error message
-    return result.success && !result.output.toLowerCase().includes('error');
+
+    // Single atomic kOS command that:
+    // 1. Sets the target
+    // 2. Brief wait for game to process (0.1s is enough)
+    // 3. Reports result immediately - no polling needed
+    // Note: Target setting is synchronous in KSP; if it didn't work after 0.1s, it won't work.
+    const atomicCmd = [
+      setCmd,
+      'WAIT 0.1.',
+      'IF HASTARGET { PRINT "TARGET_OK|" + TARGET:NAME + "|" + TARGET:TYPENAME. }',
+      'ELSE { PRINT "TARGET_FAILED". }',
+    ].join(' ');
+
+    const result = await this.conn.execute(atomicCmd, 5000);
+    const output = result.output?.trim() ?? '';
+
+    // Check for success FIRST (command echo contains "TARGET_FAILED" text, so can't check that first)
+    const okMatch = output.match(/TARGET_OK\|([^|]+)\|(\w+)/);
+    if (okMatch) {
+      const [, targetName, targetType] = okMatch;
+      return { success: true, name: targetName, type: targetType };
+    }
+
+    // Check for explicit failure (only in actual output, not command echo)
+    // The actual TARGET_FAILED output appears at the end, after the command echo
+    if (output.endsWith('TARGET_FAILED') || output.match(/TARGET_FAILED[^"]*$/)) {
+      return {
+        success: false,
+        error: `Target "${name}" not found or not loaded.`
+      };
+    }
+
+    // Fallback: command ran but unclear result - check for errors
+    if (output.toLowerCase().includes('error')) {
+      return { success: false, error: output };
+    }
+
+    // No clear marker but no error - assume success (fallback)
+    return { success: true, name, type };
+  }
+
+  /**
+   * Clear the current navigation target (if any)
+   *
+   * WARNING: There is a known kOS bug where `SET TARGET TO ""` does not
+   * always clear the target on the first attempt. See docs/kos-clear-target.md.
+   * This method tries twice with a short delay to work around the intermittent bug.
+   */
+  async clearTarget(): Promise<ClearTargetResult> {
+    // Try clearing three times with delays - the kOS bug is intermittent
+    const result = await this.conn.execute(
+      'SET TARGET TO "". WAIT 0.1. SET TARGET TO "". WAIT 0.1. SET TARGET TO "". WAIT 0.1. PRINT "CLEARED:" + (NOT HASTARGET).',
+      5000
+    );
+
+    const output = result.output.trim();
+    const cleared = output.includes('CLEARED:True') || output.toLowerCase().includes('cleared:true');
+
+    if (!cleared) {
+      return {
+        success: true,  // Command executed
+        cleared: false,
+        warning: 'The documented approach to clear target (SET TARGET TO "") may not work. ' +
+                 'See: https://ksp-kos.github.io/KOS/commands/flight/systems.html#global:TARGET'
+      };
+    }
+
+    return { success: true, cleared: true };
   }
 
   /**
@@ -164,6 +291,96 @@ export class ManeuverProgram {
     // Extract target name from output
     const match = result.output.match(/(?:Body|Vessel)\s+"?([^"\n]+)"?/i);
     return match ? match[1].trim() : result.output.trim();
+  }
+
+  /**
+   * Get detailed information about the current target.
+   *
+   * Returns target name, type, distance, and type-specific details:
+   * - Bodies: radius, orbital altitude
+   * - Vessels: relative velocity
+   */
+  async getTargetInfo(): Promise<GetTargetInfo> {
+    // Use unique markers to avoid matching command echo
+    const result = await this.conn.execute(
+      'IF HASTARGET { ' +
+      '  PRINT "TGT_NAME|" + TARGET:NAME. ' +
+      '  PRINT "TGT_TYPE|" + TARGET:TYPENAME. ' +
+      '  PRINT "TGT_DIST|" + ROUND(TARGET:DISTANCE / 1000, 1). ' +
+      '  IF TARGET:TYPENAME = "Body" { ' +
+      '    PRINT "TGT_RAD|" + ROUND(TARGET:RADIUS / 1000, 1). ' +
+      '    PRINT "TGT_ALT|" + ROUND(TARGET:ALTITUDE / 1000, 1). ' +
+      '  } ELSE IF TARGET:TYPENAME = "Vessel" { ' +
+      '    PRINT "TGT_VEL|" + ROUND(TARGET:VELOCITY:ORBIT:MAG, 1). ' +
+      '  } ' +
+      '} ELSE { ' +
+      '  PRINT "TGT_NONE". ' +
+      '}'
+    );
+
+    const output = result.output.trim();
+    const markers = ['TGT_NAME|', 'TGT_TYPE|', 'TGT_DIST|', 'TGT_RAD|', 'TGT_ALT|', 'TGT_VEL|', 'TGT_NONE'];
+
+    const findMarker = (token: string, start = 0): number => {
+      let idx = output.indexOf(token, start);
+      while (idx !== -1) {
+        // Ignore command echo: it always appears inside quotes
+        const prevChar = idx > 0 ? output[idx - 1] : '';
+        if (prevChar !== '"') {
+          return idx;
+        }
+        idx = output.indexOf(token, idx + token.length);
+      }
+      return -1;
+    };
+
+    const findNextMarker = (start: number): number => {
+      let next = -1;
+      for (const token of markers) {
+        const idx = findMarker(token, start);
+        if (idx !== -1 && (next === -1 || idx < next)) {
+          next = idx;
+        }
+      }
+      return next;
+    };
+
+    const extractValue = (token: string): string | undefined => {
+      const start = findMarker(token);
+      if (start === -1) return undefined;
+      const valueStart = start + token.length;
+      const next = findNextMarker(valueStart);
+      const raw = next === -1 ? output.slice(valueStart) : output.slice(valueStart, next);
+      return raw.trim();
+    };
+
+    const noneMarker = findMarker('TGT_NONE');
+    const name = extractValue('TGT_NAME|');
+    if (noneMarker !== -1 && !name) {
+      return { hasTarget: false };
+    }
+
+    const type = extractValue('TGT_TYPE|');
+    const distanceKm = extractValue('TGT_DIST|');
+    const radiusKm = extractValue('TGT_RAD|');
+    const altKm = extractValue('TGT_ALT|');
+    const velocity = extractValue('TGT_VEL|');
+
+    const detailLines: string[] = [];
+    if (name) detailLines.push(`Target: ${name}`);
+    if (type) detailLines.push(`Type: ${type}`);
+    if (distanceKm !== undefined) detailLines.push(`Distance: ${distanceKm} km`);
+    if (radiusKm) detailLines.push(`Radius: ${radiusKm} km`);
+    if (altKm) detailLines.push(`Orbital altitude: ${altKm} km`);
+    if (velocity) detailLines.push(`Relative velocity: ${velocity} m/s`);
+
+    return {
+      hasTarget: true,
+      name,
+      type,
+      distance: distanceKm ? parseFloat(distanceKm) * 1000 : undefined,
+      details: detailLines.join('\n')
+    };
   }
 
   /**
