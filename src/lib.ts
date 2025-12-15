@@ -67,8 +67,10 @@ export {
   handleStatus,
   getConnection,
   ensureConnected,
+  waitForKosReady,
+  isKosReady,
 } from './tools/connection-tools.js';
-export type { EnsureConnectedOptions } from './tools/connection-tools.js';
+export type { EnsureConnectedOptions, WaitForKosOptions } from './tools/connection-tools.js';
 
 // =============================================================================
 // Monitoring

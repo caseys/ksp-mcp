@@ -943,23 +943,58 @@ export function createServer(): McpServer {
         if (currentAscentHandle) {
           progress = await currentAscentHandle.getProgress();
         } else {
-          // Query directly
-          const altResult = await conn.execute('PRINT ALTITUDE.');
-          const apoResult = await conn.execute('PRINT APOAPSIS.');
-          const perResult = await conn.execute('PRINT PERIAPSIS.');
-          const enabledResult = await conn.execute('PRINT ADDONS:MJ:ASCENTGUIDANCE:ENABLED.');
-          const statusResult = await conn.execute('PRINT SHIP:STATUS.');
-
           const parseNum = (s: string) => {
             const m = s.match(/-?[\d.]+(?:E[+-]?\d+)?/i);
             return m ? parseFloat(m[0]) : 0;
           };
+          const normalizeLines = (text: string) =>
+            text
+              .split('\n')
+              .map(line => line.trim())
+              .filter(line => line.length > 0);
+          const lastLine = (text: string) => {
+            const lines = normalizeLines(text);
+            return lines.length > 0 ? lines[lines.length - 1] : '';
+          };
 
-          const altitude = parseNum(altResult.output);
-          const apoapsis = parseNum(apoResult.output);
-          const periapsis = parseNum(perResult.output);
-          const enabled = enabledResult.output.includes('True');
-          const shipStatus = statusResult.output.trim();
+          const parseCombined = (output: string) => {
+            const combinedMatch = output.match(/ASC\|([^|]+)\|([^|]+)\|([^|]+)\|(True|False)\|([\s\S]+)/i);
+            if (!combinedMatch) {
+              return null;
+            }
+            return {
+              altitude: parseNum(combinedMatch[1]),
+              apoapsis: parseNum(combinedMatch[2]),
+              periapsis: parseNum(combinedMatch[3]),
+              enabled: combinedMatch[4].toLowerCase() === 'true',
+              shipStatus: combinedMatch[5].trim()
+            };
+          };
+
+          const combinedResult = await conn.execute(
+            'PRINT "ASC|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ADDONS:MJ:ASCENT:ENABLED + "|" + SHIP:STATUS.'
+          );
+
+          let telemetry = parseCombined(combinedResult.output);
+
+          if (!telemetry) {
+            // Fallback to sequential queries if combined output could not be parsed
+            const altResult = await conn.execute('PRINT ALTITUDE.');
+            const apoResult = await conn.execute('PRINT APOAPSIS.');
+            const perResult = await conn.execute('PRINT PERIAPSIS.');
+            const enabledResult = await conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.');
+            const statusResult = await conn.execute('PRINT SHIP:STATUS.');
+
+            telemetry = {
+              altitude: parseNum(altResult.output),
+              apoapsis: parseNum(apoResult.output),
+              periapsis: parseNum(perResult.output),
+              enabled: /^true$/i.test(lastLine(enabledResult.output)),
+              shipStatus: lastLine(statusResult.output)
+            };
+          }
+
+          const { altitude, apoapsis, periapsis, enabled, shipStatus } = telemetry;
 
           // Determine phase
           let phase: 'prelaunch' | 'launching' | 'gravity_turn' | 'coasting' | 'circularizing' | 'complete' | 'unknown';
@@ -1029,7 +1064,7 @@ export function createServer(): McpServer {
           currentAscentHandle = null;
         } else {
           // Disable directly
-          await conn.execute('SET ADDONS:MJ:ASCENTGUIDANCE:ENABLED TO FALSE.');
+          await conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
         }
 
         return successResponse('abort_ascent', 'Ascent guidance disabled.');

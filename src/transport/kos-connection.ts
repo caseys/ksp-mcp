@@ -3,6 +3,7 @@ import { TmuxTransport } from './tmux-transport.js';
 import { SocketTransport } from './socket-transport.js';
 import { config } from '../config.js';
 import { globalKosMonitor } from '../monitoring/kos-monitor.js';
+import { createHash } from 'node:crypto';
 
 export interface ConnectionState {
   connected: boolean;
@@ -42,6 +43,14 @@ export interface KosConnectionOptions {
   transport?: Transport;
 }
 
+export interface ExecuteOptions {
+  /**
+   * Skip waiting for sentinel/prompt output. Useful for commands that intentionally
+   * tear down the session (e.g., quickload) where no response will arrive.
+   */
+  fireAndForget?: boolean;
+}
+
 /**
  * High-level kOS connection manager.
  *
@@ -59,6 +68,7 @@ export class KosConnection {
     cpuTag: null,
     lastError: null,
   };
+  private commandSequence = 0;
   private options: Required<Omit<KosConnectionOptions, 'transport' | 'transportType' | 'cpuLabel'>> & { cpuLabel?: string };
 
   constructor(options: KosConnectionOptions = {}) {
@@ -196,35 +206,42 @@ export class KosConnection {
   /**
    * Execute a kOS command and return the result
    */
-  async execute(command: string, timeoutMs = config.timeouts.command): Promise<CommandResult> {
+  async execute(command: string, timeoutMs = config.timeouts.command, options?: ExecuteOptions): Promise<CommandResult> {
     if (!this.state.connected || !this.transport) {
       return { success: false, output: '', error: 'Not connected to kOS' };
     }
 
     try {
-      // Clear any pending output and wait briefly for socket buffer to drain
+      // Clear any pending output
       await this.transport.read();
-      await new Promise(r => setTimeout(r, 10));
-      await this.transport.read();  // Second read to catch any stragglers
 
-      // Send command
-      await this.transport.send(command);
-
-      // Wait for ETB (End Transmission Block, \u0017) which kOS sends after command output
-      // kOS uses control characters, not a '>' prompt:
-      // - \u0015 (NAK) before command echo
-      // - \u0016 (SYN) between echo and result
-      // - \u0017 (ETB) at end of output
-      let output: string;
-      try {
-        output = await this.transport.waitFor(/\u0017$/, timeoutMs);
-      } catch {
-        // Timeout - read whatever we have
-        output = await this.transport.read();
+      if (options?.fireAndForget) {
+        await this.transport.send(command);
+        return { success: true, output: '' };
       }
 
-      // Clean up output (remove the command echo and prompt)
-      const cleanOutput = this.cleanOutput(command, output);
+      // Send command followed by sentinel
+      const { token: sentinelToken, command: sentinelCommand } = this.createSentinel(command);
+      const sentinelPattern = this.buildSentinelPattern(sentinelToken);
+      await this.transport.send(command);
+      await this.transport.send(sentinelCommand);
+
+      // Wait for sentinel (primary) or prompt (fallback) to ensure completion
+      let output: string;
+      try {
+        output = await this.transport.waitFor(sentinelPattern, timeoutMs);
+      } catch {
+        try {
+          // Fallback to classic prompt-based wait
+          output = await this.transport.waitFor(/>\s*$/, timeoutMs);
+        } catch {
+          // As a last resort, grab whatever is buffered
+          output = await this.transport.read();
+        }
+      }
+
+      // Clean up output (remove the command echo, sentinel, and prompt)
+      const cleanOutput = this.cleanOutput([command, sentinelCommand], output, sentinelToken);
 
       // Track output in global monitor for kos://terminal/recent resource
       if (cleanOutput) {
@@ -376,35 +393,154 @@ export class KosConnection {
   }
 
   /**
-   * Clean up command output (remove echo, prompts, etc.)
+   * Clean up command output (remove echo, prompts, kOS terminal control chars)
+   *
+   * kOS uses Unicode Private Use Area (U+E000-U+F8FF) for terminal control.
+   * See /docs/kos-protocol-analysis.md for full protocol documentation.
+   *
+   * Key UnicodeCommand values:
+   * - TELEPORTCURSOR (0xE006): followed by 2 bytes (col, row)
+   * - RESIZESCREEN (0xE016): followed by 2 bytes (width, height)
+   * - TITLEBEGIN (0xE004): followed by chars until TITLEEND (0xE005)
+   * - All others: single character commands
    */
-  private cleanOutput(command: string, output: string): string {
-    // Remove kOS terminal control characters:
-    // - C0 control codes (U+0000-U+001F): NULL, NAK, SYN, ETB, etc.
-    // - Private Use Area (U+E000-U+F8FF): kOS visual formatting
-    const sanitized = output.replace(/[\u0000-\u001F\uE000-\uF8FF]/g, '');
+  private cleanOutput(commands: string[], output: string, sentinelToken?: string): string {
+    // Step 1: Strip kOS UnicodeCommand sequences (PUA characters + their parameters)
+    // These are terminal control commands, not actual output data
+    const stripped = this.stripUnicodeCommands(output);
 
-    const lines = sanitized.split('\n');
+    // Step 2: Normalize line endings and strip remaining control chars
+    // Keep \r\n and \n for line structure, strip other C0 control codes
+    const normalized = stripped
+      .replace(/\r\n/g, '\n')           // Normalize CRLF to LF
+      .replace(/\r/g, '\n')             // Normalize lone CR to LF
+      .replace(/[\u0000-\u0009\u000b-\u001f]/g, ''); // Strip other control chars (keep \n)
 
-    // Process lines:
-    // - Strip command echo prefix (kOS outputs "COMMAND result" on same line)
-    // - Filter out prompts and empty lines
-    return lines
+    // Step 3: Process lines
+    const lines = normalized.split('\n');
+
+    // Normalize commands for comparison (kOS normalizes whitespace in echo)
+    const normalizedCommands = commands
+      .filter(cmd => !!cmd && cmd.trim().length > 0)
+      .map(cmd => ({
+        raw: cmd,
+        normalized: cmd.replace(/\s+/g, ' ').trim(),
+      }));
+
+    const noisePatterns = [
+      /^\{.*detaching.*\}$/i,
+      /^detaching from/i,
+      /^connecting to cpu/i,
+      /^choose a cpu/i,
+      /^selecting cpu/i,
+    ];
+
+    const cleaned = lines
       .map(line => {
-        const trimmed = line.trim();
-        // Strip command echo from start of line if present
-        if (trimmed.startsWith(command)) {
-          return trimmed.slice(command.length).trim();
+        let trimmed = line.trim();
+        if (!trimmed) {
+          return '';
         }
+
+        let normalizedLine = trimmed.replace(/\s+/g, ' ');
+
+        // Remove command echoes, handling cases where multiple commands are concatenated
+        let strippedCommand = true;
+        while (strippedCommand && trimmed.length > 0) {
+          strippedCommand = false;
+          for (const cmd of normalizedCommands) {
+            if (normalizedLine.startsWith(cmd.normalized)) {
+              const remainder = normalizedLine.slice(cmd.normalized.length).trim();
+              trimmed = remainder;
+              normalizedLine = remainder.replace(/\s+/g, ' ');
+              strippedCommand = true;
+              break;
+            }
+            if (trimmed.startsWith(cmd.raw)) {
+              const remainder = trimmed.slice(cmd.raw.length).trim();
+              trimmed = remainder;
+              normalizedLine = remainder.replace(/\s+/g, ' ');
+              strippedCommand = true;
+              break;
+            }
+          }
+        }
+
+        if (sentinelToken && trimmed.includes(sentinelToken)) {
+          trimmed = trimmed.split(sentinelToken).join('').trim();
+        }
+
         return trimmed;
       })
       .filter(line => {
-        if (line === '>') return false;
-        if (line === '') return false;
+        if (!line) return false;
+        if (line === '>') return false;  // kOS prompt
+        if (noisePatterns.some(pattern => pattern.test(line))) return false;
         return true;
       })
       .join('\n')
       .trim();
+
+    if (sentinelToken && cleaned.includes(sentinelToken)) {
+      return cleaned.split(sentinelToken).join('').trim();
+    }
+
+    return cleaned;
+  }
+
+  /**
+   * Strip kOS UnicodeCommand sequences from output.
+   *
+   * kOS uses Private Use Area chars (U+E000-U+F8FF) for terminal control.
+   * Some commands have trailing parameter bytes that must also be stripped:
+   * - TELEPORTCURSOR (0xE006): + col byte + row byte
+   * - RESIZESCREEN (0xE016): + width byte + height byte
+   * - TITLEBEGIN (0xE004): + chars until TITLEEND (0xE005)
+   */
+  private stripUnicodeCommands(input: string): string {
+    const result: string[] = [];
+    let i = 0;
+
+    while (i < input.length) {
+      const code = input.charCodeAt(i);
+
+      // Check if this is a Private Use Area character (kOS UnicodeCommand)
+      if (code >= 0xE000 && code <= 0xF8FF) {
+        // Handle multi-byte commands
+        switch (code) {
+          case 0xE006: // TELEPORTCURSOR - skip next 2 chars (col, row)
+          case 0xE016: // RESIZESCREEN - skip next 2 chars (width, height)
+            i += 3; // Skip command + 2 parameter bytes
+            break;
+
+          case 0xE004: // TITLEBEGIN - skip until TITLEEND (0xE005)
+            i++; // Skip TITLEBEGIN
+            while (i < input.length && input.charCodeAt(i) !== 0xE005) {
+              i++;
+            }
+            if (i < input.length) i++; // Skip TITLEEND
+            break;
+
+          case 0xE011: // STARTNEXTLINE - treat as newline
+          case 0xE012: // LINEFEEDKEEPCOL
+          case 0xE013: // GOTOLEFTEDGE
+            result.push('\n');
+            i++;
+            break;
+
+          default:
+            // Single-byte command, just skip it
+            i++;
+            break;
+        }
+      } else {
+        // Normal character, keep it
+        result.push(input[i]);
+        i++;
+      }
+    }
+
+    return result.join('');
   }
 
   /**
@@ -429,5 +565,34 @@ export class KosConnection {
     }
 
     return null;
+  }
+
+  /**
+   * Create a unique sentinel PRINT command that signals command completion.
+   */
+  private createSentinel(command: string): { token: string; command: string } {
+    const hash = createHash('sha1')
+      .update(command)
+      .update(String(Date.now()))
+      .update(String(this.commandSequence))
+      .digest('hex')
+      .slice(0, 8)
+      .toUpperCase();
+    const token = `__MCP_DONE_${this.commandSequence.toString(36).toUpperCase()}_${hash}__`;
+    this.commandSequence = (this.commandSequence + 1) % Number.MAX_SAFE_INTEGER;
+    return {
+      token,
+      command: `PRINT "${token}".`,
+    };
+  }
+
+  /**
+   * Build a regex pattern that matches the sentinel token when it appears on its own line.
+   * This prevents triggering on the command echo (which also contains the token).
+   */
+  private buildSentinelPattern(token: string): RegExp {
+    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Match the sentinel token when it appears outside of quotes to avoid hitting the echo line.
+    return new RegExp(`(?<!")${escaped}`);
   }
 }

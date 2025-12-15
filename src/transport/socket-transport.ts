@@ -13,6 +13,7 @@
 import * as net from 'node:net';
 import { BaseTransport } from './transport.js';
 import { config } from '../config.js';
+import { TransportTraceLogger } from './trace-logger.js';
 
 export class SocketTransport extends BaseTransport {
   private host: string;
@@ -20,6 +21,7 @@ export class SocketTransport extends BaseTransport {
   private socket: net.Socket | null = null;
   private outputBuffer: string = '';
   private connectTimeout: number;
+  private trace: TransportTraceLogger;
 
   constructor(
     host: string = config.kos.host,
@@ -30,6 +32,7 @@ export class SocketTransport extends BaseTransport {
     this.host = host;
     this.port = port;
     this.connectTimeout = options.connectTimeout ?? config.timeouts.connect;
+    this.trace = new TransportTraceLogger(`socket-${host}-${port}`);
   }
 
   async init(): Promise<void> {
@@ -43,6 +46,7 @@ export class SocketTransport extends BaseTransport {
       }, this.connectTimeout);
 
       this.socket = new net.Socket();
+      this.trace.logInfo(`connecting to ${this.host}:${this.port}`);
 
       this.socket.on('connect', () => {
         clearTimeout(timeout);
@@ -57,20 +61,24 @@ export class SocketTransport extends BaseTransport {
       this.socket.on('data', (data: Buffer) => {
         // kOS sends UTF-8 text
         this.outputBuffer += data.toString('utf-8');
+        this.trace.logReceive(data);
       });
 
       this.socket.on('error', (err: Error) => {
         clearTimeout(timeout);
         this._isOpen = false;
+        this.trace.logError(err);
         reject(new Error(`Socket error: ${err.message}`));
       });
 
       this.socket.on('close', () => {
         this._isOpen = false;
+        this.trace.logInfo('socket closed');
       });
 
       this.socket.on('end', () => {
         this._isOpen = false;
+        this.trace.logInfo('socket ended');
       });
 
       this.socket.connect(this.port, this.host);
@@ -84,7 +92,9 @@ export class SocketTransport extends BaseTransport {
 
     return new Promise((resolve, reject) => {
       // Send with newline (kOS expects \r\n or \n)
-      this.socket!.write(data + '\r\n', 'utf-8', (err) => {
+      const payload = data + '\r\n';
+      this.trace.logSend(payload);
+      this.socket!.write(payload, 'utf-8', (err) => {
         if (err) {
           reject(new Error(`Send error: ${err.message}`));
         } else {
@@ -111,6 +121,7 @@ export class SocketTransport extends BaseTransport {
     const bytes = keyMap[keys] ?? keys;
 
     return new Promise((resolve, reject) => {
+      this.trace.logSend(bytes);
       this.socket!.write(bytes, 'utf-8', (err) => {
         if (err) {
           reject(new Error(`SendKeys error: ${err.message}`));
@@ -161,6 +172,8 @@ export class SocketTransport extends BaseTransport {
     }
     this._isOpen = false;
     this.outputBuffer = '';
+    this.trace.logInfo('transport closed');
+    this.trace.close();
   }
 
   /**

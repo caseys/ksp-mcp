@@ -6,6 +6,7 @@
  */
 
 import { KosConnection } from '../transport/kos-connection.js';
+import { config } from '../config.js';
 
 export interface QuicksaveResult {
   success: boolean;
@@ -70,7 +71,7 @@ export async function quicksave(conn: KosConnection, saveName: string): Promise<
  */
 export async function quickload(conn: KosConnection, saveName: string): Promise<QuickloadResult> {
   try {
-    await conn.execute(`KUNIVERSE:QUICKLOADFROM("${saveName}").`);
+    await conn.execute(`KUNIVERSE:QUICKLOADFROM("${saveName}").`, config.timeouts.command, { fireAndForget: true });
     return { success: true, saveName };
   } catch (error) {
     return {

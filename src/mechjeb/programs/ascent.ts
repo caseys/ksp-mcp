@@ -12,6 +12,7 @@ import type {
   AscentProgress,
   AscentResult
 } from '../types.js';
+import { ensureConnected } from '../../tools/connection-tools.js';
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -101,7 +102,7 @@ export class AscentHandle {
 
   /**
    * Wait for the ascent to complete using TypeScript polling
-   * More reliable than blocking kOS UNTIL loop - handles daemon reconnection
+   * More reliable than blocking kOS UNTIL loop - handles connection recovery
    */
   async waitForCompletion(pollIntervalMs = 5000): Promise<AscentResult> {
     console.log('[Ascent] Waiting for MechJeb to complete ascent...');
@@ -109,6 +110,8 @@ export class AscentHandle {
     const MAX_WAIT_MS = 900000; // 15 minutes max
     const startTime = Date.now();
     let lastLogTime = 0;
+    let consecutiveEmptyResponses = 0;
+    const MAX_EMPTY_RESPONSES = 3;
 
     // Get atmosphere height for this body using labeled output
     const atmResult = await this.conn.execute('PRINT "ATM:" + ROUND(SHIP:BODY:ATM:HEIGHT).');
@@ -118,24 +121,46 @@ export class AscentHandle {
     console.log(`[Ascent] Target: periapsis > ${Math.round(minOrbit/1000)}km (atmosphere ${Math.round(atmHeight/1000)}km + 10km)`);
 
     while (Date.now() - startTime < MAX_WAIT_MS) {
-      // Query current status
+      // Query current status (use SET then PRINT for reliable MechJeb addon output)
       const statusResult = await this.conn.execute(
-        'PRINT "ENABLED:" + ADDONS:MJ:ASCENT:ENABLED. ' +
-        'PRINT "APO:" + ROUND(APOAPSIS). ' +
-        'PRINT "PER:" + ROUND(PERIAPSIS). ' +
-        'PRINT "BODY:" + SHIP:BODY:NAME.'
+        'SET _E TO ADDONS:MJ:ASCENT:ENABLED. ' +
+        'SET _A TO ROUND(APOAPSIS). ' +
+        'SET _P TO ROUND(PERIAPSIS). ' +
+        'SET _B TO SHIP:BODY:NAME. ' +
+        'PRINT "E:" + _E + " A:" + _A + " P:" + _P + " B:" + _B.'
       );
 
-      // Parse results - simple regex, just look for the labels anywhere
-      const enabledMatch = statusResult.output.match(/ENABLED:(True|False)/i);
-      const apoMatch = statusResult.output.match(/APO:(-?\d+)/);
-      const perMatch = statusResult.output.match(/PER:(-?\d+)/);
-      const bodyMatch = statusResult.output.match(/BODY:([A-Z][a-z]\w*)/);
+      // Parse results - "E:True A:100000 P:-500000 B:Kerbin"
+      const statusMatch = statusResult.output.match(/E:(True|False)\s*A:(-?\d+)\s*P:(-?\d+)\s*B:(\w+)/i);
 
-      const enabled = enabledMatch ? enabledMatch[1].toLowerCase() === 'true' : true;
-      const apoapsis = apoMatch ? parseInt(apoMatch[1]) : 0;
-      const periapsis = perMatch ? parseInt(perMatch[1]) : 0;
-      const body = bodyMatch ? bodyMatch[1] : 'Unknown';
+      // Detect stale connection (empty/unparseable output)
+      if (!statusMatch || statusResult.output.trim() === '') {
+        consecutiveEmptyResponses++;
+        console.log(`[Ascent] Empty response (${consecutiveEmptyResponses}/${MAX_EMPTY_RESPONSES}), connection may be stale`);
+
+        if (consecutiveEmptyResponses >= MAX_EMPTY_RESPONSES) {
+          console.log('[Ascent] Too many empty responses, reconnecting...');
+          try {
+            // Force reconnect using ensureConnected
+            this.conn = await ensureConnected();
+            consecutiveEmptyResponses = 0;
+            console.log('[Ascent] Reconnected successfully');
+          } catch (err) {
+            console.log(`[Ascent] Reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
+        await delay(pollIntervalMs);
+        continue;
+      }
+
+      // Got valid response, reset counter
+      consecutiveEmptyResponses = 0;
+
+      const enabled = statusMatch[1].toLowerCase() === 'true';
+      const apoapsis = parseInt(statusMatch[2]);
+      const periapsis = parseInt(statusMatch[3]);
+      const body = statusMatch[4];
 
       // Log progress every 10 seconds
       const now = Date.now();
@@ -210,8 +235,9 @@ export class AscentProgram {
     const MAX_ATTEMPTS = 30;  // ~15 seconds max
 
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
-      const result = await this.conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.');
-      if (!hasKosError(result.output)) {
+      // Use SET then PRINT for reliable output (inline MechJeb addon access can be lost)
+      const result = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
+      if (!hasKosError(result.output) && result.output.trim() !== '') {
         console.log('[Ascent] MechJeb ready');
         return;
       }
@@ -289,9 +315,11 @@ export class AscentProgram {
       commands.push(`SET ${AG}:TURNROLL TO ${settings.turnRoll}.`);
     }
 
-    // Execute all commands in a single batch
-    if (commands.length > 0) {
-      await this.conn.execute(commands.join(' '));
+    // Execute commands one at a time for reliability
+    // Batch commands can overwhelm the kOS telnet connection
+    for (const cmd of commands) {
+      await this.conn.execute(cmd);
+      await delay(50);  // Small delay between commands
     }
   }
 
@@ -354,19 +382,50 @@ export class AscentProgram {
       autowarp: autoWarp
     });
 
-    // Enable autopilot, hand control to MechJeb, and launch in one batch
-    await this.conn.execute(
-      'SET ADDONS:MJ:ASCENT:ENABLED TO TRUE. ' +
-      'UNLOCK THROTTLE. SAS OFF. STAGE.'
-    );
+    // Let MechJeb process the configuration
+    await delay(500);
 
-    // Verify autopilot engaged (separate query for reliable output)
-    await delay(200);  // Brief delay for MechJeb state to update
-    const verifyResult = await this.conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.');
-    const engaged = verifyResult.output.toLowerCase().includes('true');
-    if (!engaged) {
-      console.log('[Ascent] Warning: Autopilot may not have engaged, but continuing...');
+    // Enable autopilot with retry loop (critical step - must succeed)
+    let autopilotEngaged = false;
+    for (let attempt = 1; attempt <= 10; attempt++) {
+      // Enable the autopilot
+      await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
+      await delay(500);  // Let MechJeb state update
+
+      // Verify it's enabled - try multiple times in case of empty response
+      for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
+        const verifyResult = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
+        if (verifyResult.output.toLowerCase().includes('true')) {
+          autopilotEngaged = true;
+          console.log(`[Ascent] Autopilot engaged (attempt ${attempt})`);
+          break;
+        }
+        if (verifyResult.output.toLowerCase().includes('false')) {
+          // Got valid response but not enabled - continue outer loop to retry enable
+          break;
+        }
+        // Empty response - small delay and retry verify
+        await delay(200);
+      }
+
+      if (autopilotEngaged) break;
+      console.log(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
+      await delay(300);
     }
+
+    if (!autopilotEngaged) {
+      console.log('[Ascent] Warning: Autopilot may not have engaged after 10 attempts, proceeding anyway');
+    }
+
+    // Release controls and stage to begin launch
+    await this.conn.execute('UNLOCK THROTTLE.');
+    await delay(100);
+    await this.conn.execute('SAS OFF.');
+    await delay(100);
+
+    // Stage to begin launch - this is the critical moment
+    await this.conn.execute('STAGE.');
+    await delay(500);  // Let the stage command process
     console.log('[Ascent] LAUNCHED - MechJeb in control');
 
     // Create handle for monitoring

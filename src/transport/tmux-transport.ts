@@ -2,6 +2,7 @@ import { exec } from 'child_process';
 import { promisify } from 'util';
 import { BaseTransport } from './transport.js';
 import { config } from '../config.js';
+import { TransportTraceLogger } from './trace-logger.js';
 
 const execAsync = promisify(exec);
 
@@ -27,6 +28,7 @@ export class TmuxTransport extends BaseTransport {
   private port: number;
   private lastCaptureLength: number = 0;
   private sendDelayMs: number;
+  private trace: TransportTraceLogger;
 
   constructor(
     host: string = config.kos.host,
@@ -39,6 +41,7 @@ export class TmuxTransport extends BaseTransport {
     this.port = port;
     this.sessionName = sessionName;
     this.sendDelayMs = options?.sendDelayMs ?? 100;
+    this.trace = new TransportTraceLogger(`tmux-${sessionName}`);
   }
 
   async init(): Promise<void> {
@@ -56,6 +59,7 @@ export class TmuxTransport extends BaseTransport {
 
     // Start TCP connection using nc (netcat)
     await this.send(`nc ${this.host} ${this.port}`);
+    this.trace.logInfo(`tmux session ${this.sessionName} connecting to ${this.host}:${this.port}`);
 
     this._isOpen = true;
   }
@@ -68,6 +72,7 @@ export class TmuxTransport extends BaseTransport {
     // Escape for shell
     const escaped = data.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
     await execAsync(`tmux send-keys -t ${this.paneId} "${escaped}" Enter`);
+    this.trace.logSend(data + '\n');
 
     // Wait after send to prevent command garbling
     if (this.sendDelayMs > 0) {
@@ -81,6 +86,7 @@ export class TmuxTransport extends BaseTransport {
     }
 
     await execAsync(`tmux send-keys -t ${this.paneId} ${keys}`);
+    this.trace.logSend(`[keys] ${keys}`);
   }
 
   async readRaw(): Promise<string> {
@@ -97,6 +103,7 @@ export class TmuxTransport extends BaseTransport {
       if (stdout.length > this.lastCaptureLength) {
         const newContent = stdout.slice(this.lastCaptureLength);
         this.lastCaptureLength = stdout.length;
+        this.trace.logReceive(newContent);
         return newContent;
       }
 
@@ -136,6 +143,8 @@ export class TmuxTransport extends BaseTransport {
     this.paneId = null;
     this._isOpen = false;
     this.lastCaptureLength = 0;
+    this.trace.logInfo('tmux transport closed');
+    this.trace.close();
   }
 
   private async killExistingSession(): Promise<void> {
