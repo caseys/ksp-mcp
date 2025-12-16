@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="ksp-mcp-logo.jpg" width="512" height="512" alt="ksp-mcp logo">
+</p>
+
 # ksp-mcp
 
 STATUS: EARLY DEV
