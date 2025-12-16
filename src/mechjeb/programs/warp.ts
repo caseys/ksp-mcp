@@ -43,7 +43,7 @@ export async function warpTo(
 
       warpCmd = `
         SET targetUT TO NEXTNODE:TIME - ${leadTime}.
-        IF targetUT > TIME {
+        IF targetUT > TIME:SECONDS {
           WARPTO(targetUT).
         }
       `;
@@ -56,9 +56,8 @@ export async function warpTo(
       }
 
       warpCmd = `
-        SET transitionUT TO SHIP:ORBIT:NEXTPATCHETA + TIME.
-        SET targetUT TO transitionUT - ${leadTime}.
-        IF targetUT > TIME {
+        SET targetUT TO TIME:SECONDS + SHIP:ORBIT:NEXTPATCHETA - ${leadTime}.
+        IF targetUT > TIME:SECONDS {
           WARPTO(targetUT).
         }
       `;
@@ -66,8 +65,8 @@ export async function warpTo(
 
     case 'periapsis':
       warpCmd = `
-        SET targetUT TO TIME + ETA:PERIAPSIS - ${leadTime}.
-        IF targetUT > TIME {
+        SET targetUT TO TIME:SECONDS + ETA:PERIAPSIS - ${leadTime}.
+        IF targetUT > TIME:SECONDS {
           WARPTO(targetUT).
         }
       `;
@@ -75,8 +74,8 @@ export async function warpTo(
 
     case 'apoapsis':
       warpCmd = `
-        SET targetUT TO TIME + ETA:APOAPSIS - ${leadTime}.
-        IF targetUT > TIME {
+        SET targetUT TO TIME:SECONDS + ETA:APOAPSIS - ${leadTime}.
+        IF targetUT > TIME:SECONDS {
           WARPTO(targetUT).
         }
       `;
@@ -114,7 +113,7 @@ export async function warpForward(
   seconds: number,
   timeout: number = 120000
 ): Promise<WarpResult> {
-  await conn.execute(`WARPTO(TIME + ${seconds}).`, 5000);
+  await conn.execute(`WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
 
   // Wait for warp to complete
   const startTime = Date.now();

@@ -72,34 +72,28 @@ export async function executeNode(
   const initialCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
   const initialNodeCount = parseInt(initialCountResult.output.match(/\d+/)?.[0] || '1');
 
-  // Delta-v validation
+  // Delta-v validation - use total ship delta-v for reliability
   const dvRequired = await queryNumber(conn, 'NEXTNODE:DELTAV:MAG');
-  const dvCurrent = await queryNumber(conn, 'STAGE:DELTAV:CURRENT');
-  const stageNum = await queryNumber(conn, 'STAGE:NUMBER');
+  const dvShipTotal = await queryNumber(conn, 'SHIP:DELTAV:CURRENT');
+  const dvCurrentStage = await queryNumber(conn, 'STAGE:DELTAV:CURRENT');
 
-  console.error(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrent.toFixed(1)} m/s, Stage: ${stageNum}`);
+  // Determine if staging will be needed during burn
+  const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
 
-  // Check if we have enough delta-v (including next stage if needed)
-  let totalDv = dvCurrent;
-  let needsStaging = false;
+  if (needsStaging) {
+    console.error(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s (will stage)`);
+  } else {
+    console.error(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s`);
+  }
 
-  if (dvCurrent < dvRequired && stageNum > 0) {
-    // Check next stage's delta-v
-    const dvNextStage = await queryNumber(conn, `SHIP:STAGEDELTAV(${stageNum - 1}):CURRENT`);
-    totalDv = dvCurrent + dvNextStage;
-    needsStaging = true;
-    console.error(`[ExecuteNode] Next stage adds ${dvNextStage.toFixed(1)} m/s, total: ${totalDv.toFixed(1)} m/s`);
-
-    if (totalDv < dvRequired) {
-      // Still not enough even with next stage
-      const deficit = dvRequired - totalDv;
-      return {
-        success: false,
-        nodesExecuted: 0,
-        error: `Insufficient delta-v: need ${dvRequired.toFixed(1)} m/s, have ${totalDv.toFixed(1)} m/s (deficit: ${deficit.toFixed(1)} m/s). Consider adding more fuel or splitting the maneuver.`,
-        deltaV: { required: dvRequired, available: totalDv }
-      };
-    }
+  if (dvShipTotal < dvRequired) {
+    const deficit = dvRequired - dvShipTotal;
+    return {
+      success: false,
+      nodesExecuted: 0,
+      error: `Insufficient delta-v: need ${dvRequired.toFixed(1)} m/s, have ${dvShipTotal.toFixed(1)} m/s (deficit: ${deficit.toFixed(1)} m/s). Consider adding more fuel or splitting the maneuver.`,
+      deltaV: { required: dvRequired, available: dvShipTotal }
+    };
   }
 
   // Set up auto-staging if burn will require staging
@@ -156,7 +150,7 @@ export async function executeNode(
       return {
         success: true,
         nodesExecuted: 0, // Not yet executed, just started
-        deltaV: { required: dvRequired, available: totalDv },
+        deltaV: { required: dvRequired, available: dvShipTotal },
         attempts: 1
       };
     }
@@ -192,7 +186,7 @@ export async function executeNode(
         return {
           success: true,
           nodesExecuted: initialNodeCount,
-          deltaV: { required: dvRequired, available: totalDv, remaining: 0 },
+          deltaV: { required: dvRequired, available: dvShipTotal, remaining: 0 },
           attempts: attempt
         };
       }
@@ -217,7 +211,7 @@ export async function executeNode(
             success: false,
             nodesExecuted: initialNodeCount - currentNodes,
             error: `Burn incomplete after ${MAX_RETRIES} attempts. ${dvRemaining.toFixed(1)} m/s remaining.`,
-            deltaV: { required: dvRequired, available: totalDv, remaining: dvRemaining },
+            deltaV: { required: dvRequired, available: dvShipTotal, remaining: dvRemaining },
             attempts: attempt
           };
         }
@@ -237,7 +231,7 @@ export async function executeNode(
         success: false,
         nodesExecuted: initialNodeCount - lastNodeCount,
         error: `Execution timeout after ${timeoutMs / 1000} seconds. ${lastNodeCount} node(s) remaining.`,
-        deltaV: { required: dvRequired, available: totalDv, remaining: dvRemaining },
+        deltaV: { required: dvRequired, available: dvShipTotal, remaining: dvRemaining },
         attempts: attempt
       };
     }

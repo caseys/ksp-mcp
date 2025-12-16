@@ -118,8 +118,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'ascent_status',
-    'Get current ascent progress including phase, altitude, apoapsis, and periapsis.',
+    'launch_ascent_status',
+    'Get launch progress (only valid during ascent from launchpad).',
     {
     },
     async (args) => {
@@ -221,8 +221,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'abort_ascent',
-    'Abort the current ascent guidance.',
+    'launch_ascent_abort',
+    'Abort launch ascent guidance.',
     {
     },
     async (args) => {
@@ -245,17 +245,36 @@ export function createServer(): McpServer {
 
   server.tool(
     'circularize',
-    'Create a maneuver node to circularize the orbit.',
+    'Create a maneuver node to circularize the orbit. Auto-detects best timing if not specified.',
     {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to circularize (usually at apoapsis or periapsis)'),
+        .optional()
+        .describe('When to circularize. If omitted, auto-picks based on orbit (periapsis for hyperbolic, nearest apse for elliptical)'),
     },
     async (args) => {
       try {
         const conn = await ensureConnected();
+
+        // Auto-detect best timeRef if not specified
+        let timeRef = args.timeRef;
+        if (!timeRef) {
+          const orbitInfo = await conn.execute(
+            'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS.'
+          );
+          const parts = orbitInfo.output.split('|').map(s => parseFloat(s.trim()));
+          const [ecc, etaApo, etaPe] = parts;
+
+          if (ecc >= 1) {
+            // Hyperbolic orbit - no apoapsis exists
+            timeRef = 'PERIAPSIS';
+          } else {
+            // Elliptical orbit - pick whichever is sooner
+            timeRef = etaApo < etaPe ? 'APOAPSIS' : 'PERIAPSIS';
+          }
+        }
+
         const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.circularize(args.timeRef);
+        const result = await maneuver.circularize(timeRef);
 
         if (result.success) {
           return successResponse('circularize',
@@ -270,8 +289,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'adjust_ap',
-    'Create a maneuver node to change apoapsis.',
+    'adjust_apoapsis',
+    'Create a maneuver node to set a new high point in the orbit.',
     {
       altitude: z.number().describe('Target apoapsis altitude in meters'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -297,8 +316,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'adjust_pe',
-    'Create a maneuver node to change periapsis. Cannot raise periapsis above current apoapsis.',
+    'adjust_periapsis',
+    'Create a maneuver node to set a new low point in the orbit.',
     {
       altitude: z.number().describe('Target periapsis altitude in meters'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -325,7 +344,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'ellipticize',
-    'Set both periapsis and apoapsis in a single burn.',
+    'Create a maneuver node to set both periapsis and apoapsis.',
     {
       periapsis: z.number().describe('Target periapsis altitude in meters'),
       apoapsis: z.number().describe('Target apoapsis altitude in meters'),
@@ -351,8 +370,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'change_inc',
-    'Change orbital inclination.',
+    'change_inclination',
+    'Create a maneuver node to change orbital inclination.',
     {
       newInclination: z.number().describe('Target inclination in degrees'),
       timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])
@@ -366,20 +385,20 @@ export function createServer(): McpServer {
         const result = await maneuver.changeInclination(args.newInclination, args.timeRef);
 
         if (!result.success) {
-          return errorResponse('change_inc', result.error ?? 'Failed');
+          return errorResponse('change_inclination', result.error ?? 'Failed');
         }
 
-        return successResponse('change_inc',
+        return successResponse('change_inclination',
           `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
       } catch (error) {
-        return errorResponse('change_inc', error instanceof Error ? error.message : String(error));
+        return errorResponse('change_inclination', error instanceof Error ? error.message : String(error));
       }
     }
   );
 
   server.tool(
-    'change_lan',
-    'Change the Longitude of Ascending Node (LAN).',
+    'change_ascending_node',
+    'Create a maneuver node to change longitude of ascending node.',
     {
       lan: z.number().describe('Target LAN in degrees (0 to 360)'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -392,20 +411,20 @@ export function createServer(): McpServer {
         const result = await changeLAN(conn, args.lan, args.timeRef);
 
         if (result.success) {
-          return successResponse('change_lan',
+          return successResponse('change_ascending_node',
             `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_lan', result.error ?? 'Failed');
+          return errorResponse('change_ascending_node', result.error ?? 'Failed');
         }
       } catch (error) {
-        return errorResponse('change_lan', error instanceof Error ? error.message : String(error));
+        return errorResponse('change_ascending_node', error instanceof Error ? error.message : String(error));
       }
     }
   );
 
   server.tool(
-    'change_lpe',
-    'Change the Longitude of Periapsis.',
+    'change_periapsis_longitude',
+    'Create a maneuver node to change longitude of periapsis (rotates orbit).',
     {
       longitude: z.number().describe('Target longitude in degrees (-180 to 180)'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -418,20 +437,20 @@ export function createServer(): McpServer {
         const result = await changeLongitudeOfPeriapsis(conn, args.longitude, args.timeRef);
 
         if (result.success) {
-          return successResponse('change_lpe',
+          return successResponse('change_periapsis_longitude',
             `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_lpe', result.error ?? 'Failed');
+          return errorResponse('change_periapsis_longitude', result.error ?? 'Failed');
         }
       } catch (error) {
-        return errorResponse('change_lpe', error instanceof Error ? error.message : String(error));
+        return errorResponse('change_periapsis_longitude', error instanceof Error ? error.message : String(error));
       }
     }
   );
 
   server.tool(
-    'change_sma',
-    'Change the orbital semi-major axis.',
+    'change_semi_major_axis',
+    'Create a maneuver node to change semi-major axis (affects orbital period).',
     {
       semiMajorAxis: z.number().describe('Target semi-major axis in meters'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -444,20 +463,20 @@ export function createServer(): McpServer {
         const result = await changeSemiMajorAxis(conn, args.semiMajorAxis, args.timeRef);
 
         if (result.success) {
-          return successResponse('change_sma',
+          return successResponse('change_semi_major_axis',
             `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_sma', result.error ?? 'Failed');
+          return errorResponse('change_semi_major_axis', result.error ?? 'Failed');
         }
       } catch (error) {
-        return errorResponse('change_sma', error instanceof Error ? error.message : String(error));
+        return errorResponse('change_semi_major_axis', error instanceof Error ? error.message : String(error));
       }
     }
   );
 
   server.tool(
-    'change_ecc',
-    'Change orbital eccentricity.',
+    'change_eccentricity',
+    'Create a maneuver node to change orbital eccentricity (0=circular, higher=more elliptical).',
     {
       eccentricity: z.number().min(0).max(0.99).describe('Target eccentricity (0 = circular, <1 = elliptical)'),
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -470,27 +489,27 @@ export function createServer(): McpServer {
         const result = await changeEccentricity(conn, args.eccentricity, args.timeRef);
 
         if (result.success) {
-          return successResponse('change_ecc',
+          return successResponse('change_eccentricity',
             `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_ecc', result.error ?? 'Failed');
+          return errorResponse('change_eccentricity', result.error ?? 'Failed');
         }
       } catch (error) {
-        return errorResponse('change_ecc', error instanceof Error ? error.message : String(error));
+        return errorResponse('change_eccentricity', error instanceof Error ? error.message : String(error));
       }
     }
   );
 
   server.tool(
-    'hohmann',
-    'Plan a Hohmann transfer to the current target. Requires a target to be set first.',
+    'hohmann_transfer',
+    'Plan a Hohmann transfer to current target. Requires set_target first.',
     {
       timeReference: z.enum(['COMPUTED', 'PERIAPSIS', 'APOAPSIS'])
         .default('COMPUTED')
         .describe('When to execute: COMPUTED (optimal), PERIAPSIS, or APOAPSIS'),
       capture: z.boolean()
-        .default(true)
-        .describe('Include capture burn for vessel rendezvous. Bodies always create 1 node (transfer only).'),
+        .optional()
+        .describe('Include capture burn. Default: true for vessels, false for bodies (use course_correct after transfer).'),
       includeTelemetry: z.boolean()
         .default(false)
         .describe('Include ship telemetry in response (slower but more info)'),
@@ -499,7 +518,16 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.hohmannTransfer(args.timeReference, args.capture);
+
+        // Auto-detect capture setting based on target type if not specified
+        let capture = args.capture;
+        if (capture === undefined) {
+          const targetInfo = await conn.execute('IF HASTARGET { PRINT TARGET:ISVESSEL. } ELSE { PRINT "NOTARGET". }');
+          const isVessel = targetInfo.output.includes('True');
+          capture = isVessel;  // true for vessels, false for bodies
+        }
+
+        const result = await maneuver.hohmannTransfer(args.timeReference, capture);
 
         if (result.success) {
           const nodeCount = result.nodesCreated ?? 1;
@@ -521,7 +549,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'course_correct',
-    'Fine-tune closest approach to target. Requires target to be set first.',
+    'Plan a course correction to fine-tune closest approach. Requires set_target first.',
     {
       targetDistance: z.number().describe('Target periapsis (bodies) or closest approach (vessels) in meters'),
       minLeadTime: z.number()
@@ -556,7 +584,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'match_planes',
-    'Match orbital plane with the target. Requires a target to be set first.',
+    'Plan a plane change to match inclination with target. Requires set_target first.',
     {
       timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])
         .default('REL_NEAREST_AD')
@@ -581,7 +609,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'match_velocities',
-    'Match velocity with the target. Requires a target to be set first.',
+    'Plan a velocity match with target. Requires set_target first.',
     {
       timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])
         .default('CLOSEST_APPROACH')
@@ -605,8 +633,8 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'interplanetary',
-    'Interplanetary transfer. Requires a target planet to be set first.',
+    'interplanetary_transfer',
+    'Plan an interplanetary transfer. Requires set_target first.',
     {
       waitForPhaseAngle: z.boolean()
         .default(true)
@@ -631,7 +659,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'return_from_moon',
-    'Return from a moon to its parent body.',
+    'Create a maneuver node to return from moon to parent body.',
     {
       targetPeriapsis: z.number().describe('Target periapsis at parent body in meters (e.g., 100000 for 100km)'),
     },
@@ -654,7 +682,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'resonant_orbit',
-    'Establish a resonant orbit for satellite constellation deployment.',
+    'Create a maneuver node for resonant orbit (constellation deployment).',
     {
       numerator: z.number().int().positive().describe('Numerator of resonance ratio (e.g., 2 for 2:3)'),
       denominator: z.number().int().positive().describe('Denominator of resonance ratio (e.g., 3 for 2:3)'),
@@ -681,7 +709,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'set_target',
-    'Set the target (celestial body or vessel).',
+    'Set target for transfers. Required before: hohmann_transfer, match_planes, match_velocities, course_correct, interplanetary_transfer.',
     {
       name: z.string().describe('Name of target (e.g., "Mun", "Minmus", vessel name)'),
       type: z.enum(['auto', 'body', 'vessel']).default('auto')
@@ -751,7 +779,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'execute_node',
-    'Execute the next maneuver node. Waits for completion by default.',
+    'Execute the burn for a maneuver node created by planning tools (hohmann_transfer, circularize, etc.). Waits for completion by default.',
     {
       async: z.boolean()
         .default(false)
@@ -829,7 +857,7 @@ export function createServer(): McpServer {
 
   server.tool(
     'command',
-    'Run a manual kOS command.',
+    'Run raw kOS script - advanced use.',
     {
       command: z.string().describe('kOS script command to send'),
       timeout: z.number().default(5000).describe('Command timeout in milliseconds'),
@@ -846,13 +874,13 @@ export function createServer(): McpServer {
 
   server.tool(
     'status',
-    'Get current kOS connection status',
+    'Get current kOS connection status. Note: All tools auto-connect when needed.',
     {},
     async () => {
       const state = await handleStatus();
       const text = state.connected
         ? `Connected to CPU ${state.cpuId} on ${state.vesselName}`
-        : 'Not connected';
+        : 'Ready for automated maneuver planning with kOS and MechJeb.';
       return successResponse('status', text);
     }
   );
