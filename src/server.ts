@@ -56,40 +56,26 @@ export function clearAscentHandle(): void {
   currentAscentHandle = null;
 }
 
+const DEBUG = process.env.KSP_MCP_DEBUG === '1';
+
 /**
- * Helper to create a success response with structured content.
+ * Helper to create a success response.
  */
-function successResponse(
-  action: string,
-  text: string,
-  data?: Record<string, unknown>
-) {
+function successResponse(action: string, text: string) {
   return {
     content: [{ type: 'text' as const, text }],
-    structuredContent: {
-      status: 'success' as const,
-      action,
-      ...data
-    }
   };
 }
 
 /**
- * Helper to create an error response with structured content.
+ * Helper to create an error response.
+ * In debug mode, includes the raw error details.
  */
-function errorResponse(
-  action: string,
-  text: string,
-  reason: string
-) {
+function errorResponse(action: string, error: string) {
+  const text = DEBUG ? `${action}: ${error}` : error;
   return {
     content: [{ type: 'text' as const, text }],
     isError: true,
-    structuredContent: {
-      status: 'error' as const,
-      action,
-      reason
-    }
   };
 }
 
@@ -111,8 +97,7 @@ export function createServer(): McpServer {
         await handleDisconnect();
         return successResponse('disconnect', 'Disconnected successfully.');
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('disconnect', `Disconnect failed: ${reason}`, reason);
+        return errorResponse('disconnect', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -123,7 +108,10 @@ export function createServer(): McpServer {
     {},
     async () => {
       const state = await handleStatus();
-      return successResponse('status', JSON.stringify(state, null, 2), { ...state });
+      const text = state.connected
+        ? `Connected to CPU ${state.cpuId} on ${state.vesselName}`
+        : 'Not connected';
+      return successResponse('status', text);
     }
   );
 
@@ -140,8 +128,7 @@ export function createServer(): McpServer {
         );
         return successResponse('clear_nodes', 'Maneuver nodes cleared!');
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('clear_nodes', `Clear nodes failed: ${reason}`, reason);
+        return errorResponse('clear_nodes', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -154,12 +141,11 @@ export function createServer(): McpServer {
       try {
         const cpus = await handleListCpus(args);
         const text = cpus.length > 0
-          ? `Found ${cpus.length} CPU(s):\n` + JSON.stringify(cpus, null, 2)
+          ? `Found ${cpus.length} CPU(s):\n` + cpus.map(c => `  ${c.id}: ${c.vessel} (${c.tag || 'no tag'})`).join('\n')
           : 'No CPUs found';
-        return successResponse('list_cpus', text, { cpus });
+        return successResponse('list_cpus', text);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('list_cpus', `List CPUs failed: ${reason}`, reason);
+        return errorResponse('list_cpus', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -176,53 +162,41 @@ export function createServer(): McpServer {
       try {
         if (args.clear) {
           setCpuPreference(null);
-          // Force disconnect so next command auto-selects CPU
           await forceDisconnect();
-          return successResponse('set_cpu', 'CPU preference cleared and disconnected. Next command will auto-select CPU.', { cleared: true });
+          return successResponse('set_cpu', 'CPU preference cleared.');
         }
 
         if (args.cpuId === undefined && args.cpuLabel === undefined) {
-          // Just return current preference
           const current = getCpuPreference();
           if (current) {
             const desc = current.cpuLabel ? `label="${current.cpuLabel}"` : `id=${current.cpuId}`;
-            return successResponse('set_cpu', `Current CPU preference: ${desc}`, { ...current });
+            return successResponse('set_cpu', `Current: ${desc}`);
           }
-          return successResponse('set_cpu', 'No CPU preference set. Auto-selecting first available CPU.', { cleared: true });
+          return successResponse('set_cpu', 'No preference set (auto-select).');
         }
 
-        // Set new preference
-        setCpuPreference({
-          cpuId: args.cpuId,
-          cpuLabel: args.cpuLabel,
-        });
-
+        setCpuPreference({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const desc = args.cpuLabel ? `label="${args.cpuLabel}"` : `id=${args.cpuId}`;
-        return successResponse('set_cpu', `CPU preference set to ${desc}. Next connection will use this CPU.`, {
-          cpuId: args.cpuId,
-          cpuLabel: args.cpuLabel,
-        });
+        return successResponse('set_cpu', `Set to ${desc}`);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('set_cpu', `Set CPU failed: ${reason}`, reason);
+        return errorResponse('set_cpu', error instanceof Error ? error.message : String(error));
       }
     }
   );
 
   server.tool(
-    'execute',
-    'Execute a raw kOS command and return the output.',
+    'command',
+    'Run a manual kOS command.',
     {
-      command: z.string().describe('kOS command to execute'),
+      command: z.string().describe('kOS script command to send'),
       timeout: z.number().default(5000).describe('Command timeout in milliseconds'),
     },
     async (args) => {
       const result = await handleExecute(args);
       if (result.success) {
-        return successResponse('execute', result.output || '(no output)', { output: result.output });
+        return successResponse('command', result.output || '(no output)');
       } else {
-        const reason = result.error ?? 'Unknown error';
-        return errorResponse('execute', `Execute failed: ${reason}\nOutput: ${result.output}`, reason);
+        return errorResponse('command', result.error ?? 'Failed');
       }
     }
   );
@@ -237,11 +211,9 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected();
         const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
-        // telemetry is a formatted string; include raw text in data too
-        return successResponse('telemetry', telemetry, { telemetry });
+        return successResponse('telemetry', telemetry);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('telemetry', `Telemetry failed: ${reason}`, reason);
+        return errorResponse('telemetry', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -264,24 +236,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('adjust_pe',
-            `Periapsis change planned!\n` +
-              `  Target Pe: ${args.altitude / 1000} km\n` +
-              `  Time ref: ${args.timeRef}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetAltitude: args.altitude,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('adjust_pe', `Periapsis change failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('adjust_pe', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('adjust_pe', `Periapsis change failed: ${reason}`, reason);
+        return errorResponse('adjust_pe', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -303,24 +263,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('adjust_ap',
-            `Apoapsis change planned!\n` +
-              `  Target Ap: ${args.altitude / 1000} km\n` +
-              `  Time ref: ${args.timeRef}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetAltitude: args.altitude,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('adjust_ap', `Apoapsis change failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('adjust_ap', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('adjust_ap', `Apoapsis change failed: ${reason}`, reason);
+        return errorResponse('adjust_ap', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -341,22 +289,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('circularize',
-            `Circularization planned!\n` +
-              `  Time ref: ${args.timeRef}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('circularize', `Circularization failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('circularize', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('circularize', `Circularization failed: ${reason}`, reason);
+        return errorResponse('circularize', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -372,7 +310,7 @@ export function createServer(): McpServer {
         .describe('When to execute: COMPUTED (optimal), PERIAPSIS, or APOAPSIS'),
       capture: z.boolean()
         .default(true)
-        .describe('Include capture/insertion burn (creates 2 nodes). If false, only transfer burn (1 node)'),
+        .describe('Include capture burn for vessel rendezvous. Bodies always create 1 node (transfer only).'),
       includeTelemetry: z.boolean()
         .default(false)
         .describe('Include ship telemetry in response (slower but more info)'),
@@ -384,29 +322,19 @@ export function createServer(): McpServer {
         const result = await maneuver.hohmannTransfer(args.timeReference, args.capture);
 
         if (result.success) {
-          const nodeCount = args.capture ? 2 : 1;
-          let text = `Hohmann transfer planned!\n` +
-            `  Nodes created: ${nodeCount}\n` +
-            `  Delta-V (first node): ${result.deltaV?.toFixed(1)} m/s\n` +
-            `  Time to node: ${result.timeToNode?.toFixed(0)} s`;
+          const nodeCount = result.nodesCreated ?? 1;
+          let text = `${nodeCount} node(s) created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`;
 
           if (args.includeTelemetry) {
             text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
           }
 
-          return successResponse('hohmann', text, {
-            nodesCreated: nodeCount,
-            capture: args.capture,
-            timeReference: args.timeReference,
-            deltaV: result.deltaV,
-            timeToNode: result.timeToNode
-          });
+          return successResponse('hohmann', text);
         } else {
-          return errorResponse('hohmann', `Hohmann transfer failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('hohmann', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('hohmann', `Hohmann transfer failed: ${reason}`, reason);
+        return errorResponse('hohmann', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -426,31 +354,22 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.courseCorrection(args.targetDistance, args.minLeadTime);
 
         if (!result.success) {
-          return errorResponse('course_correct', `Course correction failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('course_correct', result.error ?? 'Failed');
         }
 
-        let text = `Course correction planned!\n` +
-              `  Target approach: ${args.targetDistance / 1000} km\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`;
+        let text = `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`;
 
         if (args.includeTelemetry) {
           text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
         }
 
-        return successResponse('course_correct', text, {
-          targetDistance: args.targetDistance,
-          deltaV: result.deltaV,
-          timeToNode: result.timeToNode
-        });
+        return successResponse('course_correct', text);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('course_correct', `Course correction failed: ${reason}`, reason);
+        return errorResponse('course_correct', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -467,30 +386,17 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.changeInclination(args.newInclination, args.timeRef);
 
         if (!result.success) {
-          return errorResponse('change_inc', `Inclination change failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('change_inc', result.error ?? 'Failed');
         }
 
         return successResponse('change_inc',
-          `Inclination change planned!\n` +
-            `  Target inclination: ${args.newInclination}°\n` +
-            `  Execution point: ${args.timeRef}\n` +
-            `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-            `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-          {
-            targetInclination: args.newInclination,
-            timeRef: args.timeRef,
-            deltaV: result.deltaV,
-            timeToNode: result.timeToNode
-          }
-        );
+          `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('change_inc', `Inclination change failed: ${reason}`, reason);
+        return errorResponse('change_inc', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -513,25 +419,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('ellipticize',
-            `Orbit reshape planned!\n` +
-              `  Target Pe: ${args.periapsis / 1000} km\n` +
-              `  Target Ap: ${args.apoapsis / 1000} km\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetPe: args.periapsis,
-              targetAp: args.apoapsis,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('ellipticize', `Orbit reshape failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('ellipticize', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('ellipticize', `Orbit reshape failed: ${reason}`, reason);
+        return errorResponse('ellipticize', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -552,23 +445,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('change_sma',
-            `SMA change planned!\n` +
-              `  Target SMA: ${args.semiMajorAxis / 1000} km\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetSMA: args.semiMajorAxis,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_sma', `SMA change failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('change_sma', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('change_sma', `SMA change failed: ${reason}`, reason);
+        return errorResponse('change_sma', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -589,23 +471,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('change_ecc',
-            `Eccentricity change planned!\n` +
-              `  Target eccentricity: ${args.eccentricity}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetEccentricity: args.eccentricity,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_ecc', `Eccentricity change failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('change_ecc', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('change_ecc', `Eccentricity change failed: ${reason}`, reason);
+        return errorResponse('change_ecc', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -626,23 +497,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('change_lan',
-            `LAN change planned!\n` +
-              `  Target LAN: ${args.lan}°\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetLAN: args.lan,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_lan', `LAN change failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('change_lan', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('change_lan', `LAN change failed: ${reason}`, reason);
+        return errorResponse('change_lan', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -663,23 +523,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('change_lpe',
-            `Periapsis longitude change planned!\n` +
-              `  Target longitude: ${args.longitude}°\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetLongitude: args.longitude,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('change_lpe', `Periapsis longitude change failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('change_lpe', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('change_lpe', `Periapsis longitude change failed: ${reason}`, reason);
+        return errorResponse('change_lpe', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -699,22 +548,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('match_planes',
-            `Plane match planned!\n` +
-              `  Execution point: ${args.timeRef}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('match_planes', `Plane match failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('match_planes', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('match_planes', `Plane match failed: ${reason}`, reason);
+        return errorResponse('match_planes', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -734,22 +573,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('match_velocities',
-            `Velocity match planned!\n` +
-              `  Execution point: ${args.timeRef}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('match_velocities', `Velocity match failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('match_velocities', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('match_velocities', `Velocity match failed: ${reason}`, reason);
+        return errorResponse('match_velocities', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -771,24 +600,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('resonant_orbit',
-            `Resonant orbit planned!\n` +
-              `  Resonance: ${args.numerator}:${args.denominator}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              numerator: args.numerator,
-              denominator: args.denominator,
-              timeRef: args.timeRef,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('resonant_orbit', `Resonant orbit failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('resonant_orbit', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('resonant_orbit', `Resonant orbit failed: ${reason}`, reason);
+        return errorResponse('resonant_orbit', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -806,22 +623,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('return_from_moon',
-            `Moon return planned!\n` +
-              `  Target periapsis: ${args.targetPeriapsis / 1000} km\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              targetPeriapsis: args.targetPeriapsis,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('return_from_moon', `Moon return failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('return_from_moon', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('return_from_moon', `Moon return failed: ${reason}`, reason);
+        return errorResponse('return_from_moon', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -841,22 +648,12 @@ export function createServer(): McpServer {
 
         if (result.success) {
           return successResponse('interplanetary',
-            `Interplanetary transfer planned!\n` +
-              `  Wait for phase angle: ${args.waitForPhaseAngle}\n` +
-              `  Delta-V: ${result.deltaV?.toFixed(1)} m/s\n` +
-              `  Time to node: ${result.timeToNode?.toFixed(0)} s`,
-            {
-              waitForPhaseAngle: args.waitForPhaseAngle,
-              deltaV: result.deltaV,
-              timeToNode: result.timeToNode
-            }
-          );
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
         } else {
-          return errorResponse('interplanetary', `Interplanetary transfer failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('interplanetary', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('interplanetary', `Interplanetary transfer failed: ${reason}`, reason);
+        return errorResponse('interplanetary', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -864,8 +661,11 @@ export function createServer(): McpServer {
   // Node Execution Tool
   server.tool(
     'execute_node',
-    'Execute the next maneuver node. Monitors until completion.',
+    'Execute the next maneuver node. Waits for completion by default.',
     {
+      async: z.boolean()
+        .default(false)
+        .describe('If true, return immediately after starting executor instead of waiting for completion'),
       timeoutSeconds: z.number()
         .default(240)
         .describe('Maximum time to wait for node execution in seconds (default: 240 = 4 minutes)'),
@@ -876,23 +676,29 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await executeNode(conn, args.timeoutSeconds * 1000);
+        const result = await executeNode(conn, {
+          timeoutMs: args.timeoutSeconds * 1000,
+          async: args.async,
+        });
 
         if (result.success) {
-          let text = `Node executed successfully!\n` +
-            `  Nodes executed: ${result.nodesExecuted}`;
+          let text: string;
+          if (args.async) {
+            text = `Executor started: ${result.deltaV?.required.toFixed(1)} m/s required`;
+          } else {
+            text = `Node executed: ${result.nodesExecuted} node(s)`;
+          }
 
           if (args.includeTelemetry) {
             text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
           }
 
-          return successResponse('execute_node', text, { nodesExecuted: result.nodesExecuted });
+          return successResponse('execute_node', text);
         } else {
-          return errorResponse('execute_node', `Node execution failed: ${result.error}\n  Nodes executed: ${result.nodesExecuted}`, result.error ?? 'Unknown error');
+          return errorResponse('execute_node', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('execute_node', `Node execution failed: ${reason}`, reason);
+        return errorResponse('execute_node', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -920,19 +726,9 @@ export function createServer(): McpServer {
         });
 
         return successResponse('launch',
-          `Launch initiated!\n` +
-            `  Target altitude: ${args.altitude / 1000} km\n` +
-            `  Target inclination: ${args.inclination}°\n` +
-            `  Skip circularization: ${args.skipCircularization}`,
-          {
-            targetAltitude: args.altitude,
-            inclination: args.inclination,
-            skipCircularization: args.skipCircularization
-          }
-        );
+          `Launch initiated to ${args.altitude / 1000}km at ${args.inclination}° inclination`);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('launch', `Launch failed: ${reason}`, reason);
+        return errorResponse('launch', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -1033,25 +829,9 @@ export function createServer(): McpServer {
         };
 
         return successResponse('ascent_status',
-          `Ascent Status:\n` +
-            `  Phase: ${progress.phase} (${phaseDescriptions[progress.phase] || progress.phase})\n` +
-            `  Altitude: ${Math.round(progress.altitude / 1000)} km\n` +
-            `  Apoapsis: ${Math.round(progress.apoapsis / 1000)} km\n` +
-            `  Periapsis: ${Math.round(progress.periapsis / 1000)} km\n` +
-            `  MechJeb enabled: ${progress.enabled}\n` +
-            `  Ship status: ${progress.shipStatus}`,
-          {
-            phase: progress.phase,
-            altitude: progress.altitude,
-            apoapsis: progress.apoapsis,
-            periapsis: progress.periapsis,
-            mechjebEnabled: progress.enabled,
-            shipStatus: progress.shipStatus
-          }
-        );
+          `${progress.phase}: Alt ${Math.round(progress.altitude / 1000)}km, Ap ${Math.round(progress.apoapsis / 1000)}km, Pe ${Math.round(progress.periapsis / 1000)}km`);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('ascent_status', `Ascent status failed: ${reason}`, reason);
+        return errorResponse('ascent_status', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -1069,14 +849,12 @@ export function createServer(): McpServer {
           await currentAscentHandle.abort();
           currentAscentHandle = null;
         } else {
-          // Disable directly
           await conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
         }
 
         return successResponse('abort_ascent', 'Ascent guidance disabled.');
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('abort_ascent', `Abort ascent failed: ${reason}`, reason);
+        return errorResponse('abort_ascent', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -1097,17 +875,12 @@ export function createServer(): McpServer {
 
         const result = await maneuver.setTarget(args.name, args.type);
         if (!result.success) {
-          const errorMsg = result.error ?? `Failed to set target "${args.name}"`;
-          return errorResponse('set_target', errorMsg, errorMsg);
+          return errorResponse('set_target', result.error ?? `Failed to set target "${args.name}"`);
         }
 
-        return successResponse('set_target',
-          `Target set successfully!\n\nName: ${result.name}\nType: ${result.type}`,
-          { name: result.name, type: result.type }
-        );
+        return successResponse('set_target', `Target: ${result.name} (${result.type})`);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('set_target', `Target set failed: ${reason}`, reason);
+        return errorResponse('set_target', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -1124,13 +897,12 @@ export function createServer(): McpServer {
 
         const info = await maneuver.getTargetInfo();
         if (!info.hasTarget) {
-          return successResponse('get_target', 'No target currently set.', { hasTarget: false });
+          return successResponse('get_target', 'No target set.');
         }
 
-        return successResponse('get_target', info.details ?? '', { ...info });
+        return successResponse('get_target', info.details ?? `Target: ${info.name}`);
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('get_target', `Get target failed: ${reason}`, reason);
+        return errorResponse('get_target', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -1148,18 +920,12 @@ export function createServer(): McpServer {
         const result = await maneuver.clearTarget();
 
         if (result.cleared) {
-          return successResponse('clear_target', 'Target cleared successfully.');
+          return successResponse('clear_target', 'Target cleared.');
         }
 
-        // Command executed but target not cleared - known kOS bug
-        const message = result.warning
-          ? `Clear target command sent.\n\nWARNING: ${result.warning}`
-          : 'Clear target command sent, but target may still be set.';
-
-        return successResponse('clear_target', message, { cleared: false, warning: result.warning });
+        return successResponse('clear_target', result.warning ?? 'Clear command sent.');
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('clear_target', `Clear target failed: ${reason}`, reason);
+        return errorResponse('clear_target', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -1252,23 +1018,12 @@ export function createServer(): McpServer {
         }
 
         if (result.success) {
-          return successResponse('warp',
-            `Warp complete!\n` +
-              `  Body: ${result.body}\n` +
-              `  Altitude: ${(result.altitude || 0) / 1000} km`,
-            {
-              target: args.target,
-              leadTime: args.leadTime,
-              body: result.body,
-              altitude: result.altitude
-            }
-          );
+          return successResponse('warp', `Warp complete: ${result.body}, ${((result.altitude || 0) / 1000).toFixed(0)}km`);
         } else {
-          return errorResponse('warp', `Warp failed: ${result.error}`, result.error ?? 'Unknown error');
+          return errorResponse('warp', result.error ?? 'Failed');
         }
       } catch (error) {
-        const reason = error instanceof Error ? error.message : String(error);
-        return errorResponse('warp', `Warp failed: ${reason}`, reason);
+        return errorResponse('warp', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -1282,16 +1037,12 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const conn = await ensureConnected();
-
       const result = await quickload(conn, args.saveName);
 
       if (result.success) {
-        return successResponse('load_save',
-          `Quickload initiated: ${result.saveName}`,
-          { saveName: result.saveName }
-        );
+        return successResponse('load_save', `Loading: ${result.saveName}`);
       } else {
-        return errorResponse('load_save', `Load save failed: ${result.error}`, result.error ?? 'Unknown error');
+        return errorResponse('load_save', result.error ?? 'Failed');
       }
     }
   );
@@ -1303,16 +1054,15 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const conn = await ensureConnected();
-
       const result = await listQuicksaves(conn);
 
       if (result.success) {
         const savesList = result.saves.length > 0
-          ? result.saves.map(s => `  - ${s}`).join('\n')
-          : '  (no quicksaves found)';
-        return successResponse('list_saves', `Available quicksaves:\n${savesList}`, { saves: result.saves });
+          ? result.saves.join(', ')
+          : '(none)';
+        return successResponse('list_saves', `Saves: ${savesList}`);
       } else {
-        return errorResponse('list_saves', `List saves failed: ${result.error}`, result.error ?? 'Unknown error');
+        return errorResponse('list_saves', result.error ?? 'Failed');
       }
     }
   );
@@ -1325,13 +1075,12 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const conn = await ensureConnected();
-
       const result = await quicksave(conn, args.saveName);
 
       if (result.success) {
-        return successResponse('quicksave', `Quicksave created: ${result.saveName}`, { saveName: result.saveName });
+        return successResponse('quicksave', `Saved: ${result.saveName}`);
       } else {
-        return errorResponse('quicksave', `Quicksave failed: ${result.error}`, result.error ?? 'Unknown error');
+        return errorResponse('quicksave', result.error ?? 'Failed');
       }
     }
   );

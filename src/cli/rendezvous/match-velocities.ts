@@ -59,7 +59,7 @@ async function main() {
     console.log('6. Executing node with MechJeb...');
     console.log('   (Monitoring execution...)\n');
 
-    const execResult = await executeNode(conn, 240000, 5000);
+    const execResult = await executeNode(conn, { timeoutMs: 240000, pollIntervalMs: 5000 });
 
     if (execResult.success) {
       console.log('✅ Match velocities executed!\n');

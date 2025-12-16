@@ -37,7 +37,7 @@ async function main() {
     console.log('4. Executing node with MechJeb...');
     console.log('   (Monitoring execution...)\n');
 
-    const result = await executeNode(conn, 240000, 5000);
+    const result = await executeNode(conn, { timeoutMs: 240000, pollIntervalMs: 5000 });
 
     if (result.success) {
       console.log(`\n✅ ${result.nodesExecuted} node(s) executed successfully!\n`);

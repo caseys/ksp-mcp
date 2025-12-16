@@ -15,6 +15,7 @@ export interface ManeuverResult {
   success: boolean;
   deltaV?: number;        // m/s
   timeToNode?: number;    // seconds
+  nodesCreated?: number;  // actual number of nodes created
   error?: string;
 }
 

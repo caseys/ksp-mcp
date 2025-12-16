@@ -469,10 +469,15 @@ export class ManeuverProgram {
       };
     }
 
+    // Query actual node count (MechJeb may create 1 or 2 depending on target type)
+    const nodeCountResult = await this.conn.execute('PRINT ALLNODES:LENGTH.', 2000);
+    const nodesCreated = parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+
     return {
       success: true,
       deltaV,
       timeToNode,
+      nodesCreated,
     };
   }
 

@@ -34,6 +34,12 @@ const DEFAULT_TIMEOUT_MS = 600000; // 10 minutes
 const DEFAULT_POLL_INTERVAL_MS = 5000; // 5 seconds
 const DV_THRESHOLD = 0.5; // m/s - consider burn complete below this
 
+export interface ExecuteNodeOptions {
+  timeoutMs?: number;
+  pollIntervalMs?: number;
+  async?: boolean; // If true, return immediately after starting executor
+}
+
 /**
  * Execute the next maneuver node using MechJeb autopilot.
  *
@@ -44,15 +50,18 @@ const DV_THRESHOLD = 0.5; // m/s - consider burn complete below this
  * - Retry logic for incomplete burns
  *
  * @param conn kOS connection
- * @param timeoutMs Maximum time to wait for node execution (default: 10 minutes)
- * @param pollIntervalMs How often to check progress (default: 5 seconds)
+ * @param options Execution options (timeoutMs, pollIntervalMs, async)
  * @returns ExecuteNodeResult with success status and delta-v info
  */
 export async function executeNode(
   conn: KosConnection,
-  timeoutMs = DEFAULT_TIMEOUT_MS,
-  pollIntervalMs = DEFAULT_POLL_INTERVAL_MS
+  options: ExecuteNodeOptions = {}
 ): Promise<ExecuteNodeResult> {
+  const {
+    timeoutMs = DEFAULT_TIMEOUT_MS,
+    pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
+    async: asyncMode = false,
+  } = options;
   // Check if a node exists
   const nodeCheck = await conn.execute('PRINT HASNODE.', 2000);
   if (!nodeCheck.output.includes('True')) {
@@ -141,6 +150,16 @@ export async function executeNode(
 
     // Install post-burn time warp kick trigger
     await installTimeWarpKickTrigger(conn, 'NOT HASNODE', 10);
+
+    // In async mode, return immediately after starting executor
+    if (asyncMode) {
+      return {
+        success: true,
+        nodesExecuted: 0, // Not yet executed, just started
+        deltaV: { required: dvRequired, available: totalDv },
+        attempts: 1
+      };
+    }
 
     // Wait for execution with timeout
     const maxIterations = Math.ceil(timeoutMs / pollIntervalMs);
