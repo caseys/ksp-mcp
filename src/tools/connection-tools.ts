@@ -6,6 +6,37 @@ import { config } from '../config.js';
 // Shared connection instance
 let connection: KosConnection | null = null;
 
+// Runtime CPU preference (overrides config, persists until changed or process stops)
+interface CpuPreference {
+  cpuId?: number;
+  cpuLabel?: string;
+}
+let cpuPreference: CpuPreference | null = null;
+
+/**
+ * Set runtime CPU preference for all subsequent connections.
+ * This overrides config.kos.cpuId/cpuLabel until cleared or process stops.
+ *
+ * @param pref - CPU preference (cpuId or cpuLabel), or null to clear
+ */
+export function setCpuPreference(pref: CpuPreference | null): void {
+  cpuPreference = pref;
+}
+
+/**
+ * Get current runtime CPU preference.
+ */
+export function getCpuPreference(): CpuPreference | null {
+  return cpuPreference;
+}
+
+/**
+ * Clear runtime CPU preference (reverts to config defaults).
+ */
+export function clearCpuPreference(): void {
+  cpuPreference = null;
+}
+
 export function getConnection(): KosConnection {
   if (!connection) {
     connection = new KosConnection();
@@ -96,9 +127,10 @@ async function isConnectionHealthy(conn: KosConnection): Promise<boolean> {
 
 /**
  * Force close the connection and reset state.
- * Used when health check fails to ensure clean reconnection.
+ * Used when health check fails to ensure clean reconnection,
+ * or when CPU preference is cleared to force auto-selection.
  */
-async function forceDisconnect(): Promise<void> {
+export async function forceDisconnect(): Promise<void> {
   if (connection) {
     try {
       await connection.disconnect();
@@ -116,10 +148,15 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
   const conn = getConnection();
   const state = conn.getState();
 
+  // Priority: runtime preference (set_cpu) > config defaults
+  // Per-call options are only used internally; MCP tools use set_cpu for CPU selection
+  const effectiveCpuId = options?.cpuId ?? cpuPreference?.cpuId;
+  const effectiveCpuLabel = options?.cpuLabel ?? cpuPreference?.cpuLabel;
+
   // Check if we need to reconnect to a different CPU
-  const needsReconnect = options && (
-    (options.cpuId !== undefined && options.cpuId !== state.cpuId) ||
-    (options.cpuLabel !== undefined && options.cpuLabel !== state.cpuTag)
+  const needsReconnect = (
+    (effectiveCpuId !== undefined && effectiveCpuId !== state.cpuId) ||
+    (effectiveCpuLabel !== undefined && effectiveCpuLabel !== state.cpuTag)
   );
 
   if (conn.isConnected() && !needsReconnect) {
@@ -132,11 +169,11 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
     await forceDisconnect();
   }
 
-  // Connect (or reconnect) with specified options
+  // Connect (or reconnect) with merged options
   try {
     const connectResult = await handleConnect({
-      cpuId: options?.cpuId,
-      cpuLabel: options?.cpuLabel,
+      cpuId: effectiveCpuId,
+      cpuLabel: effectiveCpuLabel,
     });
 
     if (!connectResult.connected) {

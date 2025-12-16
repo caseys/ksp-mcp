@@ -223,6 +223,7 @@ npm run kos                 # Execute kOS command via daemon
 - **disconnect** - Disconnect from kOS
 - **execute** - Execute raw kOS commands
 - **list_cpus** - List available kOS CPUs
+- **set_cpu** - Set CPU preference for session (by ID or label), or clear to auto-select
 - **telemetry** - Get ship orbit/status info
 
 ### Targeting

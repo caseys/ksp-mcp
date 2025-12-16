@@ -10,6 +10,9 @@ import {
   handleExecute,
   getConnection,
   ensureConnected,
+  setCpuPreference,
+  getCpuPreference,
+  forceDisconnect,
 } from './tools/connection-tools.js';
 import {
   listCpusInputSchema,
@@ -162,6 +165,51 @@ export function createServer(): McpServer {
   );
 
   server.tool(
+    'set_cpu',
+    'Set the preferred CPU for this session. All subsequent tool calls will use this CPU until changed or server stops.',
+    {
+      cpuId: z.number().optional().describe('CPU ID (1-based) to use for all connections'),
+      cpuLabel: z.string().optional().describe('CPU label/tag (e.g., "guidance") to use for all connections'),
+      clear: z.boolean().optional().describe('Set to true to clear CPU preference and revert to auto-select'),
+    },
+    async (args) => {
+      try {
+        if (args.clear) {
+          setCpuPreference(null);
+          // Force disconnect so next command auto-selects CPU
+          await forceDisconnect();
+          return successResponse('set_cpu', 'CPU preference cleared and disconnected. Next command will auto-select CPU.', { cleared: true });
+        }
+
+        if (args.cpuId === undefined && args.cpuLabel === undefined) {
+          // Just return current preference
+          const current = getCpuPreference();
+          if (current) {
+            const desc = current.cpuLabel ? `label="${current.cpuLabel}"` : `id=${current.cpuId}`;
+            return successResponse('set_cpu', `Current CPU preference: ${desc}`, { ...current });
+          }
+          return successResponse('set_cpu', 'No CPU preference set. Auto-selecting first available CPU.', { cleared: true });
+        }
+
+        // Set new preference
+        setCpuPreference({
+          cpuId: args.cpuId,
+          cpuLabel: args.cpuLabel,
+        });
+
+        const desc = args.cpuLabel ? `label="${args.cpuLabel}"` : `id=${args.cpuId}`;
+        return successResponse('set_cpu', `CPU preference set to ${desc}. Next connection will use this CPU.`, {
+          cpuId: args.cpuId,
+          cpuLabel: args.cpuLabel,
+        });
+      } catch (error) {
+        const reason = error instanceof Error ? error.message : String(error);
+        return errorResponse('set_cpu', `Set CPU failed: ${reason}`, reason);
+      }
+    }
+  );
+
+  server.tool(
     'execute',
     'Execute a raw kOS command and return the output.',
     {
@@ -184,12 +232,10 @@ export function createServer(): McpServer {
     'telemetry',
     'Get current ship telemetry including orbit, SOI, maneuver nodes, and encounters.',
     {
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
         // telemetry is a formatted string; include raw text in data too
         return successResponse('telemetry', telemetry, { telemetry });
@@ -209,12 +255,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.adjustPeriapsis(args.altitude, args.timeRef);
 
@@ -250,12 +294,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('PERIAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.adjustApoapsis(args.altitude, args.timeRef);
 
@@ -290,12 +332,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to circularize (usually at apoapsis or periapsis)'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.circularize(args.timeRef);
 
@@ -336,12 +376,10 @@ export function createServer(): McpServer {
       includeTelemetry: z.boolean()
         .default(false)
         .describe('Include ship telemetry in response (slower but more info)'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.hohmannTransfer(args.timeReference, args.capture);
 
@@ -384,12 +422,10 @@ export function createServer(): McpServer {
       includeTelemetry: z.boolean()
         .default(false)
         .describe('Include ship telemetry in response (slower but more info)'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
 
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.courseCorrection(args.targetDistance, args.minLeadTime);
@@ -427,12 +463,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])
         .default('EQ_NEAREST_AD')
         .describe('When to execute: at ascending node, descending node, nearest AN/DN, or highest AD'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
 
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.changeInclination(args.newInclination, args.timeRef);
@@ -471,12 +505,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await ellipticize(conn, args.periapsis, args.apoapsis, args.timeRef);
 
         if (result.success) {
@@ -512,12 +544,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await changeSemiMajorAxis(conn, args.semiMajorAxis, args.timeRef);
 
         if (result.success) {
@@ -551,12 +581,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await changeEccentricity(conn, args.eccentricity, args.timeRef);
 
         if (result.success) {
@@ -590,12 +618,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await changeLAN(conn, args.lan, args.timeRef);
 
         if (result.success) {
@@ -629,12 +655,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await changeLongitudeOfPeriapsis(conn, args.longitude, args.timeRef);
 
         if (result.success) {
@@ -667,12 +691,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])
         .default('REL_NEAREST_AD')
         .describe('When to execute: nearest AN/DN, highest AN/DN, ascending node, or descending node'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await matchPlane(conn, args.timeRef);
 
         if (result.success) {
@@ -704,12 +726,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])
         .default('CLOSEST_APPROACH')
         .describe('When to execute: at closest approach or after X seconds'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await killRelativeVelocity(conn, args.timeRef);
 
         if (result.success) {
@@ -743,12 +763,10 @@ export function createServer(): McpServer {
       timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'])
         .default('APOAPSIS')
         .describe('When to execute the maneuver'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await resonantOrbit(conn, args.numerator, args.denominator, args.timeRef);
 
         if (result.success) {
@@ -780,12 +798,10 @@ export function createServer(): McpServer {
     'Return from a moon to its parent body.',
     {
       targetPeriapsis: z.number().describe('Target periapsis at parent body in meters (e.g., 100000 for 100km)'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await returnFromMoon(conn, args.targetPeriapsis);
 
         if (result.success) {
@@ -817,12 +833,10 @@ export function createServer(): McpServer {
       waitForPhaseAngle: z.boolean()
         .default(true)
         .describe('If true, waits for optimal phase angle. If false, transfers immediately.'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await interplanetaryTransfer(conn, args.waitForPhaseAngle);
 
         if (result.success) {
@@ -858,12 +872,10 @@ export function createServer(): McpServer {
       includeTelemetry: z.boolean()
         .default(false)
         .describe('Include ship telemetry in response (slower but more info)'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const result = await executeNode(conn, args.timeoutSeconds * 1000);
 
         if (result.success) {
@@ -893,12 +905,10 @@ export function createServer(): McpServer {
       altitude: z.number().describe('Target orbit altitude in meters (e.g., 100000 for 100km)'),
       inclination: z.number().default(0).describe('Target orbit inclination in degrees'),
       skipCircularization: z.boolean().default(false).describe('Skip circularization burn (leaves in elliptical orbit)'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
 
         const ascent = new AscentProgram(conn);
         currentAscentHandle = await ascent.launchToOrbit({
@@ -931,12 +941,10 @@ export function createServer(): McpServer {
     'ascent_status',
     'Get current ascent progress including phase, altitude, apoapsis, and periapsis.',
     {
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
 
         // Use current handle if available, otherwise create temporary one
         let progress;
@@ -1052,12 +1060,10 @@ export function createServer(): McpServer {
     'abort_ascent',
     'Abort the current ascent guidance.',
     {
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
 
         if (currentAscentHandle) {
           await currentAscentHandle.abort();
@@ -1083,12 +1089,10 @@ export function createServer(): McpServer {
       name: z.string().describe('Name of target (e.g., "Mun", "Minmus", vessel name)'),
       type: z.enum(['auto', 'body', 'vessel']).default('auto')
         .describe('Target type: "auto" tries name directly, "body" for celestial bodies, "vessel" for ships'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
 
         const result = await maneuver.setTarget(args.name, args.type);
@@ -1112,12 +1116,10 @@ export function createServer(): McpServer {
     'get_target',
     'Get information about the current target.',
     {
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
 
         const info = await maneuver.getTargetInfo();
@@ -1137,12 +1139,10 @@ export function createServer(): McpServer {
     'clear_target',
     'Clear the current target.',
     {
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
 
         const maneuver = new ManeuverProgram(conn);
         const result = await maneuver.clearTarget();
@@ -1239,12 +1239,10 @@ export function createServer(): McpServer {
       leadTime: z.number()
         .default(60)
         .describe('Seconds before target to stop warping (default: 60)'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
       try {
-        const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const conn = await ensureConnected();
 
         let result;
         if (typeof args.target === 'number') {
@@ -1281,11 +1279,9 @@ export function createServer(): McpServer {
     'Load a KSP quicksave. Connection will be reset after load.',
     {
       saveName: z.string().describe('Name of the quicksave to load (e.g., "test-in-orbit")'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
-      const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+      const conn = await ensureConnected();
 
       const result = await quickload(conn, args.saveName);
 
@@ -1304,11 +1300,9 @@ export function createServer(): McpServer {
     'list_saves',
     'List available KSP quicksaves.',
     {
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
-      const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+      const conn = await ensureConnected();
 
       const result = await listQuicksaves(conn);
 
@@ -1328,11 +1322,9 @@ export function createServer(): McpServer {
     'Create a KSP quicksave with the given name.',
     {
       saveName: z.string().describe('Name for the quicksave'),
-      cpuId: z.number().optional().describe('CPU ID to connect to (auto-connects to CPU 0 if not specified)'),
-      cpuLabel: z.string().optional().describe('CPU label to connect to'),
     },
     async (args) => {
-      const conn = await ensureConnected({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+      const conn = await ensureConnected();
 
       const result = await quicksave(conn, args.saveName);
 
