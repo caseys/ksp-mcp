@@ -151,35 +151,35 @@ export function createServer(): McpServer {
   );
 
   server.tool(
-    'set_cpu',
-    'Set the preferred CPU for this session. All subsequent tool calls will use this CPU until changed or server stops.',
+    'switch_cpu',
+    'OPTIONAL: Switch to a different kOS CPU. Only needed when multiple CPUs exist and you want a specific one. By default, the first available CPU is used automatically.',
     {
-      cpuId: z.number().optional().describe('CPU ID (1-based) to use for all connections'),
-      cpuLabel: z.string().optional().describe('CPU label/tag (e.g., "guidance") to use for all connections'),
-      clear: z.boolean().optional().describe('Set to true to clear CPU preference and revert to auto-select'),
+      cpuId: z.number().optional().describe('CPU ID (1-based) to switch to'),
+      cpuLabel: z.string().optional().describe('CPU label/tag (e.g., "guidance") to switch to'),
+      clear: z.boolean().optional().describe('Clear preference and revert to auto-select'),
     },
     async (args) => {
       try {
         if (args.clear) {
           setCpuPreference(null);
           await forceDisconnect();
-          return successResponse('set_cpu', 'CPU preference cleared.');
+          return successResponse('switch_cpu', 'CPU preference cleared.');
         }
 
         if (args.cpuId === undefined && args.cpuLabel === undefined) {
           const current = getCpuPreference();
           if (current) {
             const desc = current.cpuLabel ? `label="${current.cpuLabel}"` : `id=${current.cpuId}`;
-            return successResponse('set_cpu', `Current: ${desc}`);
+            return successResponse('switch_cpu', `Current: ${desc}`);
           }
-          return successResponse('set_cpu', 'No preference set (auto-select).');
+          return successResponse('switch_cpu', 'Auto-select (no preference).');
         }
 
         setCpuPreference({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
         const desc = args.cpuLabel ? `label="${args.cpuLabel}"` : `id=${args.cpuId}`;
-        return successResponse('set_cpu', `Set to ${desc}`);
+        return successResponse('switch_cpu', `Switched to ${desc}`);
       } catch (error) {
-        return errorResponse('set_cpu', error instanceof Error ? error.message : String(error));
+        return errorResponse('switch_cpu', error instanceof Error ? error.message : String(error));
       }
     }
   );
