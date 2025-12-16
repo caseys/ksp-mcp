@@ -89,623 +89,7 @@ export function createServer(): McpServer {
   // Note: 'connect' is intentionally not exposed - all tools auto-connect via ensureConnected()
 
   server.tool(
-    'disconnect',
-    'Disconnect from kOS terminal',
-    {},
-    async () => {
-      try {
-        await handleDisconnect();
-        return successResponse('disconnect', 'Disconnected successfully.');
-      } catch (error) {
-        return errorResponse('disconnect', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'status',
-    'Get current kOS connection status',
-    {},
-    async () => {
-      const state = await handleStatus();
-      const text = state.connected
-        ? `Connected to CPU ${state.cpuId} on ${state.vesselName}`
-        : 'Not connected';
-      return successResponse('status', text);
-    }
-  );
-
-  server.tool(
-    'clear_nodes',
-    'Remove all maneuver nodes',
-    {},
-    async () => {
-      try {
-        const conn = await ensureConnected();
-        await conn.execute(
-          'SET _N TO ALLNODES:LENGTH. UNTIL NOT HASNODE { REMOVE NEXTNODE. } PRINT "Cleared " + _N + " node(s)".',
-          5000
-        );
-        return successResponse('clear_nodes', 'Maneuver nodes cleared!');
-      } catch (error) {
-        return errorResponse('clear_nodes', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'list_cpus',
-    'List available kOS CPUs without connecting.',
-    listCpusInputSchema.shape,
-    async (args) => {
-      try {
-        const cpus = await handleListCpus(args);
-        const text = cpus.length > 0
-          ? `Found ${cpus.length} CPU(s):\n` + cpus.map(c => `  ${c.id}: ${c.vessel} (${c.tag || 'no tag'})`).join('\n')
-          : 'No CPUs found';
-        return successResponse('list_cpus', text);
-      } catch (error) {
-        return errorResponse('list_cpus', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'switch_cpu',
-    'OPTIONAL: Switch to a different kOS CPU. Only needed when multiple CPUs exist and you want a specific one. By default, the first available CPU is used automatically.',
-    {
-      cpuId: z.number().optional().describe('CPU ID (1-based) to switch to'),
-      cpuLabel: z.string().optional().describe('CPU label/tag (e.g., "guidance") to switch to'),
-      clear: z.boolean().optional().describe('Clear preference and revert to auto-select'),
-    },
-    async (args) => {
-      try {
-        if (args.clear) {
-          setCpuPreference(null);
-          await forceDisconnect();
-          return successResponse('switch_cpu', 'CPU preference cleared.');
-        }
-
-        if (args.cpuId === undefined && args.cpuLabel === undefined) {
-          const current = getCpuPreference();
-          if (current) {
-            const desc = current.cpuLabel ? `label="${current.cpuLabel}"` : `id=${current.cpuId}`;
-            return successResponse('switch_cpu', `Current: ${desc}`);
-          }
-          return successResponse('switch_cpu', 'Auto-select (no preference).');
-        }
-
-        setCpuPreference({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
-        const desc = args.cpuLabel ? `label="${args.cpuLabel}"` : `id=${args.cpuId}`;
-        return successResponse('switch_cpu', `Switched to ${desc}`);
-      } catch (error) {
-        return errorResponse('switch_cpu', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'command',
-    'Run a manual kOS command.',
-    {
-      command: z.string().describe('kOS script command to send'),
-      timeout: z.number().default(5000).describe('Command timeout in milliseconds'),
-    },
-    async (args) => {
-      const result = await handleExecute(args);
-      if (result.success) {
-        return successResponse('command', result.output || '(no output)');
-      } else {
-        return errorResponse('command', result.error ?? 'Failed');
-      }
-    }
-  );
-
-  // Telemetry Tool
-  server.tool(
-    'telemetry',
-    'Get current ship telemetry including orbit, SOI, maneuver nodes, and encounters.',
-    {
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
-        return successResponse('telemetry', telemetry);
-      } catch (error) {
-        return errorResponse('telemetry', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  // MechJeb Maneuver Tools
-  server.tool(
-    'adjust_pe',
-    'Create a maneuver node to change periapsis. Cannot raise periapsis above current apoapsis.',
-    {
-      altitude: z.number().describe('Target periapsis altitude in meters'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.adjustPeriapsis(args.altitude, args.timeRef);
-
-        if (result.success) {
-          return successResponse('adjust_pe',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('adjust_pe', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('adjust_pe', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'adjust_ap',
-    'Create a maneuver node to change apoapsis.',
-    {
-      altitude: z.number().describe('Target apoapsis altitude in meters'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('PERIAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.adjustApoapsis(args.altitude, args.timeRef);
-
-        if (result.success) {
-          return successResponse('adjust_ap',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('adjust_ap', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('adjust_ap', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'circularize',
-    'Create a maneuver node to circularize the orbit.',
-    {
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to circularize (usually at apoapsis or periapsis)'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.circularize(args.timeRef);
-
-        if (result.success) {
-          return successResponse('circularize',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('circularize', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('circularize', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  // Target and Transfer Tools
-
-  server.tool(
-    'hohmann',
-    'Plan a Hohmann transfer to the current target. Requires a target to be set first.',
-    {
-      timeReference: z.enum(['COMPUTED', 'PERIAPSIS', 'APOAPSIS'])
-        .default('COMPUTED')
-        .describe('When to execute: COMPUTED (optimal), PERIAPSIS, or APOAPSIS'),
-      capture: z.boolean()
-        .default(true)
-        .describe('Include capture burn for vessel rendezvous. Bodies always create 1 node (transfer only).'),
-      includeTelemetry: z.boolean()
-        .default(false)
-        .describe('Include ship telemetry in response (slower but more info)'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.hohmannTransfer(args.timeReference, args.capture);
-
-        if (result.success) {
-          const nodeCount = result.nodesCreated ?? 1;
-          let text = `${nodeCount} node(s) created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`;
-
-          if (args.includeTelemetry) {
-            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
-          }
-
-          return successResponse('hohmann', text);
-        } else {
-          return errorResponse('hohmann', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('hohmann', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'course_correct',
-    'Fine-tune closest approach to target. Requires target to be set first.',
-    {
-      targetDistance: z.number().describe('Target periapsis (bodies) or closest approach (vessels) in meters'),
-      minLeadTime: z.number()
-        .default(300)
-        .describe('Minimum seconds before burn (default: 300s). Node rejected if too soon.'),
-      includeTelemetry: z.boolean()
-        .default(false)
-        .describe('Include ship telemetry in response (slower but more info)'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.courseCorrection(args.targetDistance, args.minLeadTime);
-
-        if (!result.success) {
-          return errorResponse('course_correct', result.error ?? 'Failed');
-        }
-
-        let text = `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`;
-
-        if (args.includeTelemetry) {
-          text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
-        }
-
-        return successResponse('course_correct', text);
-      } catch (error) {
-        return errorResponse('course_correct', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'change_inc',
-    'Change orbital inclination.',
-    {
-      newInclination: z.number().describe('Target inclination in degrees'),
-      timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])
-        .default('EQ_NEAREST_AD')
-        .describe('When to execute: at ascending node, descending node, nearest AN/DN, or highest AD'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.changeInclination(args.newInclination, args.timeRef);
-
-        if (!result.success) {
-          return errorResponse('change_inc', result.error ?? 'Failed');
-        }
-
-        return successResponse('change_inc',
-          `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-      } catch (error) {
-        return errorResponse('change_inc', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  // New Modular MechJeb Operations
-  server.tool(
-    'ellipticize',
-    'Set both periapsis and apoapsis in a single burn.',
-    {
-      periapsis: z.number().describe('Target periapsis altitude in meters'),
-      apoapsis: z.number().describe('Target apoapsis altitude in meters'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await ellipticize(conn, args.periapsis, args.apoapsis, args.timeRef);
-
-        if (result.success) {
-          return successResponse('ellipticize',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('ellipticize', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('ellipticize', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'change_sma',
-    'Change the orbital semi-major axis.',
-    {
-      semiMajorAxis: z.number().describe('Target semi-major axis in meters'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await changeSemiMajorAxis(conn, args.semiMajorAxis, args.timeRef);
-
-        if (result.success) {
-          return successResponse('change_sma',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('change_sma', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('change_sma', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'change_ecc',
-    'Change orbital eccentricity.',
-    {
-      eccentricity: z.number().min(0).max(0.99).describe('Target eccentricity (0 = circular, <1 = elliptical)'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await changeEccentricity(conn, args.eccentricity, args.timeRef);
-
-        if (result.success) {
-          return successResponse('change_ecc',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('change_ecc', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('change_ecc', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'change_lan',
-    'Change the Longitude of Ascending Node (LAN).',
-    {
-      lan: z.number().describe('Target LAN in degrees (0 to 360)'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await changeLAN(conn, args.lan, args.timeRef);
-
-        if (result.success) {
-          return successResponse('change_lan',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('change_lan', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('change_lan', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'change_lpe',
-    'Change the Longitude of Periapsis.',
-    {
-      longitude: z.number().describe('Target longitude in degrees (-180 to 180)'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-        .default('APOAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await changeLongitudeOfPeriapsis(conn, args.longitude, args.timeRef);
-
-        if (result.success) {
-          return successResponse('change_lpe',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('change_lpe', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('change_lpe', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'match_planes',
-    'Match orbital plane with the target. Requires a target to be set first.',
-    {
-      timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])
-        .default('REL_NEAREST_AD')
-        .describe('When to execute: nearest AN/DN, highest AN/DN, ascending node, or descending node'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await matchPlane(conn, args.timeRef);
-
-        if (result.success) {
-          return successResponse('match_planes',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('match_planes', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('match_planes', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'match_velocities',
-    'Match velocity with the target. Requires a target to be set first.',
-    {
-      timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])
-        .default('CLOSEST_APPROACH')
-        .describe('When to execute: at closest approach or after X seconds'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await killRelativeVelocity(conn, args.timeRef);
-
-        if (result.success) {
-          return successResponse('match_velocities',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('match_velocities', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('match_velocities', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'resonant_orbit',
-    'Establish a resonant orbit for satellite constellation deployment.',
-    {
-      numerator: z.number().int().positive().describe('Numerator of resonance ratio (e.g., 2 for 2:3)'),
-      denominator: z.number().int().positive().describe('Denominator of resonance ratio (e.g., 3 for 2:3)'),
-      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'])
-        .default('APOAPSIS')
-        .describe('When to execute the maneuver'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await resonantOrbit(conn, args.numerator, args.denominator, args.timeRef);
-
-        if (result.success) {
-          return successResponse('resonant_orbit',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('resonant_orbit', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('resonant_orbit', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'return_from_moon',
-    'Return from a moon to its parent body.',
-    {
-      targetPeriapsis: z.number().describe('Target periapsis at parent body in meters (e.g., 100000 for 100km)'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await returnFromMoon(conn, args.targetPeriapsis);
-
-        if (result.success) {
-          return successResponse('return_from_moon',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('return_from_moon', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('return_from_moon', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.tool(
-    'interplanetary',
-    'Interplanetary transfer. Requires a target planet to be set first.',
-    {
-      waitForPhaseAngle: z.boolean()
-        .default(true)
-        .describe('If true, waits for optimal phase angle. If false, transfers immediately.'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await interplanetaryTransfer(conn, args.waitForPhaseAngle);
-
-        if (result.success) {
-          return successResponse('interplanetary',
-            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
-        } else {
-          return errorResponse('interplanetary', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('interplanetary', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  // Node Execution Tool
-  server.tool(
-    'execute_node',
-    'Execute the next maneuver node. Waits for completion by default.',
-    {
-      async: z.boolean()
-        .default(false)
-        .describe('If true, return immediately after starting executor instead of waiting for completion'),
-      timeoutSeconds: z.number()
-        .default(240)
-        .describe('Maximum time to wait for node execution in seconds (default: 240 = 4 minutes)'),
-      includeTelemetry: z.boolean()
-        .default(false)
-        .describe('Include ship telemetry in response (slower but more info)'),
-    },
-    async (args) => {
-      try {
-        const conn = await ensureConnected();
-        const result = await executeNode(conn, {
-          timeoutMs: args.timeoutSeconds * 1000,
-          async: args.async,
-        });
-
-        if (result.success) {
-          let text: string;
-          if (args.async) {
-            text = `Executor started: ${result.deltaV?.required.toFixed(1)} m/s required`;
-          } else {
-            text = `Node executed: ${result.nodesExecuted} node(s)`;
-          }
-
-          if (args.includeTelemetry) {
-            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
-          }
-
-          return successResponse('execute_node', text);
-        } else {
-          return errorResponse('execute_node', result.error ?? 'Failed');
-        }
-      } catch (error) {
-        return errorResponse('execute_node', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  // MechJeb Ascent Guidance Tools
-  server.tool(
-    'launch',
+    'launch_ascent',
     'Launch to orbit. Triggers first stage and monitors ascent.',
     {
       altitude: z.number().describe('Target orbit altitude in meters (e.g., 100000 for 100km)'),
@@ -725,10 +109,10 @@ export function createServer(): McpServer {
           autoWarp: true,
         });
 
-        return successResponse('launch',
+        return successResponse('launch_ascent',
           `Launch initiated to ${args.altitude / 1000}km at ${args.inclination}° inclination`);
       } catch (error) {
-        return errorResponse('launch', error instanceof Error ? error.message : String(error));
+        return errorResponse('launch_ascent', error instanceof Error ? error.message : String(error));
       }
     }
   );
@@ -859,7 +243,442 @@ export function createServer(): McpServer {
     }
   );
 
-  // Targeting Tools
+  server.tool(
+    'circularize',
+    'Create a maneuver node to circularize the orbit.',
+    {
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('APOAPSIS')
+        .describe('When to circularize (usually at apoapsis or periapsis)'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const maneuver = new ManeuverProgram(conn);
+        const result = await maneuver.circularize(args.timeRef);
+
+        if (result.success) {
+          return successResponse('circularize',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('circularize', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('circularize', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'adjust_ap',
+    'Create a maneuver node to change apoapsis.',
+    {
+      altitude: z.number().describe('Target apoapsis altitude in meters'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('PERIAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const maneuver = new ManeuverProgram(conn);
+        const result = await maneuver.adjustApoapsis(args.altitude, args.timeRef);
+
+        if (result.success) {
+          return successResponse('adjust_ap',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('adjust_ap', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('adjust_ap', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'adjust_pe',
+    'Create a maneuver node to change periapsis. Cannot raise periapsis above current apoapsis.',
+    {
+      altitude: z.number().describe('Target periapsis altitude in meters'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('APOAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const maneuver = new ManeuverProgram(conn);
+        const result = await maneuver.adjustPeriapsis(args.altitude, args.timeRef);
+
+        if (result.success) {
+          return successResponse('adjust_pe',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('adjust_pe', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('adjust_pe', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'ellipticize',
+    'Set both periapsis and apoapsis in a single burn.',
+    {
+      periapsis: z.number().describe('Target periapsis altitude in meters'),
+      apoapsis: z.number().describe('Target apoapsis altitude in meters'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('APOAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await ellipticize(conn, args.periapsis, args.apoapsis, args.timeRef);
+
+        if (result.success) {
+          return successResponse('ellipticize',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('ellipticize', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('ellipticize', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'change_inc',
+    'Change orbital inclination.',
+    {
+      newInclination: z.number().describe('Target inclination in degrees'),
+      timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])
+        .default('EQ_NEAREST_AD')
+        .describe('When to execute: at ascending node, descending node, nearest AN/DN, or highest AD'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const maneuver = new ManeuverProgram(conn);
+        const result = await maneuver.changeInclination(args.newInclination, args.timeRef);
+
+        if (!result.success) {
+          return errorResponse('change_inc', result.error ?? 'Failed');
+        }
+
+        return successResponse('change_inc',
+          `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+      } catch (error) {
+        return errorResponse('change_inc', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'change_lan',
+    'Change the Longitude of Ascending Node (LAN).',
+    {
+      lan: z.number().describe('Target LAN in degrees (0 to 360)'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('APOAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await changeLAN(conn, args.lan, args.timeRef);
+
+        if (result.success) {
+          return successResponse('change_lan',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('change_lan', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('change_lan', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'change_lpe',
+    'Change the Longitude of Periapsis.',
+    {
+      longitude: z.number().describe('Target longitude in degrees (-180 to 180)'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('APOAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await changeLongitudeOfPeriapsis(conn, args.longitude, args.timeRef);
+
+        if (result.success) {
+          return successResponse('change_lpe',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('change_lpe', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('change_lpe', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'change_sma',
+    'Change the orbital semi-major axis.',
+    {
+      semiMajorAxis: z.number().describe('Target semi-major axis in meters'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('APOAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await changeSemiMajorAxis(conn, args.semiMajorAxis, args.timeRef);
+
+        if (result.success) {
+          return successResponse('change_sma',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('change_sma', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('change_sma', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'change_ecc',
+    'Change orbital eccentricity.',
+    {
+      eccentricity: z.number().min(0).max(0.99).describe('Target eccentricity (0 = circular, <1 = elliptical)'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        .default('APOAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await changeEccentricity(conn, args.eccentricity, args.timeRef);
+
+        if (result.success) {
+          return successResponse('change_ecc',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('change_ecc', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('change_ecc', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'hohmann',
+    'Plan a Hohmann transfer to the current target. Requires a target to be set first.',
+    {
+      timeReference: z.enum(['COMPUTED', 'PERIAPSIS', 'APOAPSIS'])
+        .default('COMPUTED')
+        .describe('When to execute: COMPUTED (optimal), PERIAPSIS, or APOAPSIS'),
+      capture: z.boolean()
+        .default(true)
+        .describe('Include capture burn for vessel rendezvous. Bodies always create 1 node (transfer only).'),
+      includeTelemetry: z.boolean()
+        .default(false)
+        .describe('Include ship telemetry in response (slower but more info)'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const maneuver = new ManeuverProgram(conn);
+        const result = await maneuver.hohmannTransfer(args.timeReference, args.capture);
+
+        if (result.success) {
+          const nodeCount = result.nodesCreated ?? 1;
+          let text = `${nodeCount} node(s) created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`;
+
+          if (args.includeTelemetry) {
+            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+          }
+
+          return successResponse('hohmann', text);
+        } else {
+          return errorResponse('hohmann', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('hohmann', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'course_correct',
+    'Fine-tune closest approach to target. Requires target to be set first.',
+    {
+      targetDistance: z.number().describe('Target periapsis (bodies) or closest approach (vessels) in meters'),
+      minLeadTime: z.number()
+        .default(300)
+        .describe('Minimum seconds before burn (default: 300s). Node rejected if too soon.'),
+      includeTelemetry: z.boolean()
+        .default(false)
+        .describe('Include ship telemetry in response (slower but more info)'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const maneuver = new ManeuverProgram(conn);
+        const result = await maneuver.courseCorrection(args.targetDistance, args.minLeadTime);
+
+        if (!result.success) {
+          return errorResponse('course_correct', result.error ?? 'Failed');
+        }
+
+        let text = `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`;
+
+        if (args.includeTelemetry) {
+          text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+        }
+
+        return successResponse('course_correct', text);
+      } catch (error) {
+        return errorResponse('course_correct', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'match_planes',
+    'Match orbital plane with the target. Requires a target to be set first.',
+    {
+      timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])
+        .default('REL_NEAREST_AD')
+        .describe('When to execute: nearest AN/DN, highest AN/DN, ascending node, or descending node'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await matchPlane(conn, args.timeRef);
+
+        if (result.success) {
+          return successResponse('match_planes',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('match_planes', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('match_planes', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'match_velocities',
+    'Match velocity with the target. Requires a target to be set first.',
+    {
+      timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])
+        .default('CLOSEST_APPROACH')
+        .describe('When to execute: at closest approach or after X seconds'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await killRelativeVelocity(conn, args.timeRef);
+
+        if (result.success) {
+          return successResponse('match_velocities',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('match_velocities', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('match_velocities', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'interplanetary',
+    'Interplanetary transfer. Requires a target planet to be set first.',
+    {
+      waitForPhaseAngle: z.boolean()
+        .default(true)
+        .describe('If true, waits for optimal phase angle. If false, transfers immediately.'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await interplanetaryTransfer(conn, args.waitForPhaseAngle);
+
+        if (result.success) {
+          return successResponse('interplanetary',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('interplanetary', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('interplanetary', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'return_from_moon',
+    'Return from a moon to its parent body.',
+    {
+      targetPeriapsis: z.number().describe('Target periapsis at parent body in meters (e.g., 100000 for 100km)'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await returnFromMoon(conn, args.targetPeriapsis);
+
+        if (result.success) {
+          return successResponse('return_from_moon',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('return_from_moon', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('return_from_moon', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'resonant_orbit',
+    'Establish a resonant orbit for satellite constellation deployment.',
+    {
+      numerator: z.number().int().positive().describe('Numerator of resonance ratio (e.g., 2 for 2:3)'),
+      denominator: z.number().int().positive().describe('Denominator of resonance ratio (e.g., 3 for 2:3)'),
+      timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'])
+        .default('APOAPSIS')
+        .describe('When to execute the maneuver'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await resonantOrbit(conn, args.numerator, args.denominator, args.timeRef);
+
+        if (result.success) {
+          return successResponse('resonant_orbit',
+            `Node created: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s`);
+        } else {
+          return errorResponse('resonant_orbit', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('resonant_orbit', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
   server.tool(
     'set_target',
     'Set the target (celestial body or vessel).',
@@ -926,6 +745,179 @@ export function createServer(): McpServer {
         return successResponse('clear_target', result.warning ?? 'Clear command sent.');
       } catch (error) {
         return errorResponse('clear_target', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'execute_node',
+    'Execute the next maneuver node. Waits for completion by default.',
+    {
+      async: z.boolean()
+        .default(false)
+        .describe('If true, return immediately after starting executor instead of waiting for completion'),
+      timeoutSeconds: z.number()
+        .default(240)
+        .describe('Maximum time to wait for node execution in seconds (default: 240 = 4 minutes)'),
+      includeTelemetry: z.boolean()
+        .default(false)
+        .describe('Include ship telemetry in response (slower but more info)'),
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await executeNode(conn, {
+          timeoutMs: args.timeoutSeconds * 1000,
+          async: args.async,
+        });
+
+        if (result.success) {
+          let text: string;
+          if (args.async) {
+            text = `Executor started: ${result.deltaV?.required.toFixed(1)} m/s required`;
+          } else {
+            text = `Node executed: ${result.nodesExecuted} node(s)`;
+          }
+
+          if (args.includeTelemetry) {
+            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+          }
+
+          return successResponse('execute_node', text);
+        } else {
+          return errorResponse('execute_node', result.error ?? 'Failed');
+        }
+      } catch (error) {
+        return errorResponse('execute_node', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'telemetry',
+    'Get current ship telemetry including orbit, SOI, maneuver nodes, and encounters.',
+    {
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
+        return successResponse('telemetry', telemetry);
+      } catch (error) {
+        return errorResponse('telemetry', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'clear_nodes',
+    'Remove all maneuver nodes',
+    {},
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        await conn.execute(
+          'SET _N TO ALLNODES:LENGTH. UNTIL NOT HASNODE { REMOVE NEXTNODE. } PRINT "Cleared " + _N + " node(s)".',
+          5000
+        );
+        return successResponse('clear_nodes', 'Maneuver nodes cleared!');
+      } catch (error) {
+        return errorResponse('clear_nodes', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'command',
+    'Run a manual kOS command.',
+    {
+      command: z.string().describe('kOS script command to send'),
+      timeout: z.number().default(5000).describe('Command timeout in milliseconds'),
+    },
+    async (args) => {
+      const result = await handleExecute(args);
+      if (result.success) {
+        return successResponse('command', result.output || '(no output)');
+      } else {
+        return errorResponse('command', result.error ?? 'Failed');
+      }
+    }
+  );
+
+  server.tool(
+    'status',
+    'Get current kOS connection status',
+    {},
+    async () => {
+      const state = await handleStatus();
+      const text = state.connected
+        ? `Connected to CPU ${state.cpuId} on ${state.vesselName}`
+        : 'Not connected';
+      return successResponse('status', text);
+    }
+  );
+
+  server.tool(
+    'disconnect',
+    'Disconnect from kOS terminal',
+    {},
+    async () => {
+      try {
+        await handleDisconnect();
+        return successResponse('disconnect', 'Disconnected successfully.');
+      } catch (error) {
+        return errorResponse('disconnect', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'list_cpus',
+    'List available kOS CPUs without connecting.',
+    listCpusInputSchema.shape,
+    async (args) => {
+      try {
+        const cpus = await handleListCpus(args);
+        const text = cpus.length > 0
+          ? `Found ${cpus.length} CPU(s):\n` + cpus.map(c => `  ${c.id}: ${c.vessel} (${c.tag || 'no tag'})`).join('\n')
+          : 'No CPUs found';
+        return successResponse('list_cpus', text);
+      } catch (error) {
+        return errorResponse('list_cpus', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.tool(
+    'switch_cpu',
+    'OPTIONAL: Switch to a different kOS CPU. Only needed when multiple CPUs exist and you want a specific one. By default, the first available CPU is used automatically.',
+    {
+      cpuId: z.number().optional().describe('CPU ID (1-based) to switch to'),
+      cpuLabel: z.string().optional().describe('CPU label/tag (e.g., "guidance") to switch to'),
+      clear: z.boolean().optional().describe('Clear preference and revert to auto-select'),
+    },
+    async (args) => {
+      try {
+        if (args.clear) {
+          setCpuPreference(null);
+          await forceDisconnect();
+          return successResponse('switch_cpu', 'CPU preference cleared.');
+        }
+
+        if (args.cpuId === undefined && args.cpuLabel === undefined) {
+          const current = getCpuPreference();
+          if (current) {
+            const desc = current.cpuLabel ? `label="${current.cpuLabel}"` : `id=${current.cpuId}`;
+            return successResponse('switch_cpu', `Current: ${desc}`);
+          }
+          return successResponse('switch_cpu', 'Auto-select (no preference).');
+        }
+
+        setCpuPreference({ cpuId: args.cpuId, cpuLabel: args.cpuLabel });
+        const desc = args.cpuLabel ? `label="${args.cpuLabel}"` : `id=${args.cpuId}`;
+        return successResponse('switch_cpu', `Switched to ${desc}`);
+      } catch (error) {
+        return errorResponse('switch_cpu', error instanceof Error ? error.message : String(error));
       }
     }
   );
