@@ -9,8 +9,8 @@
  *   npm run warp <seconds>         - Warp forward by N seconds
  */
 
-import { KosConnection } from '../../transport/kos-connection.js';
-import { warpTo, warpForward, WarpTarget } from '../../mechjeb/programs/warp.js';
+import { KosConnection } from '../transport/kos-connection.js';
+import { warpTo, warpForward, WarpTarget } from '../mechjeb/programs/warp.js';
 
 async function main() {
   const target = process.argv[2] || 'node';

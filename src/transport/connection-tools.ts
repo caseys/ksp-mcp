@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { KosConnection, ConnectionState, CommandResult } from '../transport/kos-connection.js';
-import { clearAscentHandle } from '../server.js';
 import { config } from '../config.js';
 
 // Shared connection instance
@@ -273,8 +272,6 @@ export async function isKosReady(options?: EnsureConnectedOptions): Promise<bool
 export async function handleDisconnect(): Promise<{ disconnected: boolean }> {
   const conn = getConnection();
   await conn.disconnect();
-  // Clear ascent handle to prevent stale references
-  clearAscentHandle();
   return { disconnected: true };
 }
 

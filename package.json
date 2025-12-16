@@ -1,6 +1,6 @@
 {
   "name": "ksp-mcp",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "MCP server for KSP automation via kOS and MechJeb",
   "author": "caseys",
   "license": "MIT",
@@ -21,7 +21,7 @@
   "types": "dist/lib.d.ts",
   "bin": {
     "ksp-mcp": "dist/index.js",
-    "ksp-mcp-check": "dist/scripts/check-setup.js"
+    "ksp-mcp-check": "dist/utils/check-setup.js"
   },
   "exports": {
     ".": {
@@ -58,9 +58,9 @@
     "tsconfig.json"
   ],
   "scripts": {
-    "prepare": "tsc && node dist/scripts/check-setup.js",
-    "build": "tsc && chmod +x dist/index.js dist/scripts/check-setup.js",
-    "check": "node dist/scripts/check-setup.js",
+    "prepare": "tsc && node dist/utils/check-setup.js",
+    "build": "tsc && chmod +x dist/index.js dist/utils/check-setup.js",
+    "check": "node dist/utils/check-setup.js",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "start:http": "node dist/index.js --transport http --host 0.0.0.0",
@@ -88,7 +88,7 @@
     "resonant-orbit": "tsx src/cli/transfer/resonant-orbit.ts",
     "match-plane": "tsx src/cli/rendezvous/match-plane.ts",
     "interplanetary": "tsx src/cli/transfer/interplanetary.ts",
-    "execute-node": "tsx src/cli/node/execute-node.ts",
+    "execute-node": "tsx src/cli/execute-node.ts",
     "longitude": "tsx src/cli/orbital/longitude.ts",
     "lan": "tsx src/cli/orbital/lan.ts",
     "daemon": "tsx src/cli/daemon-cli.ts",
@@ -96,8 +96,8 @@
     "daemon:status": "tsx src/cli/daemon-cli.ts status",
     "daemon:shutdown": "tsx src/cli/daemon-cli.ts shutdown",
     "kos": "tsx src/cli/daemon-cli.ts exec",
-    "warp": "tsx src/cli/warp/warp.ts",
-    "load-save": "tsx src/cli/save/load-save.ts"
+    "warp": "tsx src/cli/warp.ts",
+    "load-save": "tsx src/cli/load-save.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.23.0",

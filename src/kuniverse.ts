@@ -5,8 +5,8 @@
  * like quicksave/quickload, scene management, etc.
  */
 
-import { KosConnection } from '../transport/kos-connection.js';
-import { config } from '../config.js';
+import { KosConnection } from './transport/kos-connection.js';
+import { config } from './config.js';
 
 export interface QuicksaveResult {
   success: boolean;

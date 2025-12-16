@@ -489,7 +489,7 @@ export class ManeuverProgram {
    *
    * @param finalPeA Target periapsis (bodies) or closest approach (vessels) in meters
    */
-  async courseCorrection(finalPeA: number, minLeadTime: number = 300): Promise<ManeuverResult> {
+  async courseCorrection(finalPeA: number): Promise<ManeuverResult> {
     // WORKAROUND: MechJeb's course correction algorithm produces results that vary
     // with trajectory geometry. Using 3x multiplier to err on the safe side
     // (higher periapsis than requested, avoiding surface impact).
@@ -509,16 +509,6 @@ export class ManeuverProgram {
     const nodeInfo = await queryNodeInfo(this.conn);
     const deltaV = nodeInfo.deltaV;
     const timeToNode = nodeInfo.timeToNode;
-
-    // Check minimum lead time - reject nodes that are too soon
-    if (timeToNode < minLeadTime) {
-      // Delete the node that's too soon
-      await this.conn.execute('REMOVE NEXTNODE.', 2000);
-      return {
-        success: false,
-        error: `Course correction burn time (${timeToNode.toFixed(0)}s) is less than minimum lead time (${minLeadTime}s). Node deleted. Try again later or reduce lead time.`
-      };
-    }
 
     return { success: true, deltaV, timeToNode };
   }

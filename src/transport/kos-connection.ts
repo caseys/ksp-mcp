@@ -2,7 +2,7 @@ import { Transport } from './transport.js';
 import { TmuxTransport } from './tmux-transport.js';
 import { SocketTransport } from './socket-transport.js';
 import { config } from '../config.js';
-import { globalKosMonitor } from '../monitoring/kos-monitor.js';
+import { globalKosMonitor } from '../utils/kos-monitor.js';
 import { createHash } from 'node:crypto';
 
 export interface ConnectionState {

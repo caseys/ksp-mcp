@@ -57,8 +57,8 @@ export { createServer } from './server.js';
 // Tool Handlers (for direct use without MCP)
 // =============================================================================
 
-export { handleListCpus } from './tools/list-cpus.js';
-export type { CpuInfo } from './tools/list-cpus.js';
+export { handleListCpus } from './transport/list-cpus.js';
+export type { CpuInfo } from './transport/list-cpus.js';
 
 export {
   handleConnect,
@@ -69,15 +69,15 @@ export {
   ensureConnected,
   waitForKosReady,
   isKosReady,
-} from './tools/connection-tools.js';
-export type { EnsureConnectedOptions, WaitForKosOptions } from './tools/connection-tools.js';
+} from './transport/connection-tools.js';
+export type { EnsureConnectedOptions, WaitForKosOptions } from './transport/connection-tools.js';
 
 // =============================================================================
 // Monitoring
 // =============================================================================
 
-export { KosMonitor, globalKosMonitor } from './monitoring/kos-monitor.js';
-export type { MonitorStatus, LoopDetection } from './monitoring/kos-monitor.js';
+export { KosMonitor, globalKosMonitor } from './utils/kos-monitor.js';
+export type { MonitorStatus, LoopDetection } from './utils/kos-monitor.js';
 
 // =============================================================================
 // KUNIVERSE (Save/Load, Game State)
@@ -88,9 +88,9 @@ export {
   quicksave,
   quickload,
   canQuicksave,
-} from './kuniverse/index.js';
+} from './kuniverse.js';
 export type {
   QuicksaveResult,
   QuickloadResult,
   ListSavesResult,
-} from './kuniverse/index.js';
+} from './kuniverse.js';

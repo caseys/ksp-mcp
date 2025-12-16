@@ -4,8 +4,8 @@
  * Usage: npm run execute-node
  */
 
-import { KosConnection } from '../../transport/kos-connection.js';
-import { executeNode, getNodeProgress } from '../../mechjeb/programs/node/index.js';
+import { KosConnection } from '../transport/kos-connection.js';
+import { executeNode, getNodeProgress } from '../mechjeb/programs/node/index.js';
 
 async function main() {
   console.log('=== Execute Maneuver Node ===\n');

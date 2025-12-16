@@ -12,7 +12,7 @@ import type {
   AscentProgress,
   AscentResult
 } from '../types.js';
-import { ensureConnected } from '../../tools/connection-tools.js';
+import { ensureConnected } from '../../transport/connection-tools.js';
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));

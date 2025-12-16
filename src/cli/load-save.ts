@@ -6,7 +6,7 @@
  * Usage: npm run load-save -- [save-name]
  */
 
-import * as daemon from '../../daemon/index.js';
+import * as daemon from '../daemon/index.js';
 
 const saveName = process.argv[2] || 'test-in-orbit';
 
