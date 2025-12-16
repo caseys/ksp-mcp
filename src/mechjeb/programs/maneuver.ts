@@ -15,6 +15,7 @@ import {
   queryNodeInfo,
   delay,
 } from './shared.js';
+import { bringKspToForeground } from '../../utils/bring-to-foreground.js';
 
 // Re-export for external use
 export type { ManeuverResult } from './shared.js';
@@ -225,12 +226,16 @@ export class ManeuverProgram {
    *
    * WARNING: There is a known kOS bug where `SET TARGET TO ""` does not
    * always clear the target on the first attempt. See docs/kos-clear-target.md.
-   * This method tries twice with a short delay to work around the intermittent bug.
+   * This method brings KSP to foreground first (target switching is locked when backgrounded),
+   * then tries five times with delays to work around the intermittent bug.
    */
   async clearTarget(): Promise<ClearTargetResult> {
-    // Try clearing three times with delays - the kOS bug is intermittent
+    // KSP locks target switching when backgrounded - bring to foreground first
+    await bringKspToForeground();
+
+    // Try clearing five times with delays - the kOS bug is intermittent
     const result = await this.conn.execute(
-      'SET TARGET TO "". WAIT 0.1. SET TARGET TO "". WAIT 0.1. SET TARGET TO "". WAIT 0.1. PRINT "CLEARED:" + (NOT HASTARGET).',
+      'SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. PRINT "CLEARED:" + (NOT HASTARGET).',
       5000
     );
 

@@ -1,6 +1,6 @@
 {
   "name": "ksp-mcp",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "MCP server for KSP automation via kOS and MechJeb",
   "author": "caseys",
   "license": "MIT",
