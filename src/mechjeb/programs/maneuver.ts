@@ -429,7 +429,7 @@ export class ManeuverProgram {
    */
   async hohmannTransfer(
     timeRef: string = 'COMPUTED',
-    capture: boolean = true
+    capture: boolean = false
   ): Promise<ManeuverResult> {
     // Check target exists with debug info
     const targetDebug = await this.getTargetDebugInfo();

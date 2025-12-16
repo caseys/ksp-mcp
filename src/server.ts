@@ -508,8 +508,8 @@ export function createServer(): McpServer {
         .default('COMPUTED')
         .describe('When to execute: COMPUTED (optimal), PERIAPSIS, or APOAPSIS'),
       capture: z.boolean()
-        .optional()
-        .describe('Include capture burn. Default: true for vessels, false for bodies (use course_correct after transfer).'),
+        .default(false)
+        .describe('Include capture burn for vessel rendezvous. Default: false (transfer only).'),
       includeTelemetry: z.boolean()
         .default(false)
         .describe('Include ship telemetry in response (slower but more info)'),
@@ -518,16 +518,7 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected();
         const maneuver = new ManeuverProgram(conn);
-
-        // Auto-detect capture setting based on target type if not specified
-        let capture = args.capture;
-        if (capture === undefined) {
-          const targetInfo = await conn.execute('IF HASTARGET { PRINT TARGET:ISVESSEL. } ELSE { PRINT "NOTARGET". }');
-          const isVessel = targetInfo.output.includes('True');
-          capture = isVessel;  // true for vessels, false for bodies
-        }
-
-        const result = await maneuver.hohmannTransfer(args.timeReference, capture);
+        const result = await maneuver.hohmannTransfer(args.timeReference, args.capture);
 
         if (result.success) {
           const nodeCount = result.nodesCreated ?? 1;

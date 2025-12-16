@@ -13,8 +13,8 @@
  */
 import { config as loadDotenv } from 'dotenv';
 
-// Load .env file (no-op if doesn't exist)
-loadDotenv();
+// Load .env file (no-op if doesn't exist, quiet suppresses promotional message)
+loadDotenv({ quiet: true });
 
 export const config = Object.freeze({
   // kOS connection defaults
