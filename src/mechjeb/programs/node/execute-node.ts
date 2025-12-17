@@ -96,6 +96,11 @@ export async function executeNode(
     };
   }
 
+  // Get estimated burn duration from MechJeb for timing adjustment
+  const burnDuration = await queryNumber(conn, 'ADDONS:MJ:NEXTMANEUVERNODEBURNTIME');
+  const halfBurn = burnDuration / 2;
+  console.error(`[ExecuteNode] Estimated burn: ${burnDuration.toFixed(1)}s, will shift node by ${halfBurn.toFixed(1)}s`);
+
   // Set up auto-staging if burn will require staging
   if (needsStaging) {
     console.error('[ExecuteNode] Setting up auto-staging trigger');
@@ -138,6 +143,12 @@ export async function executeNode(
     // Set up completion trigger - fires when node is removed
     await conn.execute('SET MCP_BURN_DONE TO FALSE.');
     await conn.execute('WHEN NOT HASNODE THEN { SET MCP_BURN_DONE TO TRUE. }');
+
+    // Workaround: Shift node time earlier by half burn duration
+    // MechJeb fires at node time instead of centering the burn
+    if (halfBurn > 0) {
+      await conn.execute(`SET nd TO NEXTNODE. SET nd:ETA TO nd:ETA - ${halfBurn.toFixed(1)}.`, 3000);
+    }
 
     // Enable MechJeb node executor
     await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
