@@ -66,7 +66,11 @@ import type { ConnectionState, CommandResult, KosConnectionOptions } from 'ksp-m
 import { BaseTransport, SocketTransport, TmuxTransport } from 'ksp-mcp';
 import type { Transport } from 'ksp-mcp';
 
-// MechJeb interface
+// MechJeb interface - High-level (recommended)
+import { ManeuverOrchestrator, withTargetAndExecute } from 'ksp-mcp';
+import type { ManeuverOptions, OrchestratedResult } from 'ksp-mcp';
+
+// MechJeb interface - Low-level
 import { MechJebClient, ManeuverProgram, AscentProgram, AscentHandle } from 'ksp-mcp';
 
 // MechJeb operations (direct functions)
@@ -105,7 +109,7 @@ import { listQuicksaves, quicksave, quickload, canQuicksave } from 'ksp-mcp';
 
 // Subpath imports also available
 import { KosConnection } from 'ksp-mcp/transport';
-import { MechJebClient } from 'ksp-mcp/mechjeb';
+import { MechJebClient, ManeuverOrchestrator } from 'ksp-mcp/mechjeb';
 import { config } from 'ksp-mcp/config';
 import { createServer } from 'ksp-mcp/server';
 import * as daemon from 'ksp-mcp/daemon';  // Persistent connection daemon
@@ -172,25 +176,34 @@ Clients connect by POSTing to `/mcp`. The server returns a session ID in the `mc
 
 ### Direct Script Usage
 
+All maneuver commands support `--no-execute` to plan only (create node without executing).
+
 ```bash
 # Ascent
 npm run ascent              # Launch to orbit with MechJeb
 
-# Basic orbital maneuvers
-npm run circularize         # Circularize at current position
+# Basic orbital maneuvers (auto-execute by default)
+npm run circularize                    # Circularize at apoapsis
+npm run circularize PERIAPSIS          # Circularize at periapsis
+npm run circularize -- --no-execute    # Plan only
 npm run change-periapsis    # Adjust periapsis
 npm run change-apoapsis     # Adjust apoapsis
 npm run ellipticize         # Set both Pe and Ap
 npm run semimajor           # Change semi-major axis
 
 # Orbital adjustments
-npm run change-inclination 0 EQ_NEAREST_AD
+npm run change-inclination 0                       # Change to 0° inclination
+npm run change-inclination 0 EQ_NEAREST_AD         # Specify timing
+npm run change-inclination 0 -- --no-execute       # Plan only
 npm run eccentricity        # Change eccentricity
 npm run lan                 # Change longitude of ascending node
 npm run longitude           # Change longitude of periapsis
 
 # Transfers
-npm run hohmann             # Hohmann transfer to target
+npm run hohmann                        # Transfer to Mun (default)
+npm run hohmann Minmus                 # Transfer to Minmus
+npm run hohmann Mun -- --capture       # Include capture burn
+npm run hohmann -- --no-execute        # Plan only
 npm run course-correction   # Fine-tune approach
 npm run interplanetary      # Interplanetary transfer
 npm run return-from-moon    # Return from moon
@@ -311,27 +324,55 @@ await execute_node();
 
 ### Using Library API
 
+The library follows a "library-first" architecture where CLI and MCP are thin wrappers over the core library.
+
 ```typescript
-import { KosConnection } from 'ksp-mcp';
+import { KosConnection, ManeuverOrchestrator } from 'ksp-mcp';
 
 const conn = new KosConnection();
 await conn.connect();
 
-// Set up MechJeb
-await conn.execute('SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER.');
+const orchestrator = new ManeuverOrchestrator(conn);
 
-// Set target
-await conn.execute('SET TARGET TO MUN.');
+// Transfer to Mun with auto-execution
+const result = await orchestrator.hohmannTransfer('COMPUTED', false, {
+  target: 'Mun',    // Auto-sets target
+  execute: true,    // Auto-executes node (default)
+});
 
-// Plan transfer
-await conn.execute('PLANNER:HOHMANN("COMPUTED", FALSE).');
+if (result.success) {
+  console.log(`Transfer complete! ΔV: ${result.deltaV} m/s`);
+}
 
-// Wait for node creation
-await new Promise(r => setTimeout(r, 1000));
+// Or plan without executing
+const planOnly = await orchestrator.circularize('APOAPSIS', { execute: false });
+console.log(`Node created: ${planOnly.deltaV} m/s`);
 
-// Check node
-const result = await conn.execute('PRINT ALLNODES:LENGTH.');
-console.log(`Created ${result.output} node(s)`);
+await conn.disconnect();
+```
+
+#### Low-level API
+
+For more control, use `ManeuverProgram` directly:
+
+```typescript
+import { KosConnection, ManeuverProgram, executeNode } from 'ksp-mcp';
+
+const conn = new KosConnection();
+await conn.connect();
+
+const maneuver = new ManeuverProgram(conn);
+
+// Set target manually
+await maneuver.setTarget('Mun', 'body');
+
+// Plan transfer (does not execute)
+const result = await maneuver.hohmannTransfer('COMPUTED', false);
+
+// Execute separately
+if (result.success) {
+  await executeNode(conn);
+}
 
 await conn.disconnect();
 ```
@@ -370,8 +411,10 @@ src/
 │   ├── discovery.ts            # Module discovery
 │   ├── telemetry.ts            # Vessel/orbit telemetry
 │   └── programs/
+│       ├── orchestrator.ts     # High-level API with target/execute handling
+│       ├── maneuver.ts         # Low-level maneuver planning
 │       ├── ascent.ts           # Ascent guidance
-│       ├── maneuver.ts         # Maneuver planning
+│       ├── warp.ts             # Time warp control
 │       ├── basic/              # Basic orbital maneuvers
 │       ├── orbital/            # Orbital parameter changes
 │       ├── rendezvous/         # Rendezvous operations

@@ -6,7 +6,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { delay, parseNumber, queryNumber, queryTime } from '../shared.js';
+import { delay, queryNumber } from '../shared.js';
 import { immediateTimeWarpKick, installTimeWarpKickTrigger } from '../../../utils/time-warp-kick.js';
 
 export interface ExecuteNodeResult {
@@ -31,7 +31,7 @@ export interface ExecuteNodeProgress {
 // Configuration
 const MAX_RETRIES = 3;
 const DEFAULT_TIMEOUT_MS = 600000; // 10 minutes
-const DEFAULT_POLL_INTERVAL_MS = 5000; // 5 seconds
+const DEFAULT_POLL_INTERVAL_MS = 10000; // 10 seconds
 const DV_THRESHOLD = 0.5; // m/s - consider burn complete below this
 
 export interface ExecuteNodeOptions {
@@ -135,6 +135,10 @@ export async function executeNode(
     lastAttempt = attempt;
     console.error(`[ExecuteNode] Attempt ${attempt}/${MAX_RETRIES}`);
 
+    // Set up completion trigger - fires when node is removed
+    await conn.execute('SET MCP_BURN_DONE TO FALSE.');
+    await conn.execute('WHEN NOT HASNODE THEN { SET MCP_BURN_DONE TO TRUE. }');
+
     // Enable MechJeb node executor
     await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
 
@@ -143,7 +147,7 @@ export async function executeNode(
     await immediateTimeWarpKick(conn);
 
     // Install post-burn time warp kick trigger
-    await installTimeWarpKickTrigger(conn, 'NOT HASNODE', 10);
+    await installTimeWarpKickTrigger(conn, 'MCP_BURN_DONE', 10);
 
     // In async mode, return immediately after starting executor
     if (asyncMode) {
@@ -157,32 +161,15 @@ export async function executeNode(
 
     // Wait for execution with timeout
     const maxIterations = Math.ceil(timeoutMs / pollIntervalMs);
-    let lastNodeCount = initialNodeCount;
+    let lastDvRemaining = dvRequired;
 
     for (let i = 0; i < maxIterations; i++) {
       await delay(pollIntervalMs);
 
-      // Single atomic query: node count, deltaV remaining, executor status
-      const pollResult = await conn.execute(
-        'IF ALLNODES:LENGTH > 0 { PRINT "POLL|" + ALLNODES:LENGTH + "|" + NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED. } ELSE { PRINT "POLL|0|0|False". }',
-        3000
-      );
-
-      // Parse "POLL|count|dv|enabled" format
-      const pollMatch = pollResult.output.match(/POLL\|(\d+)\|([\d.]+)\|(True|False)/i);
-
-      // If parse fails, continue polling (transient error)
-      if (!pollMatch) {
-        console.error(`[ExecuteNode] Poll parse failed, continuing. Raw: ${pollResult.output.slice(0, 100)}`);
-        continue;
-      }
-
-      const currentNodes = parseInt(pollMatch[1]);
-      const dvRemaining = parseFloat(pollMatch[2]);
-      const executorEnabled = pollMatch[3].toLowerCase() === 'true';
-
-      if (currentNodes === 0) {
-        // All nodes executed successfully
+      // Check completion trigger first (no race condition)
+      const doneCheck = await conn.execute('PRINT MCP_BURN_DONE.', 2000);
+      if (doneCheck.output.includes('True')) {
+        // Node completed successfully
         return {
           success: true,
           nodesExecuted: initialNodeCount,
@@ -191,33 +178,41 @@ export async function executeNode(
         };
       }
 
-      // Log progress periodically
-      if (i % 6 === 0) { // Every 30 seconds at 5s polling
+      // Node still exists - safe to query progress
+      const progressResult = await conn.execute(
+        'PRINT NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED.',
+        3000
+      );
+
+      // Parse "dv|enabled" format
+      const progressMatch = progressResult.output.match(/([\d.]+)\|(True|False)/i);
+      if (progressMatch) {
+        const dvRemaining = parseFloat(progressMatch[1]);
+        const executorEnabled = progressMatch[2].toLowerCase() === 'true';
+        lastDvRemaining = dvRemaining;
+
+        // Log progress every poll (every 10s)
         console.error(`[ExecuteNode] Progress: ${dvRemaining.toFixed(1)} m/s remaining, executor: ${executorEnabled ? 'ON' : 'OFF'}`);
-      }
 
-      // If executor stopped but burn incomplete, check if we should retry
-      if (!executorEnabled && dvRemaining > DV_THRESHOLD) {
-        console.error(`[ExecuteNode] Executor stopped with ${dvRemaining.toFixed(1)} m/s remaining`);
+        // If executor stopped but burn incomplete, check if we should retry
+        if (!executorEnabled && dvRemaining > DV_THRESHOLD) {
+          console.error(`[ExecuteNode] Executor stopped with ${dvRemaining.toFixed(1)} m/s remaining`);
 
-        if (attempt < MAX_RETRIES) {
-          // Retry
-          console.error(`[ExecuteNode] Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
-          await delay(2000);
-          break; // Break inner loop to retry
-        } else {
-          // Final attempt failed
-          return {
-            success: false,
-            nodesExecuted: initialNodeCount - currentNodes,
-            error: `Burn incomplete after ${MAX_RETRIES} attempts. ${dvRemaining.toFixed(1)} m/s remaining.`,
-            deltaV: { required: dvRequired, available: dvShipTotal, remaining: dvRemaining },
-            attempts: attempt
-          };
+          if (attempt < MAX_RETRIES) {
+            console.error(`[ExecuteNode] Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            await delay(2000);
+            break; // Break inner loop to retry
+          } else {
+            return {
+              success: false,
+              nodesExecuted: 0,
+              error: `Burn incomplete after ${MAX_RETRIES} attempts. ${dvRemaining.toFixed(1)} m/s remaining.`,
+              deltaV: { required: dvRequired, available: dvShipTotal, remaining: dvRemaining },
+              attempts: attempt
+            };
+          }
         }
       }
-
-      lastNodeCount = currentNodes;
     }
 
     // Timeout in this attempt
@@ -225,13 +220,11 @@ export async function executeNode(
       // Disable executor on final timeout
       await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
 
-      const dvRemaining = await queryNumber(conn, 'HASNODE ? NEXTNODE:DELTAV:MAG : 0');
-
       return {
         success: false,
-        nodesExecuted: initialNodeCount - lastNodeCount,
-        error: `Execution timeout after ${timeoutMs / 1000} seconds. ${lastNodeCount} node(s) remaining.`,
-        deltaV: { required: dvRequired, available: dvShipTotal, remaining: dvRemaining },
+        nodesExecuted: 0,
+        error: `Execution timeout after ${timeoutMs / 1000} seconds.`,
+        deltaV: { required: dvRequired, available: dvShipTotal, remaining: lastDvRemaining },
         attempts: attempt
       };
     }

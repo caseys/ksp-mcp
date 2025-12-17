@@ -1,80 +1,62 @@
 #!/usr/bin/env node
 /**
- * Execute Hohmann transfer to target using ksp-mcp
- * Usage: npm run hohmann [capture]
- *   capture: optional, "true" or "false" (default: false)
+ * Execute Hohmann transfer to target
+ * Usage: npm run hohmann [target] [--capture] [--no-execute]
+ *   target: Target body name (default: Mun)
+ *   --capture: Include capture burn
+ *   --no-execute: Plan only, don't execute
  */
 
 import { KosConnection } from '../../transport/kos-connection.js';
-import { ManeuverProgram } from '../../mechjeb/programs/maneuver.js';
+import { ManeuverOrchestrator } from '../../mechjeb/programs/orchestrator.js';
 import { getOrbitInfo } from '../../mechjeb/telemetry.js';
 
 async function main() {
-  // Get capture parameter from command line (default: false)
-  const captureArg = process.argv[2]?.toLowerCase();
-  const includeCapture = captureArg === 'true';
+  // Parse arguments
+  const args = process.argv.slice(2);
+  const capture = args.includes('--capture');
+  const noExecute = args.includes('--no-execute');
+  const targetName = args.find(a => !a.startsWith('--')) || 'Mun';
 
   console.log('=== Hohmann Transfer ===\n');
-  console.log(`Capture burn: ${includeCapture ? 'YES' : 'NO (transfer only)'}\n`);
+  console.log(`Target: ${targetName}`);
+  console.log(`Capture burn: ${capture ? 'YES' : 'NO (transfer only)'}`);
+  console.log(`Execute: ${noExecute ? 'NO (plan only)' : 'YES'}\n`);
 
-  const conn = new KosConnection({
-    cpuLabel: 'guidance',
-  });
+  const conn = new KosConnection({ cpuLabel: 'guidance' });
 
   try {
     console.log('1. Connecting to kOS...');
     await conn.connect();
     console.log('   Connected!\n');
 
-    // Check current orbit using library
+    // Check current orbit
     console.log('2. Current orbit...');
     const orbit = await getOrbitInfo(conn);
     console.log(`   Periapsis: ${(orbit.periapsis / 1000).toFixed(1)} km`);
     console.log(`   Apoapsis: ${(orbit.apoapsis / 1000).toFixed(1)} km\n`);
 
-    // Set target first (setTarget includes confirmation)
-    console.log('3. Setting target to Mun...');
-    const maneuver = new ManeuverProgram(conn);
-    const targetResult = await maneuver.setTarget('Mun', 'body');
-    if (!targetResult.success) {
-      console.log(`   ERROR: ${targetResult.error ?? 'Failed to set target'}`);
-      return;
-    }
-    console.log(`   Target: ${targetResult.name} (${targetResult.type})\n`);
-
-    // Create Hohmann transfer using library
-    console.log('4. Creating transfer node...');
-    const result = await maneuver.hohmannTransfer('COMPUTED', includeCapture);
+    // Execute Hohmann transfer with target setting and optional execution
+    console.log(`3. ${noExecute ? 'Planning' : 'Executing'} Hohmann transfer to ${targetName}...`);
+    const orchestrator = new ManeuverOrchestrator(conn);
+    const result = await orchestrator.hohmannTransfer('COMPUTED', capture, {
+      target: targetName,
+      execute: !noExecute,
+    });
 
     if (!result.success) {
-      console.log('   Failed to create transfer nodes');
+      console.log('   Failed to create transfer');
       console.log(`   ${result.error || 'Operation error'}`);
       return;
     }
 
-    console.log('   Node created!\n');
+    console.log(`   ΔV: ${result.deltaV?.toFixed(1) || '?'} m/s\n`);
 
-    // Show node details from result
-    console.log('5. First node info...');
-    console.log(`   ΔV: ${result.deltaV?.toFixed(1) || '?'} m/s in ${result.timeToNode?.toFixed(0) || '?'} seconds\n`);
-
-    // Check for encounter with target
-    console.log('6. Checking for encounter with target...');
-    const encounterCheck = await conn.execute(
-      'IF HASNODE { ' +
-      '  SET ORB TO NEXTNODE:ORBIT. ' +
-      '  IF ORB:HASNEXTPATCH { ' +
-      '    PRINT "Encounter: YES - " + ORB:NEXTPATCH:BODY:NAME. ' +
-      '  } ELSE { ' +
-      '    PRINT "Encounter: NO - transfer node does not create encounter". ' +
-      '  } ' +
-      '} ELSE { ' +
-      '  PRINT "Encounter: ERROR - no node". ' +
-      '}'
-    );
-    console.log(`   ${encounterCheck.output.trim()}\n`);
-
-    console.log('✅ Node created! Use "npm run execute-node" to execute.');
+    if (result.executed) {
+      console.log(`✅ Transfer to ${targetName} complete!`);
+    } else {
+      console.log('✅ Node created! Use "npm run execute-node" to execute.');
+    }
 
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : String(error));

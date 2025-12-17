@@ -26,6 +26,7 @@ import {
 import { ManeuverProgram } from './mechjeb/programs/maneuver.js';
 import { AscentProgram, AscentHandle } from './mechjeb/programs/ascent.js';
 import { getShipTelemetry, type ShipTelemetryOptions } from './mechjeb/telemetry.js';
+import { withTargetAndExecute } from './mechjeb/programs/orchestrator.js';
 // New modular operations
 import { ellipticize, changeSemiMajorAxis } from './mechjeb/programs/basic/index.js';
 import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from './mechjeb/programs/orbital/index.js';
@@ -33,7 +34,6 @@ import { matchPlane, killRelativeVelocity } from './mechjeb/programs/rendezvous/
 import { resonantOrbit, returnFromMoon, interplanetaryTransfer } from './mechjeb/programs/transfer/index.js';
 import { executeNode } from './mechjeb/programs/node/index.js';
 import { warpTo, warpForward, WarpTarget } from './mechjeb/programs/warp.js';
-import type { ManeuverResult } from './mechjeb/programs/shared.js';
 import type { KosConnection } from './transport/kos-connection.js';
 import { immediateTimeWarpKick, installTimeWarpKickTrigger } from './utils/time-warp-kick.js';
 import { globalKosMonitor } from './utils/kos-monitor.js';
@@ -78,64 +78,6 @@ function errorResponse(action: string, error: string) {
   return {
     content: [{ type: 'text' as const, text }],
     isError: true,
-  };
-}
-
-/**
- * Helper to handle optional target setting and node execution for maneuver tools.
- *
- * @param conn - kOS connection
- * @param targetName - Optional target name to set before planning
- * @param execute - Whether to execute the node after planning (default: true)
- * @param planFn - The function that creates the maneuver node
- * @returns Combined result from planning and optional execution
- */
-async function withTargetAndExecute(
-  conn: KosConnection,
-  targetName: string | undefined,
-  execute: boolean,
-  planFn: () => Promise<ManeuverResult>
-): Promise<ManeuverResult & { executed?: boolean; nodesExecuted?: number }> {
-  const maneuver = new ManeuverProgram(conn);
-
-  // Handle target setting if provided
-  if (targetName !== undefined) {
-    const targetResult = await maneuver.setTarget(targetName, 'auto');
-    if (!targetResult.success) {
-      return {
-        success: false,
-        error: targetResult.error ?? `Failed to set target "${targetName}"`,
-      };
-    }
-  }
-
-  // Execute the planning function
-  const planResult = await planFn();
-  if (!planResult.success) {
-    return planResult;
-  }
-
-  // Return early if not executing
-  if (!execute) {
-    return { ...planResult, executed: false };
-  }
-
-  // Execute the node
-  const execResult = await executeNode(conn);
-
-  if (!execResult.success) {
-    return {
-      ...planResult,
-      success: false,
-      error: execResult.error ?? 'Node execution failed',
-      executed: false,
-    };
-  }
-
-  return {
-    ...planResult,
-    executed: true,
-    nodesExecuted: execResult.nodesExecuted,
   };
 }
 

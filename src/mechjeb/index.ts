@@ -10,6 +10,10 @@ export { AscentProgram, AscentHandle } from './programs/ascent.js';
 export { ManeuverProgram } from './programs/maneuver.js';
 export type { ManeuverResult, SetTargetResult, GetTargetInfo, ClearTargetResult } from './programs/maneuver.js';
 
+// Orchestrator - high-level API with target/execute handling
+export { ManeuverOrchestrator, withTargetAndExecute } from './programs/orchestrator.js';
+export type { ManeuverOptions, OrchestratedResult } from './programs/orchestrator.js';
+
 // Node execution
 export {
   executeNode,
