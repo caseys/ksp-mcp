@@ -178,11 +178,29 @@ export async function executeNode(
         };
       }
 
-      // Node still exists - safe to query progress
+      // Query progress with HASNODE guard to handle race condition
+      // (MechJeb removes node when burn completes)
       const progressResult = await conn.execute(
-        'PRINT NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED.',
+        'IF HASNODE { PRINT NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED. } ELSE { PRINT "NONODE". }',
         3000
       );
+
+      // Check if node was removed (burn completed between checks)
+      if (progressResult.output.includes('NONODE')) {
+        // Re-check completion flag
+        const recheck = await conn.execute('PRINT MCP_BURN_DONE.', 2000);
+        if (recheck.output.includes('True')) {
+          return {
+            success: true,
+            nodesExecuted: initialNodeCount,
+            deltaV: { required: dvRequired, available: dvShipTotal, remaining: 0 },
+            attempts: attempt
+          };
+        }
+        // Node removed but burn not marked complete - continue polling
+        console.error('[ExecuteNode] Node removed unexpectedly, rechecking...');
+        continue;
+      }
 
       // Parse "dv|enabled" format
       const progressMatch = progressResult.output.match(/([\d.]+)\|(True|False)/i);
