@@ -1,9 +1,17 @@
 import { z } from 'zod';
 import { KosConnection, ConnectionState, CommandResult } from '../transport/kos-connection.js';
+import { handleListCpus, CpuInfo } from './list-cpus.js';
 import { config } from '../config.js';
 
 // Shared connection instance
 let connection: KosConnection | null = null;
+
+// Track the last connected vessel to detect crashes
+interface ConnectedVesselInfo {
+  name: string;
+  cpuTag: string;
+}
+let lastConnectedVessel: ConnectedVesselInfo | null = null;
 
 // Runtime CPU preference (overrides config, persists until changed or process stops)
 interface CpuPreference {
@@ -138,6 +146,8 @@ export async function forceDisconnect(): Promise<void> {
     }
     connection = null;
   }
+  // Note: Don't clear lastConnectedVessel here - we may need it to detect crashes
+  // It's cleared in handleDisconnect() for explicit disconnects
 }
 
 /**
@@ -163,8 +173,8 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
     if (await isConnectionHealthy(conn)) {
       return conn;
     }
-    // Connection is stale - force close before reconnecting
-    console.log('[ensureConnected] Connection stale, forcing disconnect and reconnecting...');
+    // Connection is stale - disconnect and try fresh reconnect
+    console.error('[ensureConnected] Connection stale, forcing reconnect...');
     await forceDisconnect();
   }
 
@@ -181,6 +191,29 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
 
     // Wait for kOS to stabilize after new connection
     await delay(POST_CONNECT_DELAY_MS);
+
+    // Verify fresh connection is healthy - if not, vessel likely crashed
+    const freshConn = getConnection();
+    if (!await isConnectionHealthy(freshConn)) {
+      const connectedState = freshConn.getState();
+      const vesselName = connectedState.vesselName || lastConnectedVessel?.name || 'Unknown';
+      lastConnectedVessel = null;
+      await forceDisconnect();
+      throw new Error(
+        `Vessel '${vesselName}' appears to have crashed - connection established but no response. ` +
+        `Load a save or switch to another vessel.`
+      );
+    }
+
+    // Save the vessel info for crash detection
+    const connectedState = getConnection().getState();
+    if (connectedState.vesselName) {
+      lastConnectedVessel = {
+        name: connectedState.vesselName,
+        cpuTag: connectedState.cpuTag || '(unnamed)',
+      };
+      console.error(`[ensureConnected] Connected to vessel: ${lastConnectedVessel.name}`);
+    }
 
     return getConnection();
   } catch (error) {
@@ -272,6 +305,7 @@ export async function isKosReady(options?: EnsureConnectedOptions): Promise<bool
 export async function handleDisconnect(): Promise<{ disconnected: boolean }> {
   const conn = getConnection();
   await conn.disconnect();
+  lastConnectedVessel = null; // Clear vessel tracking on explicit disconnect
   return { disconnected: true };
 }
 
