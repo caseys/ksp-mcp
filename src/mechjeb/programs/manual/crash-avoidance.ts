@@ -10,7 +10,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { delay, queryNumber } from '../shared.js';
+import { delay, queryNumber, unlockControls } from '../shared.js';
 import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 
 export interface CrashAvoidanceResult {
@@ -179,9 +179,10 @@ export async function crashAvoidance(
     await delay(pollIntervalMs);
   }
 
-  // Step 4: Stop throttle
+  // Step 4: Stop throttle and unlock controls
   console.error('[CrashAvoidance] Stopping throttle...');
-  await conn.execute('SET MCP_THR TO 0. UNLOCK THROTTLE.', 2000);
+  await conn.execute('SET MCP_THR TO 0.', 2000);
+  await unlockControls(conn);
 
   // Calculate delta-v used
   const finalDv = await queryNumber(conn, 'SHIP:DELTAV:CURRENT');

@@ -7,7 +7,6 @@
  */
 
 import { KosConnection } from '../../transport/kos-connection.js';
-import { crashAvoidance } from './manual/index.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300000; // 5 minutes for long warps
@@ -29,12 +28,6 @@ export interface WarpResult {
   warning?: string;      // Warning message (e.g., crash trajectory)
   periapsis?: number;    // Periapsis in new SOI (meters)
   bodyRadius?: number;   // Body radius for context
-  crashAvoidance?: {     // Crash avoidance results (if triggered)
-    triggered: boolean;
-    initialPeriapsis: number;
-    finalPeriapsis: number;
-    deltaVUsed: number;
-  };
 }
 
 /**
@@ -235,44 +228,17 @@ async function getSOIStatus(conn: KosConnection, body: string): Promise<WarpResu
 
   console.error(`[Warp] In ${newBody} SOI: alt=${altitude}m, pe=${periapsis}m`);
 
-  // Check for crash trajectory (periapsis below surface) - auto-trigger crash avoidance
+  // Warn about crash trajectory (periapsis below surface) but don't auto-trigger avoidance
+  // User can call crash_avoidance tool manually if needed
   if (periapsis < 0) {
-    console.error(`[Warp] ⚠️ CRASH TRAJECTORY DETECTED: Pe=${periapsis}m - triggering crash avoidance...`);
-
-    const avoidanceResult = await crashAvoidance(conn);
-
-    if (avoidanceResult.success) {
-      return {
-        success: true,
-        body: newBody,
-        altitude,
-        periapsis: avoidanceResult.finalPeriapsis,
-        bodyRadius,
-        warning: `⚠️ Crash trajectory detected! Auto-avoided: Pe ${(periapsis / 1000).toFixed(1)}km → ${((avoidanceResult.finalPeriapsis ?? 0) / 1000).toFixed(1)}km (${avoidanceResult.deltaVUsed?.toFixed(1)} m/s)`,
-        crashAvoidance: {
-          triggered: true,
-          initialPeriapsis: periapsis,
-          finalPeriapsis: avoidanceResult.finalPeriapsis ?? 0,
-          deltaVUsed: avoidanceResult.deltaVUsed ?? 0,
-        },
-      };
-    } else {
-      // Crash avoidance failed
-      return {
-        success: true,
-        body: newBody,
-        altitude,
-        periapsis,
-        bodyRadius,
-        warning: `⚠️ CRASH TRAJECTORY: Periapsis ${(periapsis / 1000).toFixed(0)}km - crash avoidance FAILED: ${avoidanceResult.error}`,
-        crashAvoidance: {
-          triggered: true,
-          initialPeriapsis: periapsis,
-          finalPeriapsis: avoidanceResult.finalPeriapsis ?? periapsis,
-          deltaVUsed: avoidanceResult.deltaVUsed ?? 0,
-        },
-      };
-    }
+    return {
+      success: true,
+      body: newBody,
+      altitude,
+      periapsis,
+      bodyRadius,
+      warning: `⚠️ CRASH TRAJECTORY: Periapsis ${(periapsis / 1000).toFixed(1)}km below surface! Use crash_avoidance tool to escape.`,
+    };
   }
 
   return {

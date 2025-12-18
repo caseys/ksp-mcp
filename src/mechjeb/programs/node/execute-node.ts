@@ -6,7 +6,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { delay, queryNumber } from '../shared.js';
+import { delay, queryNumber, unlockControls } from '../shared.js';
 import { immediateTimeWarpKick, installTimeWarpKickTrigger } from '../../../utils/time-warp-kick.js';
 import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 
@@ -233,6 +233,7 @@ export async function executeNode(
             await delay(2000);
             break; // Break inner loop to retry
           } else {
+            await unlockControls(conn);
             return {
               success: false,
               nodesExecuted: 0,
@@ -249,6 +250,7 @@ export async function executeNode(
     if (attempt === MAX_RETRIES) {
       // Disable executor on final timeout
       await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
+      await unlockControls(conn);
 
       return {
         success: false,
@@ -261,6 +263,7 @@ export async function executeNode(
   }
 
   // Should not reach here, but just in case
+  await unlockControls(conn);
   return {
     success: false,
     nodesExecuted: 0,

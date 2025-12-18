@@ -11,6 +11,18 @@ import type { KosConnection } from '../../transport/kos-connection.js';
  */
 export const KOS_COMMAND_DELAY_MS = 500;
 
+/**
+ * Unlock steering and throttle controls.
+ * Call this after errors to ensure the vessel isn't left in a locked state.
+ */
+export async function unlockControls(conn: KosConnection): Promise<void> {
+  try {
+    await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE.', 2000);
+  } catch {
+    // Ignore errors - best effort cleanup
+  }
+}
+
 export interface ManeuverResult {
   success: boolean;
   deltaV?: number;        // m/s
