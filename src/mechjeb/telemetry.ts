@@ -6,6 +6,7 @@
 
 import type { KosConnection } from '../transport/kos-connection.js';
 import type { VesselState, OrbitInfo, MechJebInfo } from './types.js';
+import type { TargetEncounterInfo, BodyEncounterInfo, VesselEncounterInfo } from './programs/shared.js';
 import { config } from '../config.js';
 
 function delay(ms: number): Promise<void> {
@@ -322,6 +323,87 @@ export async function getShipTelemetry(
         lines.push(`Target: ${encounterBody}`);
         lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
       }
+    }
+  }
+
+  return lines.join('\n');
+}
+
+/**
+ * Format target encounter info for display in tool outputs.
+ *
+ * @param info Target encounter info from queryTargetEncounterInfo
+ * @returns Formatted string with target-specific details
+ */
+export function formatTargetEncounterInfo(info: TargetEncounterInfo): string {
+  const lines: string[] = [];
+
+  if (info.targetType === 'body') {
+    const bodyInfo = info as BodyEncounterInfo;
+    const atmHeight = bodyInfo.atmosphereHeight ?? 0;
+
+    // Check for crash trajectory (negative periapsis = below surface)
+    const isCrash = bodyInfo.periapsisInTargetSOI !== undefined && bodyInfo.periapsisInTargetSOI < 0;
+    // Check for reentry trajectory (periapsis below atmosphere but above surface)
+    const isReentry = !isCrash && atmHeight > 0 &&
+      bodyInfo.periapsisInTargetSOI !== undefined &&
+      bodyInfo.periapsisInTargetSOI < atmHeight;
+
+    if (isCrash) {
+      lines.push('⚠️ CRASH TRAJECTORY');
+    } else if (isReentry) {
+      lines.push('⚠️ REENTRY TRAJECTORY');
+    }
+    lines.push(`=== ${bodyInfo.targetName} Encounter ===`);
+
+    if (bodyInfo.periapsisInTargetSOI !== undefined) {
+      const peKm = bodyInfo.periapsisInTargetSOI / 1000;
+      if (isCrash) {
+        lines.push(`Periapsis: ${peKm.toFixed(1)} km (below surface!)`);
+      } else if (isReentry) {
+        lines.push(`Periapsis: ${peKm.toFixed(1)} km (in atmosphere)`);
+      } else {
+        lines.push(`Periapsis: ${peKm.toFixed(1)} km`);
+      }
+    }
+
+    if (bodyInfo.timeToClosestApproach !== undefined) {
+      if (isCrash) {
+        lines.push(`Time to impact: ${formatTime(bodyInfo.timeToClosestApproach)}`);
+      } else if (isReentry) {
+        lines.push(`Time to reentry: ${formatTime(bodyInfo.timeToClosestApproach)}`);
+      } else {
+        lines.push(`Time to closest approach: ${formatTime(bodyInfo.timeToClosestApproach)}`);
+      }
+    }
+
+    if (bodyInfo.captureDeltaV !== undefined && !isCrash && !isReentry) {
+      lines.push(`Capture ΔV: ${bodyInfo.captureDeltaV.toFixed(1)} m/s`);
+    } else if (isCrash) {
+      lines.push(`Capture ΔV: N/A (no safe orbit)`);
+    } else if (isReentry) {
+      lines.push(`Capture ΔV: N/A (aerobraking trajectory)`);
+    }
+  } else {
+    const vesselInfo = info as VesselEncounterInfo;
+
+    lines.push(`=== Target: ${vesselInfo.targetName} ===`);
+
+    if (vesselInfo.closestApproachDistance !== undefined) {
+      const distKm = vesselInfo.closestApproachDistance / 1000;
+      if (distKm < 1) {
+        lines.push(`Closest approach: ${(vesselInfo.closestApproachDistance).toFixed(0)} m`);
+      } else {
+        lines.push(`Closest approach: ${distKm.toFixed(1)} km`);
+      }
+    }
+
+    if (vesselInfo.timeToClosestApproach !== undefined) {
+      lines.push(`Time to closest: ${formatTime(vesselInfo.timeToClosestApproach)}`);
+    }
+
+    if (vesselInfo.closestApproachRelVel !== undefined) {
+      lines.push(`Rel. velocity at CA: ${vesselInfo.closestApproachRelVel.toFixed(1)} m/s`);
     }
   }
 

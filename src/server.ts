@@ -25,7 +25,8 @@ import {
 } from './mcp-resources.js';
 import { ManeuverProgram } from './mechjeb/programs/maneuver.js';
 import { AscentProgram, AscentHandle } from './mechjeb/programs/ascent.js';
-import { getShipTelemetry, type ShipTelemetryOptions } from './mechjeb/telemetry.js';
+import { getShipTelemetry, formatTargetEncounterInfo, type ShipTelemetryOptions } from './mechjeb/telemetry.js';
+import { queryTargetEncounterInfo } from './mechjeb/programs/shared.js';
 import { withTargetAndExecute } from './mechjeb/programs/orchestrator.js';
 // New modular operations
 import { ellipticize, changeSemiMajorAxis } from './mechjeb/programs/basic/index.js';
@@ -39,6 +40,7 @@ import type { KosConnection } from './transport/kos-connection.js';
 import { immediateTimeWarpKick, installTimeWarpKickTrigger } from './utils/time-warp-kick.js';
 import { globalKosMonitor } from './utils/kos-monitor.js';
 import { listQuicksaves, quicksave, quickload } from './kuniverse.js';
+import { runScript } from './script/index.js';
 
 // Track current ascent handle for status/abort
 let currentAscentHandle: AscentHandle | null = null;
@@ -758,6 +760,11 @@ export function createServer(): McpServer {
           let text = `${nodeCount} node(s): ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
 
           if (args.includeTelemetry) {
+            // Query target encounter info
+            const targetInfo = await queryTargetEncounterInfo(conn);
+            if (targetInfo) {
+              text += '\n\n' + formatTargetEncounterInfo(targetInfo);
+            }
             text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
           }
 
@@ -813,6 +820,11 @@ export function createServer(): McpServer {
         let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
 
         if (args.includeTelemetry) {
+          // Query target encounter info
+          const targetInfo = await queryTargetEncounterInfo(conn);
+          if (targetInfo) {
+            text += '\n\n' + formatTargetEncounterInfo(targetInfo);
+          }
           text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
         }
 
@@ -1173,6 +1185,11 @@ export function createServer(): McpServer {
           }
 
           if (args.includeTelemetry) {
+            // Query target encounter info
+            const targetInfo = await queryTargetEncounterInfo(conn);
+            if (targetInfo) {
+              text += '\n\n' + formatTargetEncounterInfo(targetInfo);
+            }
             text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
           }
 
@@ -1259,6 +1276,58 @@ export function createServer(): McpServer {
         return successResponse('command', result.output || '(no output)');
       } else {
         return errorResponse('command', result.error ?? 'Failed');
+      }
+    }
+  );
+
+  // =============================================================================
+  // SCRIPT EXECUTION
+  // =============================================================================
+
+  server.registerTool(
+    'run_script',
+    {
+      description: 'Run a kOS script file. Copies script to KSP Archive (Ships/Script) and executes it. LIMITATION: Scripts using TERMINAL:INPUT will hang - use only non-interactive scripts.',
+      inputSchema: {
+        sourcePath: z.string().describe('Absolute path to the .ks script file to run'),
+        timeout: z.number()
+          .optional()
+          .default(60000)
+          .describe('Maximum execution time in milliseconds (default: 60000 = 1 minute)'),
+        cleanup: z.boolean()
+          .optional()
+          .default(true)
+          .describe('Delete script from Archive after execution (default: true)'),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: false,
+        idempotentHint: false,
+        openWorldHint: true,
+      },
+      _meta: { tier: 2 },
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await runScript(conn, args.sourcePath, {
+          timeout: args.timeout,
+          cleanup: args.cleanup,
+        });
+
+        if (result.success) {
+          const outputPreview = result.output.slice(-30).join('\n');
+          const timeStr = result.executionTime ? `${(result.executionTime / 1000).toFixed(1)}s` : 'unknown';
+          return successResponse('run_script',
+            `Script completed in ${timeStr}\n\nOutput (last 30 lines):\n${outputPreview}`);
+        } else {
+          const outputPreview = result.output.slice(-20).join('\n');
+          return errorResponse('run_script',
+            `${result.error}\n\nOutput:\n${outputPreview}`);
+        }
+      } catch (error) {
+        return errorResponse('run_script',
+          error instanceof Error ? error.message : String(error));
       }
     }
   );
