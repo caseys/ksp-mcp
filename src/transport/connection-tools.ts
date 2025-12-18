@@ -215,7 +215,6 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
       return conn;
     }
     // Connection is stale - disconnect and try fresh reconnect
-    console.error('[ensureConnected] Connection stale, forcing reconnect...');
     await forceDisconnect();
   }
 
@@ -251,8 +250,6 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
       // No response at all - try Ctrl+D to distinguish power loss from crash
       // Power loss: Ctrl+D returns to CPU menu
       // Crashed: Ctrl+D has no effect, connection stuck
-      console.error('[ensureConnected] No response - trying Ctrl+D to check if vessel crashed or lost power...');
-
       const canDetach = await freshConn.tryDetach(2000);
 
       if (canDetach) {
@@ -280,7 +277,6 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
         name: connectedState.vesselName,
         cpuTag: connectedState.cpuTag || '(unnamed)',
       };
-      console.error(`[ensureConnected] Connected to vessel: ${lastConnectedVessel.name}`);
     }
 
     return getConnection();
