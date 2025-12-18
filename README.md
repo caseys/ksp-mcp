@@ -454,6 +454,94 @@ Options:
 ```
 
 
+## Implementation Notes
+
+### kOS Protocol and Completion Detection
+
+ksp-mcp uses several patterns for reliable command completion detection with kOS:
+
+#### Sentinel-Based Completion
+For most commands, `KosConnection.execute()` automatically injects a sentinel marker after each command. The flow is:
+1. Send the user command
+2. Send `PRINT "__MCP_DONE_<token>__".` with a unique token
+3. Wait for the sentinel in output - this confirms kOS executed both commands
+4. Strip echoes, prompts, and sentinel from output
+
+See `docs/kos-protocol-analysis.md` for complete protocol details.
+
+#### Outcome-Based Polling
+For long-running operations like time warp, polling the actual outcome is more reliable than checking operation status:
+
+- **SOI Warp**: Poll `SHIP:BODY:NAME` until it changes (detects SOI crossing)
+- **Node Warp**: Poll `NEXTNODE:ETA` until close to target time
+- **Orbital Point Warp**: Poll `ETA:PERIAPSIS` or `ETA:APOAPSIS`
+
+This pattern is used because during high time warp, kOS responses can be delayed or unreliable.
+
+#### Flag-Based Completion
+For complex operations like node execution:
+1. Set a kOS-side flag: `SET MCP_BURN_DONE TO FALSE.`
+2. Install a WHEN trigger: `WHEN NOT HASNODE THEN { SET MCP_BURN_DONE TO TRUE. }`
+3. Poll the flag: `PRINT MCP_BURN_DONE.`
+
+### Time Warp Commands
+Use `KUNIVERSE:TIMEWARP:WARPTO()` (non-blocking) rather than `WARPTO()` (blocking) for better control over warp completion detection.
+
+## Development & Debugging
+
+### Testing Blocking Operations
+
+When testing operations that may block (like time warp), run them in background processes:
+
+```bash
+# Run a blocking test in background
+node -e "
+const { KosConnection } = require('./dist/transport/kos-connection.js');
+const { warpTo } = require('./dist/mechjeb/programs/warp.js');
+
+async function test() {
+  const conn = new KosConnection();
+  await conn.connect();
+  const result = await warpTo(conn, 'soi', { timeout: 300000 });
+  console.log('Result:', JSON.stringify(result, null, 2));
+}
+test().catch(console.error);
+" &
+```
+
+### Background Monitoring
+
+Monitor kOS state while tests run:
+
+```bash
+# Monitor body, warp level, and SOI ETA every 2 seconds
+node -e "
+const { KosConnection } = require('./dist/transport/kos-connection.js');
+async function monitor() {
+  const conn = new KosConnection();
+  await conn.connect();
+  setInterval(async () => {
+    const result = await conn.execute('PRINT SHIP:BODY:NAME + \"|\" + WARP.', 2000);
+    console.log(new Date().toISOString().substr(11,8), result.output.trim());
+  }, 2000);
+}
+monitor().catch(console.error);
+" &
+```
+
+This helps debug issues where operations complete in KSP but detection fails.
+
+### Using the ksp-mcp REPL
+
+For interactive debugging, use the daemon with raw kOS commands:
+
+```bash
+npm run daemon:start
+npm run kos "PRINT SHIP:BODY:NAME."
+npm run kos "PRINT WARP."
+npm run kos "PRINT SHIP:ORBIT:HASNEXTPATCH."
+```
+
 ## License
 
 MIT

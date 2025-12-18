@@ -7,7 +7,7 @@
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { delay, queryNumber, unlockControls } from '../shared.js';
-import { immediateTimeWarpKick, installTimeWarpKickTrigger } from '../../../utils/time-warp-kick.js';
+import { immediateTimeWarpKick } from '../../../utils/time-warp-kick.js';
 import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 
 export interface ExecuteNodeResult {
@@ -141,10 +141,6 @@ export async function executeNode(
     lastAttempt = attempt;
     console.error(`[ExecuteNode] Attempt ${attempt}/${MAX_RETRIES}`);
 
-    // Set up completion trigger - fires when node is removed
-    await conn.execute('SET MCP_BURN_DONE TO FALSE.');
-    await conn.execute('WHEN NOT HASNODE THEN { SET MCP_BURN_DONE TO TRUE. }');
-
     // Workaround: Shift node time earlier by half burn duration
     // MechJeb fires at node time instead of centering the burn
     if (areWorkaroundsEnabled() && halfBurn > 0) {
@@ -157,9 +153,6 @@ export async function executeNode(
     // Time warp kick to unstick alignment (brief delay for MechJeb to start aligning)
     await delay(500);
     await immediateTimeWarpKick(conn);
-
-    // Install post-burn time warp kick trigger
-    await installTimeWarpKickTrigger(conn, 'MCP_BURN_DONE', 10);
 
     // In async mode, return immediately after starting executor
     if (asyncMode) {
@@ -178,40 +171,21 @@ export async function executeNode(
     for (let i = 0; i < maxIterations; i++) {
       await delay(pollIntervalMs);
 
-      // Check completion trigger first (no race condition)
-      const doneCheck = await conn.execute('PRINT MCP_BURN_DONE.', 2000);
-      if (doneCheck.output.includes('True')) {
-        // Node completed successfully
+      // Query progress - when MechJeb completes the burn, it removes the node
+      // Using sentinel pattern via execute() ensures we get complete response
+      const progressResult = await conn.execute(
+        'IF HASNODE { PRINT NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED. } ELSE { PRINT "NONODE". }',
+        3000
+      );
+
+      // Node removed = burn complete (MechJeb removes node when done)
+      if (progressResult.output.includes('NONODE')) {
         return {
           success: true,
           nodesExecuted: initialNodeCount,
           deltaV: { required: dvRequired, available: dvShipTotal, remaining: 0 },
           attempts: attempt
         };
-      }
-
-      // Query progress with HASNODE guard to handle race condition
-      // (MechJeb removes node when burn completes)
-      const progressResult = await conn.execute(
-        'IF HASNODE { PRINT NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED. } ELSE { PRINT "NONODE". }',
-        3000
-      );
-
-      // Check if node was removed (burn completed between checks)
-      if (progressResult.output.includes('NONODE')) {
-        // Re-check completion flag
-        const recheck = await conn.execute('PRINT MCP_BURN_DONE.', 2000);
-        if (recheck.output.includes('True')) {
-          return {
-            success: true,
-            nodesExecuted: initialNodeCount,
-            deltaV: { required: dvRequired, available: dvShipTotal, remaining: 0 },
-            attempts: attempt
-          };
-        }
-        // Node removed but burn not marked complete - continue polling
-        console.error('[ExecuteNode] Node removed unexpectedly, rechecking...');
-        continue;
       }
 
       // Parse "dv|enabled" format

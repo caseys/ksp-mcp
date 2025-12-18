@@ -46,6 +46,14 @@ export const config = Object.freeze({
     tmuxSession: process.env.KOS_TMUX_SESSION ?? 'ksp-mcp-kos',
   },
 
+  // KSP installation paths
+  ksp: {
+    /** KSP installation directory */
+    path: process.env.KSP_PATH ?? '/Volumes/Flatty/SteamLibrary/steamapps/common/Kerbal Space Program',
+    /** Scripts folder relative to KSP path (kOS Archive volume) */
+    scriptsFolder: process.env.KSP_SCRIPTS_FOLDER ?? 'Ships/Script',
+  },
+
   // Timeout defaults (milliseconds)
   timeouts: {
     /** Timeout for initial socket connection */
