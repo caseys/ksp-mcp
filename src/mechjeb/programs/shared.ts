@@ -21,18 +21,17 @@ export interface ManeuverResult {
 
 /**
  * Parse a numeric value from kOS output
- * Looks for patterns like "23.80  m/s" or just bare numbers
+ * Looks for patterns like "23.80  m/s" or just bare numbers (including negative)
  */
 export function parseNumber(output: string): number {
-  // First try to find a number with units (e.g., "23.80  m/s")
-  // Note: Must start with digit, not dot (to avoid matching ".23.80" as ".23")
-  const withUnits = output.match(/(\d+(?:\.\d+)?)\s*m\/s/i);
+  // First try to find a number with units (e.g., "23.80  m/s" or "-23.80  m/s")
+  const withUnits = output.match(/(-?\d+(?:\.\d+)?)\s*m\/s/i);
   if (withUnits) {
     return parseFloat(withUnits[1]);
   }
 
-  // Otherwise find all numbers that start with a digit
-  const allNumbers = output.match(/\d+(?:\.\d+)?(?:E[+-]?\d+)?/gi);
+  // Otherwise find all numbers (including negative)
+  const allNumbers = output.match(/-?\d+(?:\.\d+)?(?:E[+-]?\d+)?/gi);
   if (allNumbers && allNumbers.length > 0) {
     // Take the last number which is most likely the actual value
     return parseFloat(allNumbers[allNumbers.length - 1]);

@@ -34,6 +34,7 @@ import { matchPlane, killRelativeVelocity } from './mechjeb/programs/rendezvous/
 import { resonantOrbit, returnFromMoon, interplanetaryTransfer } from './mechjeb/programs/transfer/index.js';
 import { executeNode } from './mechjeb/programs/node/index.js';
 import { warpTo, warpForward, WarpTarget } from './mechjeb/programs/warp.js';
+import { crashAvoidance } from './mechjeb/programs/manual/index.js';
 import type { KosConnection } from './transport/kos-connection.js';
 import { immediateTimeWarpKick, installTimeWarpKickTrigger } from './utils/time-warp-kick.js';
 import { globalKosMonitor } from './utils/kos-monitor.js';
@@ -1474,12 +1475,63 @@ export function createServer(): McpServer {
         }
 
         if (result.success) {
-          return successResponse('warp', `Warp complete: ${result.body}, ${((result.altitude || 0) / 1000).toFixed(0)}km`);
+          let msg = `Warp complete: ${result.body}, ${((result.altitude || 0) / 1000).toFixed(0)}km`;
+          if (result.periapsis !== undefined) {
+            msg += `, periapsis: ${(result.periapsis / 1000).toFixed(0)}km`;
+          }
+          if (result.warning) {
+            msg += `\n\n${result.warning}`;
+          }
+          return successResponse('warp', msg);
         } else {
           return errorResponse('warp', result.error ?? 'Failed');
         }
       } catch (error) {
         return errorResponse('warp', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  // Crash Avoidance Tool
+  server.registerTool(
+    'crash_avoidance',
+    {
+      description: 'Emergency burn to raise periapsis above safe altitude. Uses RCS, SAS radial-out, and full throttle with auto-staging.',
+      inputSchema: {
+        targetPeriapsis: z.number()
+          .optional()
+          .default(10000)
+          .describe('Target periapsis in meters (default: 10000 = 10km)'),
+        timeoutMs: z.number()
+          .optional()
+          .default(300000)
+          .describe('Maximum burn time in milliseconds (default: 300000 = 5 min)'),
+      },
+      annotations: {
+        readOnlyHint: false,
+        destructiveHint: true,
+        idempotentHint: false,
+        openWorldHint: false,
+      },
+      _meta: { tier: 1 },
+    },
+    async (args) => {
+      try {
+        const conn = await ensureConnected();
+        const result = await crashAvoidance(conn, {
+          targetPeriapsis: args.targetPeriapsis,
+          timeoutMs: args.timeoutMs,
+        });
+
+        if (result.success) {
+          return successResponse('crash_avoidance',
+            `Crash avoided! Pe: ${result.initialPeriapsis?.toFixed(0)}m → ${result.finalPeriapsis?.toFixed(0)}m, ΔV: ${result.deltaVUsed?.toFixed(1)} m/s, Stages: ${result.stagesUsed}`
+          );
+        } else {
+          return errorResponse('crash_avoidance', result.error ?? 'Burn failed');
+        }
+      } catch (error) {
+        return errorResponse('crash_avoidance', error instanceof Error ? error.message : String(error));
       }
     }
   );

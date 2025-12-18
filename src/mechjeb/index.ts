@@ -35,6 +35,10 @@ export { matchPlane, killRelativeVelocity } from './programs/rendezvous/index.js
 // Maneuver operations - Transfer
 export { resonantOrbit, returnFromMoon, interplanetaryTransfer } from './programs/transfer/index.js';
 
+// Manual control operations
+export { crashAvoidance } from './programs/manual/index.js';
+export type { CrashAvoidanceResult, CrashAvoidanceOptions } from './programs/manual/index.js';
+
 // Types
 export type {
   MechJebModules,
