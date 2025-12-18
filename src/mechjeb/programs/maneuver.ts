@@ -16,6 +16,7 @@ import {
   delay,
 } from './shared.js';
 import { bringKspToForeground } from '../../utils/bring-to-foreground.js';
+import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 
 // Re-export for external use
 export type { ManeuverResult } from './shared.js';
@@ -431,7 +432,7 @@ export class ManeuverProgram {
     timeRef: string = 'COMPUTED',
     capture: boolean = false
   ): Promise<ManeuverResult> {
-    // Check target exists with debug info
+    // Check target exists and get target name
     const targetDebug = await this.getTargetDebugInfo();
     if (!targetDebug.hasTarget) {
       return {
@@ -440,6 +441,10 @@ export class ManeuverProgram {
                `Debug: HASTARGET returned: "${targetDebug.rawOutput.trim()}"`
       };
     }
+
+    // Get the target name for encounter validation
+    const targetNameResult = await this.conn.execute('PRINT TARGET:NAME.', 2000);
+    const targetName = targetNameResult.output.trim();
 
     const captureStr = capture ? 'TRUE' : 'FALSE';
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:HOHMANN("${timeRef}", ${captureStr}).`;
@@ -457,15 +462,31 @@ export class ManeuverProgram {
     const deltaV = nodeInfo.deltaV;
     const timeToNode = nodeInfo.timeToNode;
 
-    // CRITICAL: Verify encounter exists (check the orbit AFTER executing the node)
-    const hasEncounterResult = await this.conn.execute('PRINT NEXTNODE:ORBIT:HASNEXTPATCH.');
-    if (!hasEncounterResult.output.includes('True')) {
+    // CRITICAL: Verify encounter exists AND is with the correct target
+    const encounterCheck = await this.conn.execute(
+      'IF NEXTNODE:ORBIT:HASNEXTPATCH { PRINT NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NO_ENCOUNTER". }',
+      3000
+    );
+    const encounterBody = encounterCheck.output.trim();
+
+    if (encounterBody === 'NO_ENCOUNTER') {
       return {
         success: false,
         error: '❌ Hohmann transfer nodes created but NO ENCOUNTER detected!\n' +
                'The transfer trajectory does not intersect the target.\n' +
                'This indicates a problem with the transfer planning.\n' +
                'DO NOT EXECUTE this burn - it will waste fuel without reaching the target.'
+      };
+    }
+
+    // Check if encounter is with the correct target (case-insensitive comparison)
+    if (encounterBody.toLowerCase() !== targetName.toLowerCase()) {
+      return {
+        success: false,
+        error: `❌ Hohmann transfer creates WRONG ENCOUNTER!\n` +
+               `Target: ${targetName}\n` +
+               `Encounter: ${encounterBody}\n` +
+               'The phase angle may be wrong - wait for better timing or use interplanetary_transfer.'
       };
     }
 
@@ -490,12 +511,16 @@ export class ManeuverProgram {
    * @param finalPeA Target periapsis (bodies) or closest approach (vessels) in meters
    */
   async courseCorrection(finalPeA: number): Promise<ManeuverResult> {
-    // WORKAROUND: MechJeb's course correction algorithm produces results that vary
-    // with trajectory geometry. Using 3x multiplier to err on the safe side
-    // (higher periapsis than requested, avoiding surface impact).
-    // TODO: Investigate MechJeb algorithm or implement iterative refinement.
-    const adjustedPeA = finalPeA * 3;
-    console.error(`[CourseCorrection] WORKAROUND: Requested ${finalPeA}m, using ${adjustedPeA}m (3x safe margin)`);
+    let adjustedPeA = finalPeA;
+
+    if (areWorkaroundsEnabled()) {
+      // WORKAROUND: MechJeb's course correction algorithm produces results that vary
+      // with trajectory geometry. Using 3x multiplier to err on the safe side
+      // (higher periapsis than requested, avoiding surface impact).
+      // TODO: Investigate MechJeb algorithm or implement iterative refinement.
+      adjustedPeA = finalPeA * 3;
+      console.error(`[CourseCorrection] WORKAROUND: Requested ${finalPeA}m, using ${adjustedPeA}m (3x safe margin)`);
+    }
 
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${adjustedPeA}).`;
     const result = await this.conn.execute(cmd, 10000);

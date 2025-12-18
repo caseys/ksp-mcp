@@ -94,3 +94,12 @@ export type {
   QuickloadResult,
   ListSavesResult,
 } from './kuniverse.js';
+
+// =============================================================================
+// Workarounds Configuration
+// =============================================================================
+
+export {
+  setWorkaroundsEnabled,
+  areWorkaroundsEnabled,
+} from './config/workarounds.js';

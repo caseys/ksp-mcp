@@ -8,6 +8,7 @@
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { delay, queryNumber } from '../shared.js';
 import { immediateTimeWarpKick, installTimeWarpKickTrigger } from '../../../utils/time-warp-kick.js';
+import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 
 export interface ExecuteNodeResult {
   success: boolean;
@@ -146,7 +147,7 @@ export async function executeNode(
 
     // Workaround: Shift node time earlier by half burn duration
     // MechJeb fires at node time instead of centering the burn
-    if (halfBurn > 0) {
+    if (areWorkaroundsEnabled() && halfBurn > 0) {
       await conn.execute(`SET nd TO NEXTNODE. SET nd:ETA TO nd:ETA - ${halfBurn.toFixed(1)}.`, 3000);
     }
 

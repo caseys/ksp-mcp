@@ -11,6 +11,7 @@
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { delay, queryNumber } from '../shared.js';
+import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 
 export interface CrashAvoidanceResult {
   success: boolean;
@@ -61,6 +62,17 @@ export async function crashAvoidance(
   conn: KosConnection,
   options: CrashAvoidanceOptions = {}
 ): Promise<CrashAvoidanceResult> {
+  // When workarounds disabled, return no-op for testing
+  if (!areWorkaroundsEnabled()) {
+    console.error('[CrashAvoidance] Workarounds disabled, returning no-op');
+    return {
+      success: true,
+      initialPeriapsis: 0,
+      finalPeriapsis: 0,
+      stagesUsed: 0,
+    };
+  }
+
   const {
     targetPeriapsis = DEFAULT_TARGET_PE,
     timeoutMs = DEFAULT_TIMEOUT_MS,
