@@ -1,6 +1,5 @@
 import { z } from 'zod';
 import { KosConnection, ConnectionState, CommandResult } from '../transport/kos-connection.js';
-import { handleListCpus, CpuInfo } from './list-cpus.js';
 import { config } from '../config.js';
 
 // Shared connection instance
@@ -118,18 +117,60 @@ const DEFAULT_WAIT_TIMEOUT_MS = 120000; // 2 minutes
 const WAIT_POLL_INTERVAL_MS = 2000;
 
 /**
+ * Health check result with reason for failure
+ */
+interface HealthCheckResult {
+  healthy: boolean;
+  reason?: 'signal_lost' | 'no_response' | 'error';
+  output?: string;
+}
+
+/**
  * Verify connection is healthy by executing a simple command.
- * Returns true if the connection is working, false if stale.
+ * Returns detailed result including failure reason.
+ *
+ * Note: "Signal lost" message only appears once after signal loss.
+ * Subsequent commands are echoed but produce no output.
+ */
+async function checkConnectionHealth(conn: KosConnection): Promise<HealthCheckResult> {
+  try {
+    // Use unique marker to distinguish result from echo
+    const marker = 'HEALTH_OK';
+    const result = await conn.execute(`PRINT "${marker}".`, HEALTH_CHECK_TIMEOUT_MS);
+
+    // Check for radio blackout - signal lost message (only on first command after loss)
+    if (result.output.includes('Signal lost')) {
+      return { healthy: false, reason: 'signal_lost', output: result.output };
+    }
+
+    // Check if we got the actual result (not just the command echo)
+    // The echo would be: PRINT "HEALTH_OK".
+    // The result would be: HEALTH_OK (on its own, without PRINT)
+    // Use regex to find HEALTH_OK not preceded by PRINT
+    const hasResult = result.output.match(/(?<!PRINT\s+")HEALTH_OK(?!")/);
+    if (result.success && hasResult) {
+      return { healthy: true };
+    }
+
+    // Commands echoed but no output = likely signal loss (after first command)
+    // This happens when buffer had stale commands that consumed the "Signal lost" message
+    if (result.output.includes(`PRINT "${marker}"`)) {
+      return { healthy: false, reason: 'signal_lost', output: result.output };
+    }
+
+    // No valid response
+    return { healthy: false, reason: 'no_response', output: result.output };
+  } catch {
+    return { healthy: false, reason: 'error' };
+  }
+}
+
+/**
+ * Simple health check for backward compatibility.
  */
 async function isConnectionHealthy(conn: KosConnection): Promise<boolean> {
-  try {
-    const result = await conn.execute('PRINT 1.', HEALTH_CHECK_TIMEOUT_MS);
-    // A healthy connection returns output containing "1"
-    // Check both success and output to catch timeout cases
-    return result.success && result.output.includes('1');
-  } catch {
-    return false;
-  }
+  const result = await checkConnectionHealth(conn);
+  return result.healthy;
 }
 
 /**
@@ -192,11 +233,38 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
     // Wait for kOS to stabilize after new connection
     await delay(POST_CONNECT_DELAY_MS);
 
-    // Verify fresh connection is healthy - if not, vessel likely crashed
+    // Verify fresh connection is healthy - if not, vessel may have crashed or lost signal
     const freshConn = getConnection();
-    if (!await isConnectionHealthy(freshConn)) {
+    const healthCheck = await checkConnectionHealth(freshConn);
+    if (!healthCheck.healthy) {
       const connectedState = freshConn.getState();
       const vesselName = connectedState.vesselName || lastConnectedVessel?.name || 'Unknown';
+
+      if (healthCheck.reason === 'signal_lost') {
+        // Radio blackout - don't disconnect, just throw informative error
+        throw new Error(
+          `Vessel '${vesselName}' has lost radio signal - waiting to re-acquire. ` +
+          `Wait for the vessel to regain line-of-sight to Kerbin or a relay.`
+        );
+      }
+
+      // No response at all - try Ctrl+D to distinguish power loss from crash
+      // Power loss: Ctrl+D returns to CPU menu
+      // Crashed: Ctrl+D has no effect, connection stuck
+      console.error('[ensureConnected] No response - trying Ctrl+D to check if vessel crashed or lost power...');
+
+      const canDetach = await freshConn.tryDetach(2000);
+
+      if (canDetach) {
+        // Got back to menu - power loss (vessel exists but no power)
+        await forceDisconnect();
+        throw new Error(
+          `Vessel '${vesselName}' appears to have no power - connection works but no response. ` +
+          `Wait for batteries to recharge or solar panels to receive sunlight.`
+        );
+      }
+
+      // Couldn't detach - vessel crashed
       lastConnectedVessel = null;
       await forceDisconnect();
       throw new Error(

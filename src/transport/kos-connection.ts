@@ -272,6 +272,35 @@ export class KosConnection {
   }
 
   /**
+   * Try to detach from CPU by sending Ctrl+D and checking for menu.
+   * Returns true if we got back to CPU menu (power loss), false if stuck (crashed).
+   */
+  async tryDetach(timeoutMs = 2000): Promise<boolean> {
+    if (!this.transport) {
+      return false;
+    }
+
+    try {
+      // Send Ctrl+D to try to detach
+      if (this.transport.sendKeys) {
+        await this.transport.sendKeys('C-d');
+      } else {
+        // Fallback: send raw Ctrl+D byte
+        await this.transport.send('\x04');
+      }
+
+      // Wait for menu to appear
+      const response = await this.transport.waitFor(/Choose a CPU/i, timeoutMs);
+
+      // Got back to menu - vessel has power but CPU was unresponsive
+      return response.includes('Choose a CPU');
+    } catch {
+      // Timeout or error - couldn't detach, vessel likely crashed
+      return false;
+    }
+  }
+
+  /**
    * Disconnect from kOS terminal
    */
   async disconnect(): Promise<void> {
@@ -548,6 +577,7 @@ export class KosConnection {
    */
   private detectError(output: string): string | null {
     const errorPatterns = [
+      { pattern: /Signal lost\.\s+Waiting to re-acquire signal/i, message: 'Radio blackout - vessel has lost signal' },
       { pattern: /Cannot find suffixed term/i, message: 'Unknown property or method' },
       { pattern: /Program aborted/i, message: 'kOS program was aborted' },
       { pattern: /Syntax error/i, message: 'kOS syntax error' },
