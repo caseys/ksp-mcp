@@ -9,11 +9,11 @@
 import { KosConnection } from '../../transport/kos-connection.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
-const DEFAULT_TIMEOUT_MS = 300000; // 5 minutes for long warps
+const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
 
 export type WarpTarget = 'node' | 'soi' | 'periapsis' | 'apoapsis';
 
-export interface WarpOptions {
+interface WarpOptions {
   /** Lead time in seconds before target (default: 0) */
   leadTime?: number;
   /** Timeout for warp completion in ms (default: 300000 = 5 minutes) */
@@ -50,14 +50,18 @@ export async function warpTo(
   const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
 
   switch (target) {
-    case 'node':
+    case 'node': {
       return await warpToNode(conn, leadTime, timeout);
-    case 'soi':
+    }
+    case 'soi': {
       return await warpToSOI(conn, leadTime, timeout);
-    case 'periapsis':
+    }
+    case 'periapsis': {
       return await warpToOrbitalPoint(conn, 'PERIAPSIS', leadTime, timeout);
-    case 'apoapsis':
+    }
+    case 'apoapsis': {
       return await warpToOrbitalPoint(conn, 'APOAPSIS', leadTime, timeout);
+    }
   }
 }
 
@@ -76,7 +80,7 @@ async function warpToNode(
   }
 
   // Get initial ETA
-  const initialEta = parseFloat(await queryValue(conn, 'NEXTNODE:ETA'));
+  const initialEta = Number.parseFloat(await queryValue(conn, 'NEXTNODE:ETA'));
   if (initialEta <= leadTime) {
     // Already close enough
     return await getBasicStatus(conn);
@@ -92,7 +96,7 @@ async function warpToNode(
   while (Date.now() - startTime < timeout) {
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
-    const currentEta = parseFloat(await queryValue(conn, 'NEXTNODE:ETA'));
+    const currentEta = Number.parseFloat(await queryValue(conn, 'NEXTNODE:ETA'));
     console.error(`[Warp] Node ETA: ${currentEta.toFixed(0)}s`);
 
     if (currentEta <= leadTime + 5) {
@@ -120,7 +124,7 @@ async function warpToSOI(
 
   // Get current body and SOI transition ETA
   const currentBody = await queryValue(conn, 'SHIP:BODY:NAME');
-  const soiEta = parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
+  const soiEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
 
   console.error(`[Warp] Current body: ${currentBody}, SOI transition in ${soiEta.toFixed(0)}s`);
 
@@ -146,8 +150,8 @@ async function warpToSOI(
     }
 
     // Also check if we're getting close to transition (within leadTime)
-    const remainingEta = parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
-    if (remainingEta < 100000) { // Only log if ETA is reasonable
+    const remainingEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
+    if (remainingEta < 100_000) { // Only log if ETA is reasonable
       console.error(`[Warp] SOI ETA: ${remainingEta.toFixed(0)}s`);
     }
   }
@@ -165,7 +169,7 @@ async function warpToOrbitalPoint(
   timeout: number
 ): Promise<WarpResult> {
   // Get initial ETA
-  const initialEta = parseFloat(await queryValue(conn, `ETA:${point}`));
+  const initialEta = Number.parseFloat(await queryValue(conn, `ETA:${point}`));
   if (initialEta <= leadTime) {
     return await getBasicStatus(conn);
   }
@@ -180,7 +184,7 @@ async function warpToOrbitalPoint(
   while (Date.now() - startTime < timeout) {
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
-    const currentEta = parseFloat(await queryValue(conn, `ETA:${point}`));
+    const currentEta = Number.parseFloat(await queryValue(conn, `ETA:${point}`));
     console.error(`[Warp] ${point} ETA: ${currentEta.toFixed(0)}s`);
 
     if (currentEta <= leadTime + 5) {
@@ -201,7 +205,7 @@ async function getBasicStatus(conn: KosConnection): Promise<WarpResult> {
   return {
     success: true,
     body: parts[0]?.trim(),
-    altitude: parseInt(parts[1]?.trim() || '0'),
+    altitude: Number.parseInt(parts[1]?.trim() || '0'),
   };
 }
 
@@ -222,9 +226,9 @@ async function getSOIStatus(conn: KosConnection, body: string): Promise<WarpResu
   }
 
   const newBody = soiMatch[1].trim();
-  const altitude = parseInt(soiMatch[2]);
-  const periapsis = parseInt(soiMatch[3]);
-  const bodyRadius = parseInt(soiMatch[4]);
+  const altitude = Number.parseInt(soiMatch[2]);
+  const periapsis = Number.parseInt(soiMatch[3]);
+  const bodyRadius = Number.parseInt(soiMatch[4]);
 
   console.error(`[Warp] In ${newBody} SOI: alt=${altitude}m, pe=${periapsis}m`);
 
@@ -260,9 +264,6 @@ export async function warpForward(
 ): Promise<WarpResult> {
   console.error(`[Warp] Warping forward ${seconds}s...`);
 
-  // Get target time
-  const targetTime = Date.now() + (seconds * 1000);
-
   // Start warp
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
 
@@ -274,7 +275,7 @@ export async function warpForward(
 
     const warpResult = await conn.execute('PRINT WARP.', 3000);
     const warpMatch = warpResult.output.match(/^(\d+)/);
-    const warpLevel = warpMatch ? parseInt(warpMatch[1], 10) : -1;
+    const warpLevel = warpMatch ? Number.parseInt(warpMatch[1], 10) : -1;
 
     if (warpLevel === 0) {
       console.error('[Warp] Forward warp complete');
@@ -285,11 +286,4 @@ export async function warpForward(
   }
 
   return { success: false, error: 'Warp timeout' };
-}
-
-/**
- * Stop any active time warp
- */
-export async function stopWarp(conn: KosConnection): Promise<void> {
-  await conn.execute('SET WARP TO 0.');
 }

@@ -4,9 +4,9 @@
  * Usage: npm run course-correct [target_pe_km] [--no-execute]
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js';
-import type { GetTargetInfo } from '../../mechjeb/programs/maneuver.js';
+import * as daemon from '../daemon-client.js';
+import type { OrchestratedResult } from '../../lib/programs/orchestrator.js';
+import type { GetTargetInfo } from '../../lib/programs/maneuver.js';
 
 interface ExecuteResult {
   success: boolean;
@@ -17,9 +17,9 @@ interface ExecuteResult {
 async function main() {
   const args = process.argv.slice(2);
   const noExecute = args.includes('--no-execute');
-  const positionalArgs = args.filter(a => !a.startsWith('--'));
+  const positionalArg = args.find(a => !a.startsWith('--'));
 
-  const targetPeKm = positionalArgs[0] ? parseFloat(positionalArgs[0]) : 50;
+  const targetPeKm = positionalArg ? Number.parseFloat(positionalArg) : 50;
   const targetDistance = targetPeKm * 1000;
 
   console.log(`=== Course Correction ===\n`);

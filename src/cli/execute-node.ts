@@ -4,8 +4,8 @@
  * Usage: npm run execute-node
  */
 
-import * as daemon from '../daemon/index.js';
-import type { ExecuteNodeProgress, ExecuteNodeResult } from '../mechjeb/programs/node/index.js';
+import * as daemon from './daemon-client.js';
+import type { ExecuteNodeProgress, ExecuteNodeResult } from '../lib/programs/node/index.js';
 
 async function main() {
   console.log('=== Execute Maneuver Node ===\n');
@@ -30,7 +30,7 @@ async function main() {
     console.log('   (Monitoring execution...)\n');
 
     const result = await daemon.call<ExecuteNodeResult>('executeNode', {
-      timeoutMs: 240000,
+      timeoutMs: 240_000,
       pollIntervalMs: 5000,
     });
 

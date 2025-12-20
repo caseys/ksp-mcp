@@ -30,8 +30,8 @@ export interface CrashAvoidanceOptions {
 }
 
 // Defaults
-const DEFAULT_TARGET_PE = 10000;       // 10km
-const DEFAULT_TIMEOUT_MS = 300000;     // 5 minutes
+const DEFAULT_TARGET_PE = 10_000;       // 10km
+const DEFAULT_TIMEOUT_MS = 300_000;     // 5 minutes
 const DEFAULT_POLL_MS = 1000;          // 1 second
 const DEFAULT_ALIGN_THRESHOLD = 10;    // degrees - full throttle below this
 const THROTTLE_START_ANGLE = 45;       // degrees - start throttling above this angle
@@ -42,8 +42,8 @@ const DV_STAGE_THRESHOLD = 1;          // m/s - stage when below this
  * Ramps from 0% at startAngle to 100% at fullThrottleAngle.
  */
 function calculateThrottle(angle: number, fullThrottleAngle: number, startAngle: number): number {
-  if (angle <= fullThrottleAngle) return 1.0;
-  if (angle >= startAngle) return 0.0;
+  if (angle <= fullThrottleAngle) return 1;
+  if (angle >= startAngle) return 0;
   // Linear interpolation between start and full throttle angles
   return 1 - ((angle - fullThrottleAngle) / (startAngle - fullThrottleAngle));
 }
@@ -139,7 +139,7 @@ export async function crashAvoidance(
       'PRINT VANG(SHIP:FACING:FOREVECTOR, VCRS(SHIP:VELOCITY:ORBIT, VCRS(-SHIP:BODY:POSITION, SHIP:VELOCITY:ORBIT)):NORMALIZED).',
       2000
     );
-    const angle = parseFloat(angleResult.output.match(/[\d.]+/)?.[0] || '180');
+    const angle = Number.parseFloat(angleResult.output.match(/[\d.]+/)?.[0] || '180');
 
     // Calculate and set throttle based on alignment
     const throttle = calculateThrottle(angle, alignmentThreshold, THROTTLE_START_ANGLE);

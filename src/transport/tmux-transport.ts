@@ -1,7 +1,7 @@
-import { exec } from 'child_process';
-import { promisify } from 'util';
+import { exec } from 'node:child_process';
+import { promisify } from 'node:util';
 import { BaseTransport } from './transport.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 import { TransportTraceLogger } from './trace-logger.js';
 
 const execAsync = promisify(exec);
@@ -17,7 +17,7 @@ const execAsync = promisify(exec);
  * Requires: tmux, nc (netcat - pre-installed on macOS and most Linux)
  * This handles VT100 terminal emulation implicitly through tmux.
  */
-export interface TmuxTransportOptions {
+interface TmuxTransportOptions {
   sendDelayMs?: number;  // Delay after each send to prevent command garbling (default: 100)
 }
 
@@ -70,7 +70,7 @@ export class TmuxTransport extends BaseTransport {
     }
 
     // Escape for shell
-    const escaped = data.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    const escaped = data.replaceAll('\\', '\\\\').replaceAll('"', String.raw`\"`);
     await execAsync(`tmux send-keys -t ${this.paneId} "${escaped}" Enter`);
     this.trace.logSend(data + '\n');
 

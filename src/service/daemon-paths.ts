@@ -16,7 +16,7 @@ const isWindows = process.platform === 'win32';
  * - Windows: \\.\pipe\kos-daemon
  */
 export const SOCKET_PATH = isWindows
-  ? '\\\\.\\pipe\\kos-daemon'
+  ? String.raw`\\.\pipe\kos-daemon`
   : join(tmpdir(), 'kos-daemon.sock');
 
 /**

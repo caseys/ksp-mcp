@@ -3,13 +3,13 @@
  * Change semi-major axis of orbit
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { ManeuverResult } from '../../mechjeb/programs/maneuver.js';
-import type { OrbitInfo } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { ManeuverResult } from '../../lib/programs/maneuver.js';
+import type { OrbitInfo } from '../../lib/types.js';
 
 async function main() {
   // Parse command line arguments
-  const newSma_km = parseFloat(process.argv[2]);
+  const newSma_km = Number.parseFloat(process.argv[2]);
   const timeRef = (process.argv[3] || 'APOAPSIS').toUpperCase();
 
   if (isNaN(newSma_km)) {
@@ -25,7 +25,7 @@ async function main() {
     console.log('1. Current orbit...');
     const orbit = await daemon.call<OrbitInfo>('orbitInfo');
     // Calculate current semi-major axis from pe/ap
-    const bodyRadius = 600000; // Kerbin radius in meters
+    const bodyRadius = 600_000; // Kerbin radius in meters
     const currentSma = (orbit.periapsis + orbit.apoapsis) / 2 + bodyRadius;
     console.log(`   Semi-major axis: ${(currentSma / 1000).toFixed(1)} km`);
     console.log(`   Periapsis: ${(orbit.periapsis / 1000).toFixed(1)} km`);

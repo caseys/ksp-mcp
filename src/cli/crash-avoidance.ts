@@ -9,11 +9,11 @@
  *   npm run crash-avoidance 10000 60000  # 10km, 1min timeout
  */
 
-import * as daemon from '../daemon/index.js';
-import type { CrashAvoidanceResult } from '../mechjeb/programs/manual/index.js';
+import * as daemon from './daemon-client.js';
+import type { CrashAvoidanceResult } from '../lib/programs/manual/index.js';
 
-const targetPeriapsis = parseInt(process.argv[2] || '10000', 10);
-const timeoutMs = parseInt(process.argv[3] || '300000', 10);
+const targetPeriapsis = Number.parseInt(process.argv[2] || '10000', 10);
+const timeoutMs = Number.parseInt(process.argv[3] || '300000', 10);
 
 async function main() {
   console.log('=== Crash Avoidance ===\n');

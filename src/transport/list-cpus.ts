@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { SocketTransport } from '../transport/socket-transport.js';
 import { TmuxTransport } from '../transport/tmux-transport.js';
 import type { Transport } from '../transport/transport.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 
 export interface CpuInfo {
   id: number;
@@ -28,12 +28,12 @@ function parseCpuMenuLine(line: string): CpuInfo | null {
   const [, idStr, guiStr, telnetsStr, vessel, partName, tag] = match;
 
   return {
-    id: parseInt(idStr),
+    id: Number.parseInt(idStr),
     vessel: vessel.trim(),
     partName: partName.trim(),
     tag: tag || '(unnamed)',
     guiOpen: guiStr === 'yes',
-    telnets: parseInt(telnetsStr),
+    telnets: Number.parseInt(telnetsStr),
   };
 }
 
@@ -99,9 +99,3 @@ export const listCpusInputSchema = z.object({
   transportType: z.enum(['socket', 'tmux']).optional().describe(`Transport type (default: ${config.transport.type})`),
 });
 
-// Tool definition for MCP registration
-export const listCpusToolDefinition = {
-  description: 'List available kOS CPUs without connecting',
-  inputSchema: listCpusInputSchema,
-  handler: handleListCpus,
-};

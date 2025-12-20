@@ -9,18 +9,18 @@
  *   npm run warp <seconds>         - Warp forward by N seconds
  */
 
-import * as daemon from '../daemon/index.js';
-import type { WarpResult, WarpTarget } from '../mechjeb/programs/warp.js';
+import * as daemon from './daemon-client.js';
+import type { WarpResult, WarpTarget } from '../lib/programs/warp.js';
 
 async function main() {
   const target = process.argv[2] || 'node';
-  const param = process.argv[3] ? parseFloat(process.argv[3]) : 60;
+  const param = process.argv[3] ? Number.parseFloat(process.argv[3]) : 60;
 
   console.log('=== Time Warp ===\n');
 
   try {
     // Check if target is a number (warp forward by seconds)
-    const seconds = parseFloat(target);
+    const seconds = Number.parseFloat(target);
     if (!isNaN(seconds)) {
       console.log(`1. Warping forward ${seconds} seconds...`);
       const result = await daemon.call<WarpResult>('warpForward', { seconds });
@@ -36,8 +36,8 @@ async function main() {
     // Validate target
     const validTargets: WarpTarget[] = ['node', 'soi', 'periapsis', 'apoapsis'];
     const normalizedTarget = target.toLowerCase() === 'pe' ? 'periapsis'
-      : target.toLowerCase() === 'ap' ? 'apoapsis'
-      : target.toLowerCase() as WarpTarget;
+      : (target.toLowerCase() === 'ap' ? 'apoapsis'
+      : target.toLowerCase() as WarpTarget);
 
     if (!validTargets.includes(normalizedTarget)) {
       console.log(`Unknown target: ${target}`);

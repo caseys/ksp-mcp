@@ -8,10 +8,6 @@
 import type { KosConnection } from '../transport/kos-connection.js';
 import type { MechJebModules } from './types.js';
 
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
 /**
  * Parse a kOS list output into an array of strings
  * Format: ["value"] = "ITEM1"[1] =["value"] = "ITEM2"...
@@ -38,7 +34,7 @@ export async function isMechJebAvailable(conn: KosConnection): Promise<boolean> 
 /**
  * Get MechJeb version
  */
-export async function getMechJebVersion(conn: KosConnection): Promise<string | undefined> {
+async function getMechJebVersion(conn: KosConnection): Promise<string | undefined> {
   try {
     const result = await conn.execute('PRINT ADDONS:MJ:VERSION.');
     // Parse version from output

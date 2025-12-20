@@ -43,7 +43,7 @@ export async function bringKspToForeground(): Promise<boolean> {
         }
         exit 1
       `.trim();
-      await execAsync(`powershell -Command "${script.replace(/"/g, '\\"')}"`);
+      await execAsync(`powershell -Command "${script.replaceAll('"', String.raw`\"`)}"`);
       return true;
     }
 

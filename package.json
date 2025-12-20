@@ -16,37 +16,37 @@
     "node": ">=18.0.0"
   },
   "type": "module",
-  "main": "dist/lib.js",
-  "module": "dist/lib.js",
-  "types": "dist/lib.d.ts",
+  "main": "dist/index.js",
+  "module": "dist/index.js",
+  "types": "dist/index.d.ts",
   "bin": {
     "ksp-mcp": "dist/index.js",
     "ksp-mcp-check": "dist/utils/check-setup.js"
   },
   "exports": {
     ".": {
-      "import": "./dist/lib.js",
-      "types": "./dist/lib.d.ts"
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
     },
     "./server": {
-      "import": "./dist/server.js",
-      "types": "./dist/server.d.ts"
+      "import": "./dist/service/http-server.js",
+      "types": "./dist/service/http-server.d.ts"
     },
     "./transport": {
       "import": "./dist/transport/kos-connection.js",
       "types": "./dist/transport/kos-connection.d.ts"
     },
+    "./lib": {
+      "import": "./dist/lib/index.js",
+      "types": "./dist/lib/index.d.ts"
+    },
     "./mechjeb": {
-      "import": "./dist/mechjeb/index.js",
-      "types": "./dist/mechjeb/index.d.ts"
+      "import": "./dist/lib/index.js",
+      "types": "./dist/lib/index.d.ts"
     },
     "./config": {
-      "import": "./dist/config.js",
-      "types": "./dist/config.d.ts"
-    },
-    "./daemon": {
-      "import": "./dist/daemon/index.js",
-      "types": "./dist/daemon/index.d.ts"
+      "import": "./dist/config/index.js",
+      "types": "./dist/config/index.d.ts"
     }
   },
   "files": [
@@ -62,6 +62,9 @@
     "build": "tsc && chmod +x dist/index.js dist/utils/check-setup.js",
     "check": "node dist/utils/check-setup.js",
     "check:parity": "tsx scripts/check-tool-parity.ts",
+    "knip": "knip",
+    "lint": "eslint src/",
+    "lint:fix": "eslint src/ --fix",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.js",
     "start:http": "node dist/index.js --transport http --host 0.0.0.0",
@@ -72,7 +75,6 @@
     "launch": "tsx src/tests/test-mechjeb-client.ts --launch",
     "repl": "tsx src/repl.ts",
     "launch-ascent": "tsx src/cli/ascent/launch-ascent.ts",
-    "ascent:kos": "tsx src/cli/ascent/ascent-pure-kos.ts",
     "hohmann-transfer": "tsx src/cli/transfer/hohmann-transfer.ts",
     "course-correct": "tsx src/cli/transfer/course-correct.ts",
     "match-velocities": "tsx src/cli/rendezvous/match-velocities.ts",
@@ -92,7 +94,7 @@
     "change-periapsis-longitude": "tsx src/cli/orbital/change-periapsis-longitude.ts",
     "change-ascending-node": "tsx src/cli/orbital/change-ascending-node.ts",
     "daemon": "tsx src/cli/daemon-cli.ts",
-    "daemon:start": "tsx src/daemon/kos-daemon.ts",
+    "daemon:start": "tsx src/service/cli-daemon.ts",
     "daemon:status": "tsx src/cli/daemon-cli.ts status",
     "daemon:shutdown": "tsx src/cli/daemon-cli.ts shutdown",
     "kos": "tsx src/cli/daemon-cli.ts exec",
@@ -121,8 +123,13 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.39.2",
     "@types/node": "^22.0.0",
-    "tsx": "^4.19.0"
+    "eslint": "^9.39.2",
+    "eslint-plugin-unicorn": "^62.0.0",
+    "knip": "^5.75.2",
+    "tsx": "^4.19.0",
+    "typescript-eslint": "^8.50.0"
   },
   "keywords": [
     "ksp",

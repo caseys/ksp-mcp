@@ -4,16 +4,16 @@
  * Usage: npm run adjust-periapsis <altitude_km> [timeRef] [--no-execute]
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js';
-import type { OrbitInfo } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { OrchestratedResult } from '../../lib/programs/orchestrator.js';
+import type { OrbitInfo } from '../../lib/types.js';
 
 async function main() {
   const args = process.argv.slice(2);
   const noExecute = args.includes('--no-execute');
   const positionalArgs = args.filter(a => !a.startsWith('--'));
 
-  const altitudeKm = positionalArgs[0] ? parseFloat(positionalArgs[0]) : null;
+  const altitudeKm = positionalArgs[0] ? Number.parseFloat(positionalArgs[0]) : null;
   const timeRef = (positionalArgs[1]?.toUpperCase() || 'APOAPSIS');
 
   if (altitudeKm === null) {

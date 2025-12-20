@@ -23,7 +23,7 @@ function delay(ms: number): Promise<void> {
  */
 function parseNumber(output: string): number {
   const match = output.match(/-?[\d.]+(?:E[+-]?\d+)?/i);
-  return match ? parseFloat(match[0]) : 0;
+  return match ? Number.parseFloat(match[0]) : 0;
 }
 
 /**
@@ -64,9 +64,9 @@ export class AscentHandle {
     // Parse "PROG|alt|apo|per|enabled|status" format
     const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|(.+?)(?:\s*>|$)/i);
 
-    const altitude = match ? parseFloat(match[1]) : 0;
-    const apoapsis = match ? parseFloat(match[2]) : 0;
-    const periapsis = match ? parseFloat(match[3]) : 0;
+    const altitude = match ? Number.parseFloat(match[1]) : 0;
+    const apoapsis = match ? Number.parseFloat(match[2]) : 0;
+    const periapsis = match ? Number.parseFloat(match[3]) : 0;
     const enabled = match ? match[4].toLowerCase() === 'true' : false;
     const shipStatus = match ? match[5].toLowerCase().trim() : 'unknown';
 
@@ -74,9 +74,9 @@ export class AscentHandle {
     let phase: AscentProgress['phase'];
     if (shipStatus.includes('prelaunch') || shipStatus.includes('landed')) {
       phase = 'prelaunch';
-    } else if (periapsis > 70000) {
+    } else if (periapsis > 70_000) {
       phase = 'complete';
-    } else if (apoapsis >= this.targetAltitude * 0.95 && altitude > 70000) {
+    } else if (apoapsis >= this.targetAltitude * 0.95 && altitude > 70_000) {
       phase = 'circularizing';
     } else if (apoapsis >= this.targetAltitude * 0.9) {
       phase = 'coasting';
@@ -107,7 +107,7 @@ export class AscentHandle {
   async waitForCompletion(pollIntervalMs = 5000): Promise<AscentResult> {
     console.log('[Ascent] Waiting for MechJeb to complete ascent...');
 
-    const MAX_WAIT_MS = 900000; // 15 minutes max
+    const MAX_WAIT_MS = 900_000; // 15 minutes max
     const startTime = Date.now();
     let lastLogTime = 0;
     let consecutiveEmptyResponses = 0;
@@ -116,8 +116,8 @@ export class AscentHandle {
     // Get atmosphere height for this body using labeled output
     const atmResult = await this.conn.execute('PRINT "ATM:" + ROUND(SHIP:BODY:ATM:HEIGHT).');
     const atmMatch = atmResult.output.match(/ATM:(-?\d+)/);
-    const atmHeight = atmMatch ? parseInt(atmMatch[1]) : 70000; // Default to Kerbin
-    const minOrbit = atmHeight > 0 ? atmHeight + 10000 : 10000;
+    const atmHeight = atmMatch ? Number.parseInt(atmMatch[1]) : 70_000; // Default to Kerbin
+    const minOrbit = atmHeight > 0 ? atmHeight + 10_000 : 10_000;
     console.log(`[Ascent] Target: periapsis > ${Math.round(minOrbit/1000)}km (atmosphere ${Math.round(atmHeight/1000)}km + 10km)`);
 
     while (Date.now() - startTime < MAX_WAIT_MS) {
@@ -145,8 +145,8 @@ export class AscentHandle {
             this.conn = await ensureConnected();
             consecutiveEmptyResponses = 0;
             console.log('[Ascent] Reconnected successfully');
-          } catch (err) {
-            console.log(`[Ascent] Reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+          } catch (error) {
+            console.log(`[Ascent] Reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
 
@@ -158,13 +158,13 @@ export class AscentHandle {
       consecutiveEmptyResponses = 0;
 
       const enabled = statusMatch[1].toLowerCase() === 'true';
-      const apoapsis = parseInt(statusMatch[2]);
-      const periapsis = parseInt(statusMatch[3]);
+      const apoapsis = Number.parseInt(statusMatch[2]);
+      const periapsis = Number.parseInt(statusMatch[3]);
       const body = statusMatch[4];
 
       // Log progress every 10 seconds
       const now = Date.now();
-      if (now - lastLogTime >= 10000) {
+      if (now - lastLogTime >= 10_000) {
         console.log(`APO:${Math.round(apoapsis/1000)}km PER:${Math.round(periapsis/1000)}km`);
         lastLogTime = now;
       }
@@ -341,8 +341,8 @@ export class AscentProgram {
       enabled: match ? match[1].toLowerCase() === 'true' : false,
       ascentType: 'GT',  // Gravity Turn is the default
       settings: {
-        desiredAltitude: match ? parseFloat(match[2]) : 0,
-        desiredInclination: match ? parseFloat(match[3]) : 0
+        desiredAltitude: match ? Number.parseFloat(match[2]) : 0,
+        desiredInclination: match ? Number.parseFloat(match[3]) : 0
       }
     };
   }
@@ -453,9 +453,9 @@ export async function getAscentProgress(conn: KosConnection): Promise<AscentProg
 
   const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|(.+?)(?:\s*>|$)/i);
 
-  const altitude = match ? parseFloat(match[1]) : 0;
-  const apoapsis = match ? parseFloat(match[2]) : 0;
-  const periapsis = match ? parseFloat(match[3]) : 0;
+  const altitude = match ? Number.parseFloat(match[1]) : 0;
+  const apoapsis = match ? Number.parseFloat(match[2]) : 0;
+  const periapsis = match ? Number.parseFloat(match[3]) : 0;
   const enabled = match ? match[4].toLowerCase() === 'true' : false;
   const shipStatus = match ? match[5].toLowerCase().trim() : 'unknown';
 
@@ -463,9 +463,9 @@ export async function getAscentProgress(conn: KosConnection): Promise<AscentProg
   let phase: AscentProgress['phase'];
   if (shipStatus.includes('prelaunch') || shipStatus.includes('landed')) {
     phase = 'prelaunch';
-  } else if (periapsis > 70000) {
+  } else if (periapsis > 70_000) {
     phase = 'complete';
-  } else if (altitude > 70000) {
+  } else if (altitude > 70_000) {
     phase = 'coasting';
   } else if (altitude > 1000) {
     phase = 'gravity_turn';

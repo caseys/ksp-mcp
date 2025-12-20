@@ -11,18 +11,16 @@
  *   npx tsx src/cli/daemon-cli.ts exec "PRINT ALTITUDE."
  */
 
-import * as daemon from '../daemon/index.js';
+import * as daemon from './daemon-client.js';
 
 const command = process.argv[2];
 const args = process.argv.slice(3);
 
 async function main() {
   switch (command) {
-    case 'status':
+    case 'status': {
       console.log('Checking daemon status...');
-      if (!daemon.isDaemonRunning()) {
-        console.log('Daemon: NOT RUNNING');
-      } else {
+      if (daemon.isDaemonRunning()) {
         const result = await daemon.status();
         console.log('Daemon: RUNNING');
         console.log('Connected:', result.connected ? 'yes' : 'no');
@@ -30,22 +28,26 @@ async function main() {
           console.log('Vessel:', result.vessel);
           console.log('CPU:', result.cpuId, `(${result.cpuTag})`);
         }
+      } else {
+        console.log('Daemon: NOT RUNNING');
       }
       break;
+    }
 
-    case 'ping':
+    case 'ping': {
       console.log('Pinging daemon...');
       try {
         const start = Date.now();
         const result = await daemon.ping();
         const elapsed = Date.now() - start;
         console.log(`Response: ${result.output} (${elapsed}ms)`);
-      } catch (err) {
+      } catch {
         console.log('No response (daemon not running)');
       }
       break;
+    }
 
-    case 'shutdown':
+    case 'shutdown': {
       console.log('Shutting down daemon...');
       try {
         await daemon.shutdown();
@@ -54,8 +56,9 @@ async function main() {
         console.log('Daemon not running');
       }
       break;
+    }
 
-    case 'connect':
+    case 'connect': {
       console.log('Connecting to kOS...');
       const cpuLabel = args[0];
       const connectResult = await daemon.connect({ cpuLabel });
@@ -66,15 +69,17 @@ async function main() {
         process.exit(1);
       }
       break;
+    }
 
-    case 'disconnect':
+    case 'disconnect': {
       console.log('Disconnecting from kOS...');
       await daemon.disconnect();
       console.log('Disconnected');
       break;
+    }
 
     case 'exec':
-    case 'execute':
+    case 'execute': {
       const cmd = args[0];
       if (!cmd) {
         console.error('Usage: daemon-cli exec "PRINT 1."');
@@ -90,8 +95,9 @@ async function main() {
         process.exit(1);
       }
       break;
+    }
 
-    default:
+    default: {
       console.log(`
 kOS Daemon CLI
 
@@ -110,10 +116,11 @@ Examples:
   daemon-cli shutdown
 `);
       break;
+    }
   }
 }
 
-main().catch((err) => {
-  console.error('Error:', err.message);
+main().catch((error) => {
+  console.error('Error:', error.message);
   process.exit(1);
 });

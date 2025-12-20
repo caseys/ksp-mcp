@@ -3,14 +3,14 @@
  * Set both periapsis and apoapsis with ELLIPTICIZE
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js';
-import type { OrbitInfo } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { OrchestratedResult } from '../../lib/programs/orchestrator.js';
+import type { OrbitInfo } from '../../lib/types.js';
 
 async function main() {
   // Parse command line arguments
-  const newPeA_km = parseFloat(process.argv[2]);
-  const newApA_km = parseFloat(process.argv[3]);
+  const newPeA_km = Number.parseFloat(process.argv[2]);
+  const newApA_km = Number.parseFloat(process.argv[3]);
   const timeRef = (process.argv[4] || 'APOAPSIS').toUpperCase();
 
   if (isNaN(newPeA_km) || isNaN(newApA_km)) {

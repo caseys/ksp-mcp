@@ -5,7 +5,7 @@
  * typed defaults for all configurable values.
  *
  * Usage:
- *   import { config } from './config.js';
+ *   import { config } from './config/index.js';
  *   const conn = new KosConnection({
  *     host: config.kos.host,
  *     port: config.kos.port,
@@ -20,13 +20,13 @@ export const config = Object.freeze({
   // kOS connection defaults
   kos: {
     host: process.env.KOS_HOST ?? '127.0.0.1',
-    port: parseInt(process.env.KOS_PORT ?? '5410', 10),
+    port: Number.parseInt(process.env.KOS_PORT ?? '5410', 10),
     /**
      * CPU ID to connect to.
      * - null: Auto-select first available CPU from menu
      * - number: Connect to specific CPU by ID
      */
-    cpuId: process.env.KOS_CPU_ID ? parseInt(process.env.KOS_CPU_ID, 10) : null,
+    cpuId: process.env.KOS_CPU_ID ? Number.parseInt(process.env.KOS_CPU_ID, 10) : null,
     /**
      * CPU label to connect to (e.g., 'guidance', 'flight').
      * If set, takes precedence over cpuId.
@@ -57,19 +57,19 @@ export const config = Object.freeze({
   // Timeout defaults (milliseconds)
   timeouts: {
     /** Timeout for initial socket connection */
-    connect: parseInt(process.env.KOS_TIMEOUT_CONNECT ?? '10000', 10),
+    connect: Number.parseInt(process.env.KOS_TIMEOUT_CONNECT ?? '10000', 10),
     /** Timeout waiting for CPU menu to appear */
-    cpuMenu: parseInt(process.env.KOS_TIMEOUT_CPU_MENU ?? '5000', 10),
+    cpuMenu: Number.parseInt(process.env.KOS_TIMEOUT_CPU_MENU ?? '5000', 10),
     /** Timeout waiting for REBOOT response */
-    reboot: parseInt(process.env.KOS_TIMEOUT_REBOOT ?? '8000', 10),
+    reboot: Number.parseInt(process.env.KOS_TIMEOUT_REBOOT ?? '8000', 10),
     /** Timeout waiting for "Proceed" message */
-    proceed: parseInt(process.env.KOS_TIMEOUT_PROCEED ?? '3000', 10),
+    proceed: Number.parseInt(process.env.KOS_TIMEOUT_PROCEED ?? '3000', 10),
     /** Default timeout for command execution */
-    command: parseInt(process.env.KOS_TIMEOUT_COMMAND ?? '30000', 10),
+    command: Number.parseInt(process.env.KOS_TIMEOUT_COMMAND ?? '30000', 10),
     /** Delay after telnet connection */
-    connectDelay: parseInt(process.env.KOS_DELAY_CONNECT ?? '500', 10),
+    connectDelay: Number.parseInt(process.env.KOS_DELAY_CONNECT ?? '500', 10),
     /** Delay after disconnect */
-    disconnectDelay: parseInt(process.env.KOS_DELAY_DISCONNECT ?? '200', 10),
+    disconnectDelay: Number.parseInt(process.env.KOS_DELAY_DISCONNECT ?? '200', 10),
   },
 });
 

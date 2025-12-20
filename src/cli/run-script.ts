@@ -8,12 +8,12 @@
  *   npm run run-script -- /absolute/path/script.ks 120000
  */
 
-import * as path from 'path';
-import * as daemon from '../daemon/index.js';
-import type { RunScriptResult } from '../script/index.js';
+import * as path from 'node:path';
+import * as daemon from './daemon-client.js';
+import type { RunScriptResult } from '../lib/script/index.js';
 
 const scriptPath = process.argv[2];
-const timeout = parseInt(process.argv[3] || '60000', 10);
+const timeout = Number.parseInt(process.argv[3] || '60000', 10);
 
 if (!scriptPath) {
   console.error('Usage: npm run run-script -- <script-path> [timeout_ms]');

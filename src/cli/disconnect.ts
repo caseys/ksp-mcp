@@ -7,7 +7,7 @@
  * auto-disconnect after each command anyway.
  */
 
-import * as daemon from '../daemon/index.js';
+import * as daemon from './daemon-client.js';
 
 async function main() {
   console.log('=== Disconnect from kOS ===\n');
@@ -15,7 +15,7 @@ async function main() {
   try {
     await daemon.disconnect();
     console.log('✅ Disconnected successfully.\n');
-  } catch (error) {
+  } catch {
     // If daemon isn't running, that's fine - we're disconnected anyway
     console.log('✅ Not connected (or daemon not running).\n');
   }

@@ -4,8 +4,8 @@
  * Usage: npm run get-target
  */
 
-import * as daemon from '../daemon/index.js';
-import type { GetTargetInfo } from '../mechjeb/programs/maneuver.js';
+import * as daemon from './daemon-client.js';
+import type { GetTargetInfo } from '../lib/programs/maneuver.js';
 
 async function main() {
   console.log('=== Get Target ===\n');
@@ -13,10 +13,10 @@ async function main() {
   try {
     const info = await daemon.call<GetTargetInfo>('getTarget');
 
-    if (!info.hasTarget) {
-      console.log('No target set.\n');
-    } else {
+    if (info.hasTarget) {
       console.log(info.details ?? `Target: ${info.name}\n`);
+    } else {
+      console.log('No target set.\n');
     }
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : String(error));

@@ -12,7 +12,7 @@
 
 import * as net from 'node:net';
 import { BaseTransport } from './transport.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 import { TransportTraceLogger } from './trace-logger.js';
 
 export class SocketTransport extends BaseTransport {
@@ -53,7 +53,7 @@ export class SocketTransport extends BaseTransport {
         this._isOpen = true;
         // Enable TCP keepalive to prevent connection death during long operations
         // Send keepalive probes every 30 seconds
-        this.socket!.setKeepAlive(true, 30000);
+        this.socket!.setKeepAlive(true, 30_000);
         // Small delay to let kOS send initial data
         setTimeout(() => resolve(), config.timeouts.connectDelay);
       });
@@ -111,11 +111,11 @@ export class SocketTransport extends BaseTransport {
 
     // Convert common key names to actual bytes
     const keyMap: { [key: string]: string } = {
-      'C-c': '\x03',  // Ctrl+C
-      'C-d': '\x04',  // Ctrl+D
-      'C-z': '\x1a',  // Ctrl+Z
+      'C-c': '\u0003',  // Ctrl+C
+      'C-d': '\u0004',  // Ctrl+D
+      'C-z': '\u001A',  // Ctrl+Z
       'Enter': '\r\n',
-      'Escape': '\x1b',
+      'Escape': '\u001B',
     };
 
     const bytes = keyMap[keys] ?? keys;
@@ -161,7 +161,7 @@ export class SocketTransport extends BaseTransport {
     if (this.socket) {
       // Try graceful disconnect
       try {
-        this.socket.write('\x04');  // Ctrl+D
+        this.socket.write('\u0004');  // Ctrl+D
         await this.delay(100);
       } catch {
         // Ignore errors during cleanup

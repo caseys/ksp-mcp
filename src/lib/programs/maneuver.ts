@@ -7,13 +7,9 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import {
   type ManeuverResult,
-  parseNumber,
-  parseTimeString,
   queryNumber,
-  queryNumberWithRetry,
   queryTime,
   queryNodeInfo,
-  delay,
 } from './shared.js';
 import { bringKspToForeground } from '../../utils/bring-to-foreground.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
@@ -82,7 +78,7 @@ export class ManeuverProgram {
   async adjustPeriapsis(altitude: number, timeRef: string = 'APOAPSIS'): Promise<ManeuverResult> {
     // Create the maneuver node (returns True/False)
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEPE(${altitude}, "${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -107,7 +103,7 @@ export class ManeuverProgram {
    */
   async adjustApoapsis(altitude: number, timeRef: string = 'PERIAPSIS'): Promise<ManeuverResult> {
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEAP(${altitude}, "${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -131,7 +127,7 @@ export class ManeuverProgram {
    */
   async circularize(timeRef: string = 'APOAPSIS'): Promise<ManeuverResult> {
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -206,7 +202,7 @@ export class ManeuverProgram {
 
     // Check for explicit failure (only in actual output, not command echo)
     // The actual TARGET_FAILED output appears at the end, after the command echo
-    if (output.endsWith('TARGET_FAILED') || output.match(/TARGET_FAILED[^"]*$/)) {
+    if (output.endsWith('TARGET_FAILED') || /TARGET_FAILED[^"]*$/.test(output)) {
       return {
         success: false,
         error: `Target "${name}" not found or not loaded.`
@@ -384,7 +380,7 @@ export class ManeuverProgram {
       hasTarget: true,
       name,
       type,
-      distance: distanceKm ? parseFloat(distanceKm) * 1000 : undefined,
+      distance: distanceKm ? Number.parseFloat(distanceKm) * 1000 : undefined,
       details: detailLines.join('\n')
     };
   }
@@ -415,7 +411,7 @@ export class ManeuverProgram {
     }
 
     // Otherwise, return cleaned output (limit length)
-    const cleaned = rawOutput.trim().substring(0, 100);
+    const cleaned = rawOutput.trim().slice(0, 100);
     return cleaned || `${operation} failed - unknown reason`;
   }
 
@@ -448,7 +444,7 @@ export class ManeuverProgram {
 
     const captureStr = capture ? 'TRUE' : 'FALSE';
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:HOHMANN("${timeRef}", ${captureStr}).`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -492,7 +488,7 @@ export class ManeuverProgram {
 
     // Query actual node count (MechJeb may create 1 or 2 depending on target type)
     const nodeCountResult = await this.conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-    const nodesCreated = parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+    const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
 
     return {
       success: true,
@@ -523,7 +519,7 @@ export class ManeuverProgram {
     }
 
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${adjustedPeA}).`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -549,7 +545,7 @@ export class ManeuverProgram {
    */
   async changeInclination(newInclination: number, timeRef: string = 'EQ_NEAREST_AD'): Promise<ManeuverResult> {
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEINCLINATION(${newInclination}, "${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -575,7 +571,7 @@ export class ManeuverProgram {
    */
   async ellipticize(peA: number, apA: number, timeRef: string = 'APOAPSIS'): Promise<ManeuverResult> {
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ELLIPTICIZE(${peA}, ${apA}, "${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -602,7 +598,7 @@ export class ManeuverProgram {
    */
   async changeLAN(newLAN: number, timeRef: string = 'APOAPSIS'): Promise<ManeuverResult> {
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:LAN(${newLAN}, "${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -629,7 +625,7 @@ export class ManeuverProgram {
    */
   async changeLongitude(newLong: number, timeRef: string = 'APOAPSIS'): Promise<ManeuverResult> {
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:LONGITUDE(${newLong}, "${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -658,7 +654,7 @@ export class ManeuverProgram {
    */
   async resonantOrbit(numerator: number, denominator: number, timeRef: string = 'APOAPSIS'): Promise<ManeuverResult> {
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:RESONANTORBIT(${numerator}, ${denominator}, "${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {
@@ -690,7 +686,7 @@ export class ManeuverProgram {
     }
 
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:KILLRELVEL("${timeRef}").`;
-    const result = await this.conn.execute(cmd, 10000);
+    const result = await this.conn.execute(cmd, 10_000);
 
     const success = result.output.includes('True');
     if (!success) {

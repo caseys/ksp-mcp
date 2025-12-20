@@ -1,10 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { z } from 'zod';
 import {
-  connectionToolDefinitions,
-  connectInputSchema,
-  executeInputSchema,
-  handleConnect,
   handleDisconnect,
   handleStatus,
   handleExecute,
@@ -13,35 +9,27 @@ import {
   setCpuPreference,
   getCpuPreference,
   forceDisconnect,
-} from './transport/connection-tools.js';
+} from '../transport/connection-tools.js';
 import {
   listCpusInputSchema,
   handleListCpus,
-} from './transport/list-cpus.js';
+} from '../transport/list-cpus.js';
 import {
   CONNECTION_GUIDE,
   CPU_MENU_FORMAT,
   TRANSPORT_OPTIONS,
-} from './mcp-resources.js';
-import { ManeuverProgram } from './mechjeb/programs/maneuver.js';
-import { AscentProgram, AscentHandle, getAscentProgress, abortAscent } from './mechjeb/programs/ascent.js';
-import { clearNodes } from './mechjeb/programs/nodes.js';
-import { getShipTelemetry, formatTargetEncounterInfo, type ShipTelemetryOptions } from './mechjeb/telemetry.js';
-import { queryTargetEncounterInfo } from './mechjeb/programs/shared.js';
-import { withTargetAndExecute } from './mechjeb/programs/orchestrator.js';
-// New modular operations
-import { ellipticize, changeSemiMajorAxis } from './mechjeb/programs/basic/index.js';
-import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from './mechjeb/programs/orbital/index.js';
-import { matchPlane, killRelativeVelocity } from './mechjeb/programs/rendezvous/index.js';
-import { resonantOrbit, returnFromMoon, interplanetaryTransfer } from './mechjeb/programs/transfer/index.js';
-import { executeNode } from './mechjeb/programs/node/index.js';
-import { warpTo, warpForward, WarpTarget } from './mechjeb/programs/warp.js';
-import { crashAvoidance } from './mechjeb/programs/manual/index.js';
-import type { KosConnection } from './transport/kos-connection.js';
-import { immediateTimeWarpKick, installTimeWarpKickTrigger } from './utils/time-warp-kick.js';
-import { globalKosMonitor } from './utils/kos-monitor.js';
-import { listQuicksaves, quicksave, quickload } from './kuniverse.js';
-import { runScript } from './script/index.js';
+} from '../config/mcp-resources.js';
+import { AscentProgram, AscentHandle, getAscentProgress, abortAscent } from '../lib/programs/ascent.js';
+import { clearNodes } from '../lib/programs/nodes.js';
+import { getShipTelemetry, formatTargetEncounterInfo, getOrbitInfo, type ShipTelemetryOptions } from '../lib/telemetry.js';
+import { queryTargetEncounterInfo } from '../lib/programs/shared.js';
+import { ManeuverOrchestrator } from '../lib/programs/orchestrator.js';
+import { executeNode, getNodeProgress } from '../lib/programs/node/index.js';
+import { warpTo, warpForward, WarpTarget } from '../lib/programs/warp.js';
+import { crashAvoidance } from '../lib/programs/manual/index.js';
+import { globalKosMonitor } from '../utils/kos-monitor.js';
+import { listQuicksaves, quicksave, quickload } from '../lib/kuniverse.js';
+import { runScript } from '../lib/script/index.js';
 
 // Track current ascent handle for status/abort
 let currentAscentHandle: AscentHandle | null = null;
@@ -143,12 +131,8 @@ export function createServer(): McpServer {
         const result = await currentAscentHandle.waitForCompletion();
         currentAscentHandle = null;
 
-        if (result.success) {
-          return successResponse('launch_ascent',
-            `In orbit: Ap ${Math.round(result.finalOrbit.apoapsis / 1000)}km, Pe ${Math.round(result.finalOrbit.periapsis / 1000)}km`);
-        } else {
-          return errorResponse('launch_ascent', result.aborted ? 'Ascent aborted' : 'Ascent failed');
-        }
+        return result.success ? successResponse('launch_ascent',
+            `In orbit: Ap ${Math.round(result.finalOrbit.apoapsis / 1000)}km, Pe ${Math.round(result.finalOrbit.periapsis / 1000)}km`) : errorResponse('launch_ascent', result.aborted ? 'Ascent aborted' : 'Ascent failed');
       } catch (error) {
         return errorResponse('launch_ascent', error instanceof Error ? error.message : String(error));
       }
@@ -244,7 +228,7 @@ export function createServer(): McpServer {
           const orbitInfo = await conn.execute(
             'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS.'
           );
-          const parts = orbitInfo.output.split('|').map(s => parseFloat(s.trim()));
+          const parts = orbitInfo.output.split('|').map(s => Number.parseFloat(s.trim()));
           const [ecc, etaApo, etaPe] = parts;
 
           if (ecc >= 1) {
@@ -256,15 +240,8 @@ export function createServer(): McpServer {
           }
         }
 
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => {
-            const maneuver = new ManeuverProgram(conn);
-            return maneuver.circularize(timeRef!);
-          }
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.circularize(timeRef!, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -302,15 +279,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => {
-            const maneuver = new ManeuverProgram(conn);
-            return maneuver.adjustApoapsis(args.altitude, args.timeRef);
-          }
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.adjustApoapsis(args.altitude, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -348,15 +318,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => {
-            const maneuver = new ManeuverProgram(conn);
-            return maneuver.adjustPeriapsis(args.altitude, args.timeRef);
-          }
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.adjustPeriapsis(args.altitude, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -395,12 +358,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => ellipticize(conn, args.periapsis, args.apoapsis, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.ellipticize(args.periapsis, args.apoapsis, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -438,15 +397,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => {
-            const maneuver = new ManeuverProgram(conn);
-            return maneuver.changeInclination(args.newInclination, args.timeRef);
-          }
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.changeInclination(args.newInclination, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -484,12 +436,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => changeLAN(conn, args.lan, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.changeLAN(args.lan, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -527,12 +475,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => changeLongitudeOfPeriapsis(conn, args.longitude, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.changeLongitude(args.longitude, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -570,12 +514,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => changeSemiMajorAxis(conn, args.semiMajorAxis, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.changeSemiMajorAxis(args.semiMajorAxis, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -613,12 +553,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => changeEccentricity(conn, args.eccentricity, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.changeEccentricity(args.eccentricity, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -664,15 +600,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          args.target,
-          args.execute,
-          async () => {
-            const maneuver = new ManeuverProgram(conn);
-            return maneuver.hohmannTransfer(args.timeReference, args.capture);
-          }
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.hohmannTransfer(args.timeReference, args.capture, { target: args.target, execute: args.execute });
 
         if (result.success) {
           const nodeCount = result.nodesCreated ?? 1;
@@ -722,15 +651,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          args.target,
-          args.execute,
-          async () => {
-            const maneuver = new ManeuverProgram(conn);
-            return maneuver.courseCorrection(args.targetDistance);
-          }
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.courseCorrection(args.targetDistance, { target: args.target, execute: args.execute });
 
         if (!result.success) {
           return errorResponse('course_correct', result.error ?? 'Failed');
@@ -778,12 +700,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          args.target,
-          args.execute,
-          async () => matchPlane(conn, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.matchPlane(args.timeRef, { target: args.target, execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -821,12 +739,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          args.target,
-          args.execute,
-          async () => killRelativeVelocity(conn, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.killRelVel(args.timeRef, { target: args.target, execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -864,12 +778,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          args.target,
-          args.execute,
-          async () => interplanetaryTransfer(conn, args.waitForPhaseAngle)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle, { target: args.target, execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -903,12 +813,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => returnFromMoon(conn, args.targetPeriapsis)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.returnFromMoon(args.targetPeriapsis, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -947,12 +853,8 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const result = await withTargetAndExecute(
-          conn,
-          undefined,
-          args.execute,
-          async () => resonantOrbit(conn, args.numerator, args.denominator, args.timeRef)
-        );
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.resonantOrbit(args.numerator, args.denominator, args.timeRef, { execute: args.execute });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -987,9 +889,9 @@ export function createServer(): McpServer {
     async (args) => {
       try {
         const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
+        const orchestrator = new ManeuverOrchestrator(conn);
 
-        const result = await maneuver.setTarget(args.name, args.type);
+        const result = await orchestrator.setTarget(args.name, args.type);
         if (!result.success) {
           return errorResponse('set_target', result.error ?? `Failed to set target "${args.name}"`);
         }
@@ -1017,9 +919,9 @@ export function createServer(): McpServer {
     async () => {
       try {
         const conn = await ensureConnected();
-        const maneuver = new ManeuverProgram(conn);
+        const orchestrator = new ManeuverOrchestrator(conn);
 
-        const info = await maneuver.getTargetInfo();
+        const info = await orchestrator.getTargetInfo();
         if (!info.hasTarget) {
           return successResponse('get_target', 'No target set.');
         }
@@ -1047,9 +949,8 @@ export function createServer(): McpServer {
     async () => {
       try {
         const conn = await ensureConnected();
-
-        const maneuver = new ManeuverProgram(conn);
-        const result = await maneuver.clearTarget();
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.clearTarget();
 
         if (result.cleared) {
           return successResponse('clear_target', 'Target cleared.');
@@ -1098,11 +999,7 @@ export function createServer(): McpServer {
 
         if (result.success) {
           let text: string;
-          if (args.async) {
-            text = `Executor started: ${result.deltaV?.required.toFixed(1)} m/s required`;
-          } else {
-            text = `Node executed: ${result.nodesExecuted} node(s)`;
-          }
+          text = args.async ? `Executor started: ${result.deltaV?.required.toFixed(1)} m/s required` : `Node executed: ${result.nodesExecuted} node(s)`;
 
           if (args.includeTelemetry) {
             // Query target encounter info
@@ -1148,6 +1045,65 @@ export function createServer(): McpServer {
   );
 
   server.registerTool(
+    'orbit_info',
+    {
+      description: 'Get quick orbital parameters (apoapsis, periapsis, period, inclination, eccentricity, LAN).',
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: { tier: 2 },
+    },
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        const info = await getOrbitInfo(conn);
+        return successResponse('orbit_info',
+          `Ap: ${(info.apoapsis / 1000).toFixed(1)}km, Pe: ${(info.periapsis / 1000).toFixed(1)}km, ` +
+          `Period: ${info.period.toFixed(0)}s, Inc: ${info.inclination.toFixed(1)}°, ` +
+          `Ecc: ${info.eccentricity.toFixed(4)}, LAN: ${info.lan.toFixed(1)}°`);
+      } catch (error) {
+        return errorResponse('orbit_info', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.registerTool(
+    'node_progress',
+    {
+      description: 'Get current maneuver node execution progress (nodes remaining, ETA, throttle, executing status).',
+      inputSchema: {},
+      annotations: {
+        readOnlyHint: true,
+        destructiveHint: false,
+        idempotentHint: true,
+        openWorldHint: false,
+      },
+      _meta: { tier: 2 },
+    },
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        const progress = await getNodeProgress(conn);
+
+        if (progress.nodesRemaining === 0) {
+          return successResponse('node_progress', 'No maneuver nodes.');
+        }
+
+        const execStatus = progress.executing ? 'Burning' : 'Waiting';
+        return successResponse('node_progress',
+          `${execStatus}: ${progress.nodesRemaining} node(s), ` +
+          `T-${progress.etaToNode.toFixed(0)}s, Throttle: ${(progress.throttle * 100).toFixed(0)}%`);
+      } catch (error) {
+        return errorResponse('node_progress', error instanceof Error ? error.message : String(error));
+      }
+    }
+  );
+
+  server.registerTool(
     'clear_nodes',
     {
       description: 'Remove all maneuver nodes.',
@@ -1165,11 +1121,7 @@ export function createServer(): McpServer {
         const conn = await ensureConnected();
         const result = await clearNodes(conn);
 
-        if (result.success) {
-          return successResponse('clear_nodes', `Cleared ${result.nodesCleared} node(s)`);
-        } else {
-          return errorResponse('clear_nodes', result.error ?? 'Failed to clear nodes');
-        }
+        return result.success ? successResponse('clear_nodes', `Cleared ${result.nodesCleared} node(s)`) : errorResponse('clear_nodes', result.error ?? 'Failed to clear nodes');
       } catch (error) {
         return errorResponse('clear_nodes', error instanceof Error ? error.message : String(error));
       }
@@ -1194,11 +1146,7 @@ export function createServer(): McpServer {
     },
     async (args) => {
       const result = await handleExecute(args);
-      if (result.success) {
-        return successResponse('command', result.output || '(no output)');
-      } else {
-        return errorResponse('command', result.error ?? 'Failed');
-      }
+      return result.success ? successResponse('command', result.output || '(no output)') : errorResponse('command', result.error ?? 'Failed');
     }
   );
 
@@ -1214,7 +1162,7 @@ export function createServer(): McpServer {
         sourcePath: z.string().describe('Absolute path to the .ks script file to run'),
         timeout: z.number()
           .optional()
-          .default(60000)
+          .default(60_000)
           .describe('Maximum execution time in milliseconds (default: 60000 = 1 minute)'),
         cleanup: z.boolean()
           .optional()
@@ -1458,12 +1406,7 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected();
 
-        let result;
-        if (typeof args.target === 'number') {
-          result = await warpForward(conn, args.target);
-        } else {
-          result = await warpTo(conn, args.target as WarpTarget, { leadTime: args.leadTime });
-        }
+        const result = await (typeof args.target === 'number' ? warpForward(conn, args.target) : warpTo(conn, args.target as WarpTarget, { leadTime: args.leadTime }));
 
         if (result.success) {
           let msg = `Warp complete: ${result.body}, ${((result.altitude || 0) / 1000).toFixed(0)}km`;
@@ -1491,11 +1434,11 @@ export function createServer(): McpServer {
       inputSchema: {
         targetPeriapsis: z.number()
           .optional()
-          .default(10000)
+          .default(10_000)
           .describe('Target periapsis in meters (default: 10000 = 10km)'),
         timeoutMs: z.number()
           .optional()
-          .default(300000)
+          .default(300_000)
           .describe('Maximum burn time in milliseconds (default: 300000 = 5 min)'),
       },
       annotations: {
@@ -1514,13 +1457,9 @@ export function createServer(): McpServer {
           timeoutMs: args.timeoutMs,
         });
 
-        if (result.success) {
-          return successResponse('crash_avoidance',
+        return result.success ? successResponse('crash_avoidance',
             `Crash avoided! Pe: ${result.initialPeriapsis?.toFixed(0)}m → ${result.finalPeriapsis?.toFixed(0)}m, ΔV: ${result.deltaVUsed?.toFixed(1)} m/s, Stages: ${result.stagesUsed}`
-          );
-        } else {
-          return errorResponse('crash_avoidance', result.error ?? 'Burn failed');
-        }
+          ) : errorResponse('crash_avoidance', result.error ?? 'Burn failed');
       } catch (error) {
         return errorResponse('crash_avoidance', error instanceof Error ? error.message : String(error));
       }
@@ -1547,11 +1486,7 @@ export function createServer(): McpServer {
       const conn = await ensureConnected();
       const result = await quickload(conn, args.saveName);
 
-      if (result.success) {
-        return successResponse('load_save', `Loading: ${result.saveName}`);
-      } else {
-        return errorResponse('load_save', result.error ?? 'Failed');
-      }
+      return result.success ? successResponse('load_save', `Loading: ${result.saveName}`) : errorResponse('load_save', result.error ?? 'Failed');
     }
   );
 
@@ -1602,11 +1537,7 @@ export function createServer(): McpServer {
       const conn = await ensureConnected();
       const result = await quicksave(conn, args.saveName);
 
-      if (result.success) {
-        return successResponse('quicksave', `Saved: ${result.saveName}`);
-      } else {
-        return errorResponse('quicksave', result.error ?? 'Failed');
-      }
+      return result.success ? successResponse('quicksave', `Saved: ${result.saveName}`) : errorResponse('quicksave', result.error ?? 'Failed');
     }
   );
 

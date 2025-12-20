@@ -10,8 +10,8 @@
  * 4. Monitors progress until orbit is achieved
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { AscentResult } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { AscentResult } from '../../lib/types.js';
 
 interface ExecuteResult {
   success: boolean;
@@ -20,7 +20,7 @@ interface ExecuteResult {
 }
 
 async function main() {
-  const TARGET_ALTITUDE = 100000;  // 100km
+  const TARGET_ALTITUDE = 100_000;  // 100km
   const TARGET_INCLINATION = 0;    // Equatorial
 
   console.log('=== MechJeb Ascent to 100km Orbit ===\n');

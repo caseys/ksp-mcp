@@ -5,7 +5,7 @@
  * Example: npm run command "PRINT SHIP:NAME."
  */
 
-import * as daemon from '../daemon/index.js';
+import * as daemon from './daemon-client.js';
 
 interface ExecuteResult {
   success: boolean;
@@ -15,7 +15,7 @@ interface ExecuteResult {
 
 async function main() {
   const command = process.argv[2];
-  const timeout = parseInt(process.argv[3] || '5000', 10);
+  const timeout = Number.parseInt(process.argv[3] || '5000', 10);
 
   if (!command) {
     console.error('Usage: npm run command "<kOS script>" [timeout_ms]');

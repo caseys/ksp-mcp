@@ -5,9 +5,9 @@
  * Example: npm run interplanetary Duna true
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { ManeuverResult } from '../../mechjeb/programs/maneuver.js';
-import type { SetTargetResult } from '../../mechjeb/programs/maneuver.js';
+import * as daemon from '../daemon-client.js';
+import type { ManeuverResult } from '../../lib/programs/maneuver.js';
+import type { SetTargetResult } from '../../lib/programs/maneuver.js';
 
 interface ExecuteResult {
   success: boolean;

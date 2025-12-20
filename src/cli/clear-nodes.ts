@@ -4,8 +4,8 @@
  * Usage: npm run clear-nodes
  */
 
-import * as daemon from '../daemon/index.js';
-import type { ClearNodesResult } from '../mechjeb/programs/nodes.js';
+import * as daemon from './daemon-client.js';
+import type { ClearNodesResult } from '../lib/programs/nodes.js';
 
 async function main() {
   console.log('=== Clear Maneuver Nodes ===\n');

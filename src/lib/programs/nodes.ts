@@ -26,7 +26,7 @@ export async function clearNodes(conn: KosConnection): Promise<ClearNodesResult>
     );
 
     const match = result.output.match(/CLEARED\|(\d+)/);
-    const nodesCleared = match ? parseInt(match[1], 10) : 0;
+    const nodesCleared = match ? Number.parseInt(match[1], 10) : 0;
 
     return { success: true, nodesCleared };
   } catch (error) {

@@ -7,7 +7,7 @@
 import type { KosConnection } from '../transport/kos-connection.js';
 import type { VesselState, OrbitInfo, MechJebInfo } from './types.js';
 import type { TargetEncounterInfo, BodyEncounterInfo, VesselEncounterInfo } from './programs/shared.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -22,7 +22,7 @@ const TELEMETRY_DELAY_MS = 100;
 function parseNumber(output: string | undefined | null): number {
   if (!output) return 0;
   const match = output.match(/-?[\d.]+(?:E[+-]?\d+)?/i);
-  return match ? parseFloat(match[0]) : 0;
+  return match ? Number.parseFloat(match[0]) : 0;
 }
 
 /**
@@ -32,18 +32,6 @@ function parseNumber(output: string | undefined | null): number {
 function parseBool(output: string | undefined | null): boolean {
   if (!output) return false;
   return output.toLowerCase().includes('true');
-}
-
-/**
- * Execute a query and parse the numeric result
- */
-async function queryNumber(
-  conn: KosConnection,
-  suffix: string,
-  timeoutMs: number = config.timeouts.command
-): Promise<number> {
-  const result = await conn.execute(`PRINT ${suffix}.`, timeoutMs);
-  return parseNumber(result.output);
 }
 
 /**
@@ -227,11 +215,7 @@ function formatTime(seconds: number): string {
   const minutes = Math.floor((seconds % 3600) / 60);
   const secs = Math.floor(seconds % 60);
 
-  if (hours > 0) {
-    return `${hours}h ${minutes}m ${secs}s`;
-  } else {
-    return `${minutes}m ${secs}s`;
-  }
+  return hours > 0 ? `${hours}h ${minutes}m ${secs}s` : `${minutes}m ${secs}s`;
 }
 
 /**
@@ -275,11 +259,11 @@ export async function getShipTelemetry(
   const baseMatch = baseResult.output.match(/BASE\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
   if (!baseMatch) {
     // Include raw output for debugging parse failures
-    const preview = baseResult.output.substring(0, 200);
+    const preview = baseResult.output.slice(0, 200);
     return `Telemetry error: parse failed. Raw: ${preview}`;
   }
 
-  const soi = baseMatch[1].replace(/^Body\(|\)$/g, '').replace(/"/g, '');
+  const soi = baseMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
   const apo = parseNumber(baseMatch[2]);
   const per = parseNumber(baseMatch[3]);
   const nodeDv = parseNumber(baseMatch[4]);
@@ -287,15 +271,13 @@ export async function getShipTelemetry(
   const hasEncounter = parseBool(baseMatch[6]);
   const hasNode = nodeDv > 0;
 
-  lines.push('=== Ship Status ===');
-  lines.push(`SOI: ${soi}`);
+  lines.push('=== Ship Status ===', `SOI: ${soi}`);
   lines.push(`Apoapsis: ${(apo / 1000).toFixed(1)} km`);
   lines.push(`Periapsis: ${(per / 1000).toFixed(1)} km`);
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
-    lines.push('');
-    lines.push('=== Next Maneuver ===');
+    lines.push('', '=== Next Maneuver ===');
     lines.push(`Delta-V: ${nodeDv.toFixed(1)} m/s`);
     lines.push(`Time to node: ${formatTime(nodeEta)}`);
     lines.push(`Est. burn time: ${formatTime(estimatedBurnTime)}`);
@@ -315,12 +297,10 @@ export async function getShipTelemetry(
     if (!encResult.error && !encResult.output.includes('NOENC')) {
       const encMatch = encResult.output.match(/ENC\|([^|]+)\|~\|(-?[\d.]+)/);
       if (encMatch) {
-        const encounterBody = encMatch[1].replace(/^Body\(|\)$/g, '').replace(/"/g, '');
+        const encounterBody = encMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
         const encounterPe = parseNumber(encMatch[2]);
 
-        lines.push('');
-        lines.push('=== Encounter ===');
-        lines.push(`Target: ${encounterBody}`);
+        lines.push('', '=== Encounter ===', `Target: ${encounterBody}`);
         lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
       }
     }

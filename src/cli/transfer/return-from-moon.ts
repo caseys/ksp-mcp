@@ -3,9 +3,9 @@
  * Return from moon to parent body (e.g., Mun -> Kerbin)
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { ManeuverResult } from '../../mechjeb/programs/maneuver.js';
-import type { OrbitInfo } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { ManeuverResult } from '../../lib/programs/maneuver.js';
+import type { OrbitInfo } from '../../lib/types.js';
 
 interface ExecuteResult {
   success: boolean;
@@ -15,7 +15,7 @@ interface ExecuteResult {
 
 async function main() {
   // Get target periapsis from command line (default: 100km = 100000m)
-  const targetPeriapsis = process.argv[2] ? parseInt(process.argv[2]) : 100000;
+  const targetPeriapsis = process.argv[2] ? Number.parseInt(process.argv[2]) : 100_000;
 
   console.log(`=== Return from Moon ===\n`);
   console.log(`Target periapsis: ${targetPeriapsis / 1000} km\n`);

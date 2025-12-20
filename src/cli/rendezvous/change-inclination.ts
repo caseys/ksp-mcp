@@ -4,9 +4,9 @@
  * Usage: npm run change-inclination <target_degrees> [timeRef] [--no-execute]
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js';
-import type { OrbitInfo } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { OrchestratedResult } from '../../lib/programs/orchestrator.js';
+import type { OrbitInfo } from '../../lib/types.js';
 
 async function main() {
   // Parse arguments
@@ -14,7 +14,7 @@ async function main() {
   const noExecute = args.includes('--no-execute');
   const positionalArgs = args.filter(a => !a.startsWith('--'));
 
-  const newInclination = positionalArgs[0] ? parseFloat(positionalArgs[0]) : null;
+  const newInclination = positionalArgs[0] ? Number.parseFloat(positionalArgs[0]) : null;
   const timeRef = (positionalArgs[1]?.toUpperCase() || 'EQ_NEAREST_AD');
 
   if (newInclination === null) {

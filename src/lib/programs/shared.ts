@@ -5,13 +5,6 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 
 /**
- * Delay between sequential kOS commands (milliseconds).
- * kOS telnet needs time to process commands; without delays,
- * commands can be lost or return garbled output.
- */
-export const KOS_COMMAND_DELAY_MS = 500;
-
-/**
  * Unlock steering and throttle controls.
  * Call this after errors to ensure the vessel isn't left in a locked state.
  */
@@ -64,18 +57,19 @@ export type TargetEncounterInfo = BodyEncounterInfo | VesselEncounterInfo;
  * Parse a numeric value from kOS output
  * Looks for patterns like "23.80  m/s" or just bare numbers (including negative)
  */
-export function parseNumber(output: string): number {
+function parseNumber(output: string): number {
   // First try to find a number with units (e.g., "23.80  m/s" or "-23.80  m/s")
   const withUnits = output.match(/(-?\d+(?:\.\d+)?)\s*m\/s/i);
   if (withUnits) {
-    return parseFloat(withUnits[1]);
+    return Number.parseFloat(withUnits[1]);
   }
 
   // Otherwise find all numbers (including negative)
   const allNumbers = output.match(/-?\d+(?:\.\d+)?(?:E[+-]?\d+)?/gi);
   if (allNumbers && allNumbers.length > 0) {
     // Take the last number which is most likely the actual value
-    return parseFloat(allNumbers[allNumbers.length - 1]);
+    // Using non-null assertion since we checked length > 0
+    return Number.parseFloat(allNumbers.at(-1)!);
   }
 
   return 0;
@@ -84,11 +78,11 @@ export function parseNumber(output: string): number {
 /**
  * Parse time string like "31m 10s", "5h 23m 10s", or "1d 00h 34m 17s" to seconds
  */
-export function parseTimeString(output: string): number {
+function parseTimeString(output: string): number {
   // Try standard number first (pure seconds)
   const numMatch = output.match(/^[\s\S]*?([\d.]+)\s*$/);
   if (numMatch) {
-    const val = parseFloat(numMatch[1]);
+    const val = Number.parseFloat(numMatch[1]);
     if (!isNaN(val) && val > 0) return val;
   }
 
@@ -99,10 +93,10 @@ export function parseTimeString(output: string): number {
   const minsMatch = output.match(/(\d+)\s*m/i);
   const secsMatch = output.match(/(\d+)\s*s/i);
 
-  if (daysMatch) seconds += parseInt(daysMatch[1]) * 86400;
-  if (hoursMatch) seconds += parseInt(hoursMatch[1]) * 3600;
-  if (minsMatch) seconds += parseInt(minsMatch[1]) * 60;
-  if (secsMatch) seconds += parseInt(secsMatch[1]);
+  if (daysMatch) seconds += Number.parseInt(daysMatch[1]) * 86_400;
+  if (hoursMatch) seconds += Number.parseInt(hoursMatch[1]) * 3600;
+  if (minsMatch) seconds += Number.parseInt(minsMatch[1]) * 60;
+  if (secsMatch) seconds += Number.parseInt(secsMatch[1]);
 
   return seconds;
 }
@@ -111,13 +105,6 @@ export function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-/**
- * Standard delay between kOS commands.
- * Use this between sequential kOS execute calls.
- */
-export function kosDelay(): Promise<void> {
-  return delay(KOS_COMMAND_DELAY_MS);
-}
 
 /**
  * Query a numeric value from MechJeb (e.g., "23.80  m/s")
@@ -125,25 +112,6 @@ export function kosDelay(): Promise<void> {
 export async function queryNumber(conn: KosConnection, suffix: string): Promise<number> {
   const result = await conn.execute(`PRINT ${suffix}.`, 2000);
   return parseNumber(result.output);
-}
-
-/**
- * Query a numeric value with retry - useful after node creation
- * Retries until non-zero value or max attempts reached
- */
-export async function queryNumberWithRetry(
-  conn: KosConnection,
-  suffix: string,
-  maxAttempts = 5,
-  retryDelayMs = 200
-): Promise<number> {
-  for (let i = 0; i < maxAttempts; i++) {
-    const result = await conn.execute(`PRINT ${suffix}.`, 2000);
-    const value = parseNumber(result.output);
-    if (value !== 0) return value;
-    if (i < maxAttempts - 1) await delay(retryDelayMs);
-  }
-  return 0;  // Return 0 if still not ready after all attempts
 }
 
 /**
@@ -166,8 +134,8 @@ export async function queryNodeInfo(conn: KosConnection): Promise<{ deltaV: numb
   const match = result.output.match(/NODE\|([\d.]+)\|([\d.]+)/);
   if (match) {
     return {
-      deltaV: parseFloat(match[1]),
-      timeToNode: parseFloat(match[2])
+      deltaV: Number.parseFloat(match[1]),
+      timeToNode: Number.parseFloat(match[2])
     };
   }
 
@@ -208,7 +176,7 @@ function sanitizeError(rawOutput: string): string {
   }
 
   // Return cleaned output (limit length)
-  const cleaned = rawOutput.trim().substring(0, 100);
+  const cleaned = rawOutput.trim().slice(0, 100);
   return cleaned || 'Unknown error';
 }
 
@@ -218,7 +186,7 @@ function sanitizeError(rawOutput: string): string {
 export async function executeManeuverCommand(
   conn: KosConnection,
   cmd: string,
-  timeout = 10000
+  timeout = 10_000
 ): Promise<ManeuverResult> {
   const result = await conn.execute(cmd, timeout);
 
@@ -248,7 +216,7 @@ function parseDistanceString(str: string): number | undefined {
   const match = str.match(/(-?[\d,.]+)\s*(m|km|Mm|Gm)?/i);
   if (!match) return undefined;
 
-  const value = parseFloat(match[1].replace(/,/g, ''));
+  const value = Number.parseFloat(match[1].replaceAll(',', ''));
   const unit = (match[2] || 'm').toLowerCase();
 
   const multipliers: Record<string, number> = {
@@ -271,7 +239,7 @@ function parseVelocityString(str: string): number | undefined {
   const match = str.match(/(-?[\d,.]+)\s*(m\/s|km\/s)?/i);
   if (!match) return undefined;
 
-  const value = parseFloat(match[1].replace(/,/g, ''));
+  const value = Number.parseFloat(match[1].replaceAll(',', ''));
   const unit = (match[2] || 'm/s').toLowerCase();
 
   return unit === 'km/s' ? value * 1000 : value;

@@ -1,7 +1,7 @@
 import { Transport } from './transport.js';
 import { TmuxTransport } from './tmux-transport.js';
 import { SocketTransport } from './socket-transport.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
 import { createHash } from 'node:crypto';
 
@@ -99,12 +99,14 @@ export class KosConnection {
     }
 
     switch (this.transportType) {
-      case 'tmux':
+      case 'tmux': {
         return new TmuxTransport(this.options.host, this.options.port);
+      }
 
       case 'socket':
-      default:
+      default: {
         return new SocketTransport(this.options.host, this.options.port);
+      }
     }
   }
 
@@ -286,7 +288,7 @@ export class KosConnection {
         await this.transport.sendKeys('C-d');
       } else {
         // Fallback: send raw Ctrl+D byte
-        await this.transport.send('\x04');
+        await this.transport.send('\u0004');
       }
 
       // Wait for menu to appear
@@ -351,7 +353,7 @@ export class KosConnection {
       // Match: [1]   no    1     vessel name (PartName(tag))
       // Capture: [id], vessel name (everything before last paren group), tag (innermost parens)
       const match = line.match(/\[\s*(\d+)\]\s+\w+\s+\d+\s+(.+?)\s+\([^(]+\(([^)]*)\)\)/);
-      if (match && parseInt(match[1]) === cpuId) {
+      if (match && Number.parseInt(match[1]) === cpuId) {
         vesselName = match[2].trim();
         cpuTag = match[3] || '(unnamed)';
         break;
@@ -381,7 +383,7 @@ export class KosConnection {
       // The tag is inside nested parens at the end: (tagname))
       const match = line.match(/\[\s*(\d+)\].*\(([^()]*)\)\)/);
       if (match && match[2].toLowerCase() === labelLower) {
-        return parseInt(match[1]);
+        return Number.parseInt(match[1]);
       }
     }
     return undefined;
@@ -393,7 +395,7 @@ export class KosConnection {
    */
   private getFirstCpuId(menuOutput: string): number | undefined {
     const match = menuOutput.match(/\[\s*(\d+)\]/);
-    return match ? parseInt(match[1], 10) : undefined;
+    return match ? Number.parseInt(match[1], 10) : undefined;
   }
 
   /**
@@ -441,9 +443,10 @@ export class KosConnection {
     // Step 2: Normalize line endings and strip remaining control chars
     // Keep \r\n and \n for line structure, strip other C0 control codes
     const normalized = stripped
-      .replace(/\r\n/g, '\n')           // Normalize CRLF to LF
-      .replace(/\r/g, '\n')             // Normalize lone CR to LF
-      .replace(/[\u0000-\u0009\u000b-\u001f]/g, ''); // Strip other control chars (keep \n)
+      .replaceAll('\r\n', '\n')           // Normalize CRLF to LF
+      .replaceAll('\r', '\n')             // Normalize lone CR to LF
+      // eslint-disable-next-line no-control-regex -- intentionally stripping terminal control chars
+      .replaceAll(/[\u0000-\u0009\u000B-\u001F]/g, ''); // Strip other control chars (keep \n)
 
     // Step 3: Process lines
     const lines = normalized.split('\n');
@@ -453,7 +456,7 @@ export class KosConnection {
       .filter(cmd => !!cmd && cmd.trim().length > 0)
       .map(cmd => ({
         raw: cmd,
-        normalized: cmd.replace(/\s+/g, ' ').trim(),
+        normalized: cmd.replaceAll(/\s+/g, ' ').trim(),
       }));
 
     const noisePatterns = [
@@ -471,7 +474,7 @@ export class KosConnection {
           return '';
         }
 
-        let normalizedLine = trimmed.replace(/\s+/g, ' ');
+        let normalizedLine = trimmed.replaceAll(/\s+/g, ' ');
 
         // Remove command echoes, handling cases where multiple commands are concatenated
         let strippedCommand = true;
@@ -481,14 +484,14 @@ export class KosConnection {
             if (normalizedLine.startsWith(cmd.normalized)) {
               const remainder = normalizedLine.slice(cmd.normalized.length).trim();
               trimmed = remainder;
-              normalizedLine = remainder.replace(/\s+/g, ' ');
+              normalizedLine = remainder.replaceAll(/\s+/g, ' ');
               strippedCommand = true;
               break;
             }
             if (trimmed.startsWith(cmd.raw)) {
               const remainder = trimmed.slice(cmd.raw.length).trim();
               trimmed = remainder;
-              normalizedLine = remainder.replace(/\s+/g, ' ');
+              normalizedLine = remainder.replaceAll(/\s+/g, ' ');
               strippedCommand = true;
               break;
             }
@@ -534,33 +537,37 @@ export class KosConnection {
       const code = input.charCodeAt(i);
 
       // Check if this is a Private Use Area character (kOS UnicodeCommand)
-      if (code >= 0xE000 && code <= 0xF8FF) {
+      if (code >= 0xE0_00 && code <= 0xF8_FF) {
         // Handle multi-byte commands
         switch (code) {
-          case 0xE006: // TELEPORTCURSOR - skip next 2 chars (col, row)
-          case 0xE016: // RESIZESCREEN - skip next 2 chars (width, height)
+          case 0xE0_06: // TELEPORTCURSOR - skip next 2 chars (col, row)
+          case 0xE0_16: { // RESIZESCREEN - skip next 2 chars (width, height)
             i += 3; // Skip command + 2 parameter bytes
             break;
+          }
 
-          case 0xE004: // TITLEBEGIN - skip until TITLEEND (0xE005)
+          case 0xE0_04: { // TITLEBEGIN - skip until TITLEEND (0xE005)
             i++; // Skip TITLEBEGIN
-            while (i < input.length && input.charCodeAt(i) !== 0xE005) {
+            while (i < input.length && input.charCodeAt(i) !== 0xE0_05) {
               i++;
             }
             if (i < input.length) i++; // Skip TITLEEND
             break;
+          }
 
-          case 0xE011: // STARTNEXTLINE - treat as newline
-          case 0xE012: // LINEFEEDKEEPCOL
-          case 0xE013: // GOTOLEFTEDGE
+          case 0xE0_11: // STARTNEXTLINE - treat as newline
+          case 0xE0_12: // LINEFEEDKEEPCOL
+          case 0xE0_13: { // GOTOLEFTEDGE
             result.push('\n');
             i++;
             break;
+          }
 
-          default:
+          default: {
             // Single-byte command, just skip it
             i++;
             break;
+          }
         }
       } else {
         // Normal character, keep it
@@ -621,7 +628,7 @@ export class KosConnection {
    * This prevents triggering on the command echo (which also contains the token).
    */
   private buildSentinelPattern(token: string): RegExp {
-    const escaped = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const escaped = token.replaceAll(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
     // Match the sentinel token when it appears outside of quotes to avoid hitting the echo line.
     return new RegExp(`(?<!")${escaped}`);
   }

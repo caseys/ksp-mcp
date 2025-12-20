@@ -5,4 +5,4 @@
  */
 
 export { runScript } from './run-script.js';
-export type { RunScriptResult, RunScriptOptions } from './run-script.js';
+export type { RunScriptResult } from './run-script.js';

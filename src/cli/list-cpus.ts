@@ -5,10 +5,10 @@
  */
 
 import { handleListCpus } from '../transport/list-cpus.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 
 const host = process.argv[2] || config.kos.host;
-const port = parseInt(process.argv[3] || String(config.kos.port), 10);
+const port = Number.parseInt(process.argv[3] || String(config.kos.port), 10);
 
 async function main() {
   console.log('=== Available kOS CPUs ===\n');

@@ -6,7 +6,7 @@
  * Usage: npm run load-save -- [save-name]
  */
 
-import * as daemon from '../daemon/index.js';
+import * as daemon from './daemon-client.js';
 
 const saveName = process.argv[2] || 'test-in-orbit';
 
@@ -16,7 +16,7 @@ async function main() {
   console.log('✅ Quickload initiated');
 }
 
-main().catch((err) => {
-  console.error('Error:', err.message);
+main().catch((error) => {
+  console.error('Error:', error.message);
   process.exit(1);
 });

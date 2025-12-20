@@ -10,7 +10,7 @@ import * as fs from 'node:fs';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import * as path from 'node:path';
-import { SOCKET_PATH, PID_PATH, isWindows } from './daemon-paths.js';
+import { SOCKET_PATH, PID_PATH, isWindows } from '../service/daemon-paths.js';
 const CONNECT_TIMEOUT_MS = 5000;
 const SPAWN_RETRY_DELAY_MS = 200;
 const MAX_SPAWN_RETRIES = 15; // 3 seconds total
@@ -51,7 +51,7 @@ export function isDaemonRunning(): boolean {
   // Check PID file to verify the process is alive
   if (fs.existsSync(PID_PATH)) {
     try {
-      const pid = parseInt(fs.readFileSync(PID_PATH, 'utf-8').trim(), 10);
+      const pid = Number.parseInt(fs.readFileSync(PID_PATH, 'utf8').trim(), 10);
       if (!isNaN(pid)) {
         // Check if process is alive (signal 0 doesn't kill, just checks)
         process.kill(pid, 0);
@@ -81,10 +81,11 @@ export function isDaemonRunning(): boolean {
  * Spawn the daemon process
  */
 async function spawnDaemon(): Promise<void> {
-  // Get the daemon script path
+  // Get the daemon script path (in service/ directory, sibling to cli/)
   const __filename = fileURLToPath(import.meta.url);
   const __dirname = path.dirname(__filename);
-  const daemonScript = path.join(__dirname, 'kos-daemon.js');
+  const serviceDir = path.join(__dirname, '..', 'service');
+  const daemonScript = path.join(serviceDir, 'cli-daemon.js');
 
   // Check if compiled JS exists, otherwise use ts-node/tsx
   const useCompiledJs = fs.existsSync(daemonScript);
@@ -97,7 +98,7 @@ async function spawnDaemon(): Promise<void> {
     }).unref();
   } else {
     // Spawn using tsx for development
-    const tsScript = path.join(__dirname, 'kos-daemon.ts');
+    const tsScript = path.join(serviceDir, 'cli-daemon.ts');
     spawn('npx', ['tsx', tsScript], {
       detached: true,
       stdio: 'ignore',
@@ -165,7 +166,7 @@ export async function sendRequest(request: DaemonRequest): Promise<DaemonRespons
 
         try {
           resolve(JSON.parse(message));
-        } catch (err) {
+        } catch {
           reject(new Error(`Invalid response from daemon: ${message}`));
         }
       }

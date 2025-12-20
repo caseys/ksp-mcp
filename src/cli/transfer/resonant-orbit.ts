@@ -8,13 +8,13 @@
  * Useful for deploying satellite constellations at evenly spaced intervals.
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js';
-import type { OrbitInfo } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { OrchestratedResult } from '../../lib/programs/orchestrator.js';
+import type { OrbitInfo } from '../../lib/types.js';
 
 async function main() {
-  const numerator = process.argv[2] ? parseInt(process.argv[2]) : null;
-  const denominator = process.argv[3] ? parseInt(process.argv[3]) : null;
+  const numerator = process.argv[2] ? Number.parseInt(process.argv[2]) : null;
+  const denominator = process.argv[3] ? Number.parseInt(process.argv[3]) : null;
   const timeRef = (process.argv[4]?.toUpperCase() || 'APOAPSIS') as string;
 
   if (numerator === null || denominator === null || isNaN(numerator) || isNaN(denominator)) {

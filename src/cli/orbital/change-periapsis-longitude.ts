@@ -3,13 +3,13 @@
  * Change longitude of periapsis
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { ManeuverResult } from '../../mechjeb/programs/maneuver.js';
-import type { OrbitInfo } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { ManeuverResult } from '../../lib/programs/maneuver.js';
+import type { OrbitInfo } from '../../lib/types.js';
 
 async function main() {
   // Parse command line arguments
-  const targetLongDegrees = parseFloat(process.argv[2]);
+  const targetLongDegrees = Number.parseFloat(process.argv[2]);
   const timeRef = (process.argv[3] || 'APOAPSIS').toUpperCase();
 
   if (isNaN(targetLongDegrees)) {

@@ -8,7 +8,12 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import type { ManeuverResult } from './shared.js';
 import { ManeuverProgram } from './maneuver.js';
-import { executeNode, type ExecuteNodeResult } from './node/index.js';
+import { executeNode } from './node/index.js';
+import { changeSemiMajorAxis } from './basic/semimajor.js';
+import { changeEccentricity } from './orbital/eccentricity.js';
+import { matchPlane } from './rendezvous/match-plane.js';
+import { returnFromMoon } from './transfer/return-from-moon.js';
+import { interplanetaryTransfer } from './transfer/interplanetary.js';
 
 /**
  * Options for maneuver orchestration.
@@ -258,6 +263,73 @@ export class ManeuverOrchestrator {
     const { target, execute = true } = options ?? {};
     return withTargetAndExecute(this.conn, target, execute, () =>
       this.maneuver.killRelVel(timeRef)
+    );
+  }
+
+  /**
+   * Change semi-major axis.
+   */
+  async changeSemiMajorAxis(
+    semiMajorAxis: number,
+    timeRef: string = 'APOAPSIS',
+    options?: ManeuverOptions
+  ): Promise<OrchestratedResult> {
+    const { target, execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, execute, () =>
+      changeSemiMajorAxis(this.conn, semiMajorAxis, timeRef)
+    );
+  }
+
+  /**
+   * Change orbital eccentricity.
+   */
+  async changeEccentricity(
+    eccentricity: number,
+    timeRef: string = 'APOAPSIS',
+    options?: ManeuverOptions
+  ): Promise<OrchestratedResult> {
+    const { target, execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, execute, () =>
+      changeEccentricity(this.conn, eccentricity, timeRef)
+    );
+  }
+
+  /**
+   * Match orbital plane with target.
+   */
+  async matchPlane(
+    timeRef: string = 'REL_NEAREST_AD',
+    options?: ManeuverOptions
+  ): Promise<OrchestratedResult> {
+    const { target, execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, execute, () =>
+      matchPlane(this.conn, timeRef)
+    );
+  }
+
+  /**
+   * Return from moon to parent body.
+   */
+  async returnFromMoon(
+    targetPeriapsis: number,
+    options?: ManeuverOptions
+  ): Promise<OrchestratedResult> {
+    const { target, execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, execute, () =>
+      returnFromMoon(this.conn, targetPeriapsis)
+    );
+  }
+
+  /**
+   * Interplanetary transfer to target planet.
+   */
+  async interplanetaryTransfer(
+    waitForPhaseAngle: boolean = true,
+    options?: ManeuverOptions
+  ): Promise<OrchestratedResult> {
+    const { target, execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, execute, () =>
+      interplanetaryTransfer(this.conn, waitForPhaseAngle)
     );
   }
 

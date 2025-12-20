@@ -4,8 +4,8 @@
  * Usage: npm run launch-ascent-status
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { AscentProgress } from '../../mechjeb/types.js';
+import * as daemon from '../daemon-client.js';
+import type { AscentProgress } from '../../lib/types.js';
 
 const phaseDescriptions: Record<string, string> = {
   prelaunch: 'On launchpad',

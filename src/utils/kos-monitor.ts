@@ -62,7 +62,7 @@ export class KosMonitor {
    * Track multiple lines at once
    */
   trackLines(lines: string[]): void {
-    lines.forEach(line => this.trackLine(line));
+    for (const line of lines) this.trackLine(line);
   }
 
   /**
@@ -78,10 +78,10 @@ export class KosMonitor {
    */
   private normalizeError(line: string): string {
     return line
-      .replace(/\d+/g, 'N')  // Replace numbers with N
-      .replace(/'[^']*'/g, "'X'")  // Replace quoted strings with 'X'
-      .replace(/"[^"]*"/g, '"X"')  // Replace quoted strings with "X"
-      .substring(0, 100);  // Limit length
+      .replaceAll(/\d+/g, 'N')  // Replace numbers with N
+      .replaceAll(/'[^']*'/g, "'X'")  // Replace quoted strings with 'X'
+      .replaceAll(/"[^"]*"/g, '"X"')  // Replace quoted strings with "X"
+      .slice(0, 100);  // Limit length
   }
 
   /**
@@ -93,12 +93,12 @@ export class KosMonitor {
     const errorMap = new Map<string, number>();
 
     // Count normalized errors in recent lines
-    recent.forEach(line => {
+    for (const line of recent) {
       if (this.isErrorLine(line)) {
         const key = this.normalizeError(line);
         errorMap.set(key, (errorMap.get(key) || 0) + 1);
       }
-    });
+    }
 
     // Find most common error
     let maxCount = 0;

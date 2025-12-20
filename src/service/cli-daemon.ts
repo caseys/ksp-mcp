@@ -21,24 +21,24 @@
 import * as net from 'node:net';
 import * as fs from 'node:fs';
 import { KosConnection } from '../transport/kos-connection.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 import { SOCKET_PATH, PID_PATH, isWindows } from './daemon-paths.js';
-import { clearNodes } from '../mechjeb/programs/nodes.js';
-import { getShipTelemetry } from '../mechjeb/telemetry.js';
-import { ManeuverOrchestrator } from '../mechjeb/programs/orchestrator.js';
-import { getOrbitInfo } from '../mechjeb/telemetry.js';
-import { ManeuverProgram } from '../mechjeb/programs/maneuver.js';
-import { executeNode, getNodeProgress } from '../mechjeb/programs/node/index.js';
-import { warpTo, warpForward, type WarpTarget } from '../mechjeb/programs/warp.js';
-import { quicksave, listQuicksaves, quickload } from '../kuniverse.js';
-import { matchPlane } from '../mechjeb/programs/rendezvous/index.js';
-import { changeSemiMajorAxis } from '../mechjeb/programs/basic/index.js';
-import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from '../mechjeb/programs/orbital/index.js';
-import { returnFromMoon, interplanetaryTransfer } from '../mechjeb/programs/transfer/index.js';
-import { crashAvoidance } from '../mechjeb/programs/manual/index.js';
-import { runScript } from '../script/index.js';
-import { getAscentProgress, abortAscent, AscentProgram } from '../mechjeb/programs/ascent.js';
-const IDLE_TIMEOUT_MS = 30000; // 30 seconds
+import { clearNodes } from '../lib/programs/nodes.js';
+import { getShipTelemetry } from '../lib/telemetry.js';
+import { ManeuverOrchestrator } from '../lib/programs/orchestrator.js';
+import { getOrbitInfo } from '../lib/telemetry.js';
+import { ManeuverProgram } from '../lib/programs/maneuver.js';
+import { executeNode, getNodeProgress } from '../lib/programs/node/index.js';
+import { warpTo, warpForward, type WarpTarget } from '../lib/programs/warp.js';
+import { quicksave, listQuicksaves, quickload } from '../lib/kuniverse.js';
+import { matchPlane } from '../lib/programs/rendezvous/index.js';
+import { changeSemiMajorAxis } from '../lib/programs/basic/index.js';
+import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from '../lib/programs/orbital/index.js';
+import { returnFromMoon, interplanetaryTransfer } from '../lib/programs/transfer/index.js';
+import { crashAvoidance } from '../lib/programs/manual/index.js';
+import { runScript } from '../lib/script/index.js';
+import { getAscentProgress, abortAscent, AscentProgram } from '../lib/programs/ascent.js';
+const IDLE_TIMEOUT_MS = 30_000; // 30 seconds
 
 interface DaemonRequest {
   type: 'execute' | 'connect' | 'disconnect' | 'status' | 'shutdown' | 'ping' | 'call';
@@ -117,7 +117,7 @@ class KosDaemon {
 
     // Check for stale PID file
     if (fs.existsSync(PID_PATH)) {
-      const oldPid = parseInt(fs.readFileSync(PID_PATH, 'utf-8').trim(), 10);
+      const oldPid = Number.parseInt(fs.readFileSync(PID_PATH, 'utf8').trim(), 10);
       if (!isNaN(oldPid)) {
         try {
           // Check if process exists (signal 0 doesn't kill, just checks)
@@ -176,10 +176,10 @@ class KosDaemon {
           const request: DaemonRequest = JSON.parse(line);
           const response = await this.handleRequest(request);
           socket.write(JSON.stringify(response) + '\n');
-        } catch (err) {
+        } catch (error) {
           const response: DaemonResponse = {
             success: false,
-            error: `Invalid request: ${err instanceof Error ? err.message : String(err)}`,
+            error: `Invalid request: ${error instanceof Error ? error.message : String(error)}`,
           };
           socket.write(JSON.stringify(response) + '\n');
         }
@@ -203,30 +203,38 @@ class KosDaemon {
     // This prevents premature shutdown during long-running commands
 
     switch (request.type) {
-      case 'ping':
+      case 'ping': {
         return { success: true, output: 'pong' };
+      }
 
-      case 'connect':
+      case 'connect': {
         return this.handleConnect(request);
+      }
 
-      case 'disconnect':
+      case 'disconnect': {
         return this.handleDisconnect();
+      }
 
-      case 'execute':
+      case 'execute': {
         return this.handleExecute(request);
+      }
 
-      case 'call':
+      case 'call': {
         return this.handleCall(request);
+      }
 
-      case 'status':
+      case 'status': {
         return this.handleStatus();
+      }
 
-      case 'shutdown':
+      case 'shutdown': {
         setTimeout(() => this.shutdown(), 100);
         return { success: true, output: 'Shutting down' };
+      }
 
-      default:
+      default: {
         return { success: false, error: `Unknown request type: ${request.type}` };
+      }
     }
   }
 
@@ -251,10 +259,10 @@ class KosDaemon {
         cpuId: state.cpuId || undefined,
         cpuTag: state.cpuTag || undefined,
       };
-    } catch (err) {
+    } catch (error) {
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: error instanceof Error ? error.message : String(error),
         connected: false,
       };
     }
@@ -267,10 +275,10 @@ class KosDaemon {
         this.connection = null;
       }
       return { success: true, connected: false };
-    } catch (err) {
+    } catch (error) {
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: error instanceof Error ? error.message : String(error),
       };
     }
   }
@@ -316,12 +324,12 @@ class KosDaemon {
         cpuId: state?.cpuId || undefined,
         cpuTag: state?.cpuTag || undefined,
       };
-    } catch (err) {
+    } catch (error) {
       // Clear connection on error to enable auto-reconnect
       this.connection = null;
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: error instanceof Error ? error.message : String(error),
       };
     }
   }
@@ -477,7 +485,7 @@ class KosDaemon {
 
       // Execute maneuver node
       executeNode: async (conn, args) => {
-        const timeoutMs = (args.timeoutMs as number) ?? 240000;
+        const timeoutMs = (args.timeoutMs as number) ?? 240_000;
         const pollIntervalMs = (args.pollIntervalMs as number) ?? 5000;
         return executeNode(conn, { timeoutMs, pollIntervalMs });
       },
@@ -583,7 +591,7 @@ class KosDaemon {
 
       // Return from moon to parent body
       returnFromMoon: async (conn, args) => {
-        const targetPeriapsis = (args.targetPeriapsis as number) ?? 100000;
+        const targetPeriapsis = (args.targetPeriapsis as number) ?? 100_000;
         return returnFromMoon(conn, targetPeriapsis);
       },
 
@@ -595,15 +603,15 @@ class KosDaemon {
 
       // Crash avoidance emergency burn
       crashAvoidance: async (conn, args) => {
-        const targetPeriapsis = (args.targetPeriapsis as number) ?? 10000;
-        const timeoutMs = (args.timeoutMs as number) ?? 300000;
+        const targetPeriapsis = (args.targetPeriapsis as number) ?? 10_000;
+        const timeoutMs = (args.timeoutMs as number) ?? 300_000;
         return crashAvoidance(conn, { targetPeriapsis, timeoutMs });
       },
 
       // Run kOS script file
       runScript: async (conn, args) => {
         const sourcePath = args.sourcePath as string;
-        const timeout = (args.timeout as number) ?? 60000;
+        const timeout = (args.timeout as number) ?? 60_000;
         const cleanup = (args.cleanup as boolean) ?? true;
         if (!sourcePath) throw new Error('sourcePath required');
         return runScript(conn, sourcePath, { timeout, cleanup });
@@ -622,7 +630,7 @@ class KosDaemon {
 
       // Launch to orbit (blocking - waits for completion)
       launchAscent: async (conn, args) => {
-        const altitude = (args.altitude as number) ?? 100000;
+        const altitude = (args.altitude as number) ?? 100_000;
         const inclination = (args.inclination as number) ?? 0;
         const autoStage = (args.autoStage as boolean) ?? true;
         const skipCircularization = (args.skipCircularization as boolean) ?? false;
@@ -670,12 +678,12 @@ class KosDaemon {
         success: true,
         data: result,
       };
-    } catch (err) {
+    } catch (error) {
       // Clear connection on error to enable auto-reconnect
       this.connection = null;
       return {
         success: false,
-        error: err instanceof Error ? err.message : String(err),
+        error: error instanceof Error ? error.message : String(error),
       };
     }
   }
@@ -731,7 +739,7 @@ class KosDaemon {
 
 // Start daemon
 const daemon = new KosDaemon();
-daemon.start().catch((err) => {
-  console.error(`[kos-daemon] Failed to start: ${err.message}`);
+daemon.start().catch((error) => {
+  console.error(`[kos-daemon] Failed to start: ${error.message}`);
   process.exit(1);
 });

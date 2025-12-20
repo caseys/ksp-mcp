@@ -10,7 +10,7 @@
  */
 
 import { KosConnection } from '../transport/kos-connection.js';
-import { MechJebClient } from '../mechjeb/index.js';
+import { MechJebClient } from '../lib/index.js';
 
 async function main() {
   const doLaunch = process.argv.includes('--launch');

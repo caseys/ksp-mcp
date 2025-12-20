@@ -4,8 +4,8 @@
  * Usage: npm run list-saves
  */
 
-import * as daemon from '../daemon/index.js';
-import type { ListSavesResult } from '../kuniverse.js';
+import * as daemon from './daemon-client.js';
+import type { ListSavesResult } from '../lib/kuniverse.js';
 
 async function main() {
   console.log('=== Available Quicksaves ===\n');

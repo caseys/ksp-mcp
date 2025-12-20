@@ -6,12 +6,12 @@
  * and executed via RUNPATH command.
  */
 
-import * as fs from 'fs';
-import * as path from 'path';
-import type { KosConnection } from '../transport/kos-connection.js';
-import { config } from '../config.js';
-import { delay } from '../mechjeb/programs/shared.js';
-import { globalKosMonitor } from '../utils/kos-monitor.js';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { KosConnection } from '../../transport/kos-connection.js';
+import { config } from '../../config/index.js';
+import { delay } from '../programs/shared.js';
+import { globalKosMonitor } from '../../utils/kos-monitor.js';
 
 export interface RunScriptResult {
   success: boolean;
@@ -21,14 +21,14 @@ export interface RunScriptResult {
   scriptName: string;
 }
 
-export interface RunScriptOptions {
+interface RunScriptOptions {
   timeout?: number;        // Default: 60000 (60 seconds)
   pollInterval?: number;   // Default: 500ms
   cleanup?: boolean;       // Default: true - delete script after execution
 }
 
 // Defaults
-const DEFAULT_TIMEOUT_MS = 60000;     // 60 seconds
+const DEFAULT_TIMEOUT_MS = 60_000;     // 60 seconds
 const DEFAULT_POLL_MS = 500;          // 500ms
 const COMPLETION_MARKER = '__MCP_SCRIPT_COMPLETE__';
 const COMPLETION_FLAG = '__MCP_SCRIPT_DONE__';
@@ -37,7 +37,7 @@ const COMPLETION_FLAG = '__MCP_SCRIPT_DONE__';
  * Generate a unique script name to avoid collisions
  */
 function generateScriptName(): string {
-  const id = Math.random().toString(36).substring(2, 10);
+  const id = Math.random().toString(36).slice(2, 10);
   return `_mcp_run_${id}.ks`;
 }
 
@@ -79,7 +79,7 @@ async function copyScriptToArchive(
     }
 
     // Read source content
-    const content = fs.readFileSync(sourcePath, 'utf-8');
+    const content = fs.readFileSync(sourcePath, 'utf8');
 
     // Inject completion markers
     const modifiedContent = injectCompletionMarkers(content);
@@ -96,10 +96,10 @@ async function copyScriptToArchive(
     fs.writeFileSync(destPath, modifiedContent, 'utf-8');
 
     return { success: true };
-  } catch (err) {
+  } catch (error) {
     return {
       success: false,
-      error: `Failed to copy script: ${err instanceof Error ? err.message : String(err)}`
+      error: `Failed to copy script: ${error instanceof Error ? error.message : String(error)}`
     };
   }
 }
@@ -200,11 +200,10 @@ export async function runScript(
 
       // Check for errors in monitor
       const status = globalKosMonitor.getStatus();
-      if (status.hasErrors && status.lastError) {
-        // Check if it's a fatal error (not just a warning)
-        if (status.lastError.includes('Error:') ||
+      if (status.hasErrors && status.lastError && // Check if it's a fatal error (not just a warning)
+        (status.lastError.includes('Error:') ||
             status.lastError.includes('Exception') ||
-            status.lastError.includes('Program aborted')) {
+            status.lastError.includes('Program aborted'))) {
           return {
             success: false,
             output: globalKosMonitor.getRecentLines(100),
@@ -213,7 +212,6 @@ export async function runScript(
             executionTime: Date.now() - startTime,
           };
         }
-      }
 
       // Check for error loop
       if (status.isLooping) {

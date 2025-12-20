@@ -4,7 +4,7 @@
  * Usage: npm run launch-ascent-abort
  */
 
-import * as daemon from '../../daemon/index.js';
+import * as daemon from '../daemon-client.js';
 
 async function main() {
   console.log('=== Abort Launch Ascent ===\n');

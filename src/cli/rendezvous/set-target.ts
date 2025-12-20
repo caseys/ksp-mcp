@@ -8,8 +8,8 @@
  *   npm run set-target "Station 1" vessel  # Set vessel by name
  */
 
-import * as daemon from '../../daemon/index.js';
-import type { SetTargetResult } from '../../mechjeb/programs/maneuver.js';
+import * as daemon from '../daemon-client.js';
+import type { SetTargetResult } from '../../lib/programs/maneuver.js';
 
 async function main() {
   const targetName = process.argv[2];

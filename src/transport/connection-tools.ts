@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { KosConnection, ConnectionState, CommandResult } from '../transport/kos-connection.js';
-import { config } from '../config.js';
+import { config } from '../config/index.js';
 
 // Shared connection instance
 let connection: KosConnection | null = null;
@@ -34,13 +34,6 @@ export function setCpuPreference(pref: CpuPreference | null): void {
  */
 export function getCpuPreference(): CpuPreference | null {
   return cpuPreference;
-}
-
-/**
- * Clear runtime CPU preference (reverts to config defaults).
- */
-export function clearCpuPreference(): void {
-  cpuPreference = null;
 }
 
 export function getConnection(): KosConnection {
@@ -111,7 +104,7 @@ const POST_CONNECT_DELAY_MS = 500;
 const HEALTH_CHECK_TIMEOUT_MS = 1500;
 
 // Default wait timeout for kOS to become ready
-const DEFAULT_WAIT_TIMEOUT_MS = 120000; // 2 minutes
+const DEFAULT_WAIT_TIMEOUT_MS = 120_000; // 2 minutes
 
 // Poll interval when waiting for kOS
 const WAIT_POLL_INTERVAL_MS = 2000;
@@ -388,26 +381,3 @@ export async function handleExecute(
   return await conn.execute(input.command, input.timeout);
 }
 
-// Tool definitions for MCP registration
-export const connectionToolDefinitions = {
-  connect: {
-    description: 'Connect to kOS terminal server and attach to a CPU',
-    inputSchema: connectInputSchema,
-    handler: handleConnect,
-  },
-  disconnect: {
-    description: 'Disconnect from kOS terminal',
-    inputSchema: z.object({}),
-    handler: handleDisconnect,
-  },
-  status: {
-    description: 'Get current kOS connection status',
-    inputSchema: z.object({}),
-    handler: handleStatus,
-  },
-  execute: {
-    description: 'Execute a raw kOS command (for advanced use)',
-    inputSchema: executeInputSchema,
-    handler: handleExecute,
-  },
-};

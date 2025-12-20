@@ -20,7 +20,7 @@ export class TransportTraceLogger {
       join(process.cwd(), 'logs');
     mkdirSync(dir, { recursive: true });
 
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const timestamp = new Date().toISOString().replaceAll(/[:.]/g, '-');
     const id = randomUUID().split('-')[0];
     const filePath = join(dir, `kos-trace-${context}-${timestamp}-${id}.log`);
     this.stream = createWriteStream(filePath, { flags: 'a' });

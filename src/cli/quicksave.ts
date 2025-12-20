@@ -4,8 +4,8 @@
  * Usage: npm run quicksave [name]
  */
 
-import * as daemon from '../daemon/index.js';
-import type { QuicksaveResult } from '../kuniverse.js';
+import * as daemon from './daemon-client.js';
+import type { QuicksaveResult } from '../lib/kuniverse.js';
 
 const saveName = process.argv[2] || 'quicksave';
 

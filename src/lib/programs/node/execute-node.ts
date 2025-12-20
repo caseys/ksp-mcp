@@ -31,11 +31,11 @@ export interface ExecuteNodeProgress {
 
 // Configuration
 const MAX_RETRIES = 3;
-const DEFAULT_TIMEOUT_MS = 600000; // 10 minutes
-const DEFAULT_POLL_INTERVAL_MS = 10000; // 10 seconds
+const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes
+const DEFAULT_POLL_INTERVAL_MS = 10_000; // 10 seconds
 const DV_THRESHOLD = 0.5; // m/s - consider burn complete below this
 
-export interface ExecuteNodeOptions {
+interface ExecuteNodeOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
   async?: boolean; // If true, return immediately after starting executor
@@ -71,7 +71,7 @@ export async function executeNode(
 
   // Get initial node count
   const initialCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-  const initialNodeCount = parseInt(initialCountResult.output.match(/\d+/)?.[0] || '1');
+  const initialNodeCount = Number.parseInt(initialCountResult.output.match(/\d+/)?.[0] || '1');
 
   // Delta-v validation - use total ship delta-v for reliability
   const dvRequired = await queryNumber(conn, 'NEXTNODE:DELTAV:MAG');
@@ -191,7 +191,7 @@ export async function executeNode(
       // Parse "dv|enabled" format
       const progressMatch = progressResult.output.match(/([\d.]+)\|(True|False)/i);
       if (progressMatch) {
-        const dvRemaining = parseFloat(progressMatch[1]);
+        const dvRemaining = Number.parseFloat(progressMatch[1]);
         const executorEnabled = progressMatch[2].toLowerCase() === 'true';
         lastDvRemaining = dvRemaining;
 
@@ -254,7 +254,7 @@ export async function executeNode(
  */
 export async function getNodeProgress(conn: KosConnection): Promise<ExecuteNodeProgress> {
   const countResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-  const nodesRemaining = parseInt(countResult.output.match(/\d+/)?.[0] || '0');
+  const nodesRemaining = Number.parseInt(countResult.output.match(/\d+/)?.[0] || '0');
 
   if (nodesRemaining === 0) {
     return {
@@ -276,8 +276,8 @@ export async function getNodeProgress(conn: KosConnection): Promise<ExecuteNodeP
 
   return {
     nodesRemaining,
-    etaToNode: etaMatch ? parseInt(etaMatch[1]) : 0,
-    throttle: thrMatch ? parseInt(thrMatch[1]) : 0,
+    etaToNode: etaMatch ? Number.parseInt(etaMatch[1]) : 0,
+    throttle: thrMatch ? Number.parseInt(thrMatch[1]) : 0,
     executing: true
   };
 }

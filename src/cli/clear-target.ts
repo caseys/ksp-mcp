@@ -4,8 +4,8 @@
  * Usage: npm run clear-target
  */
 
-import * as daemon from '../daemon/index.js';
-import type { ClearTargetResult } from '../mechjeb/programs/maneuver.js';
+import * as daemon from './daemon-client.js';
+import type { ClearTargetResult } from '../lib/programs/maneuver.js';
 
 async function main() {
   console.log('=== Clear Target ===\n');

@@ -8,7 +8,7 @@
  */
 
 import { setCpuPreference, getCpuPreference } from '../transport/connection-tools.js';
-import * as daemon from '../daemon/index.js';
+import * as daemon from './daemon-client.js';
 
 const arg = process.argv[2];
 
@@ -39,13 +39,13 @@ async function main() {
   }
 
   // Check if numeric ID or label
-  const numericId = parseInt(arg, 10);
-  if (!isNaN(numericId)) {
-    setCpuPreference({ cpuId: numericId });
-    console.log(`✅ Switched to CPU ID ${numericId}\n`);
-  } else {
+  const numericId = Number.parseInt(arg, 10);
+  if (isNaN(numericId)) {
     setCpuPreference({ cpuLabel: arg });
     console.log(`✅ Switched to CPU label "${arg}"\n`);
+  } else {
+    setCpuPreference({ cpuId: numericId });
+    console.log(`✅ Switched to CPU ID ${numericId}\n`);
   }
 
   // Disconnect daemon so it reconnects with new preference
