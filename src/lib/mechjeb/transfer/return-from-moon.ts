@@ -16,6 +16,6 @@ export async function returnFromMoon(
   conn: KosConnection,
   targetPeriapsis: number
 ): Promise<ManeuverResult> {
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:RETURNFROMMOON(${targetPeriapsis}).`;
+  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:MOONRETURN(${targetPeriapsis}).`;
   return executeManeuverCommand(conn, cmd);
 }

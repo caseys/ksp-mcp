@@ -3,9 +3,16 @@
  *
  * Tests that MechJeb can launch a vessel to orbit using ascent guidance.
  * This test uses the launchpad save and requires more time.
+ *
+ * Test modes:
+ * - Quick mode (default): Passes when ship leaves the launchpad
+ * - Full mode (FULL_TEST=true): Waits for stable orbit to be achieved
  */
 
 import { ensureKspReady, getAscentProgram, recordTestSuccess, SAVES, TIMEOUTS } from '../helpers/test-setup.js';
+
+// Check for full test mode
+const runFullTests = process.env.FULL_TEST === 'true';
 
 describe('ASCENT', () => {
   beforeAll(async () => {
@@ -14,9 +21,8 @@ describe('ASCENT', () => {
     await ensureKspReady(SAVES.LAUNCHPAD, { forceReload: true });
   }, TIMEOUTS.KSP_STARTUP);
 
-  describe('to 100km equatorial orbit', () => {
-    // Single long-running operation - cannot be split into separate it() blocks
-    it('launches and reaches orbit', async () => {
+  describe('quick mode - liftoff only', () => {
+    it('launches off the pad', async () => {
       const ascent = await getAscentProgram();
 
       const handle = await ascent.launchToOrbit({
@@ -27,6 +33,31 @@ describe('ASCENT', () => {
       expect(handle).toBeDefined();
       expect(handle.targetAltitude).toBe(100000);
 
+      // Quick mode: just verify liftoff (altitude > 100m or phase changes)
+      const result = await handle.waitForLiftoff();
+
+      expect(result.success).toBe(true);
+
+      // Record 'ascent-liftoff' (not 'ascent') - maneuver tests won't chain
+      // because vessel is mid-ascent, not in stable orbit
+      recordTestSuccess('ascent-liftoff');
+    }, TIMEOUTS.LAUNCH_LIFTOFF);
+  });
+
+  // Full mode: skip by default, enable with FULL_TEST=true
+  (runFullTests ? describe : describe.skip)('full mode - orbit achieved', () => {
+    it('reaches stable orbit', async () => {
+      const ascent = await getAscentProgram();
+
+      const handle = await ascent.launchToOrbit({
+        altitude: 100000,
+        inclination: 0
+      });
+
+      expect(handle).toBeDefined();
+      expect(handle.targetAltitude).toBe(100000);
+
+      // Full mode: wait for orbit (periapsis > atmosphere + 10km)
       const result = await handle.waitForCompletion();
 
       expect(result.success).toBe(true);

@@ -7,11 +7,13 @@
  *
  * Tests are ordered to simulate a real space mission:
  * 1. Launch & orbit establishment (ascent, circularize)
- * 2. Basic orbit adjustments (changeap, changepe, ellipticize)
+ * 2. Basic orbit adjustments (changeap, changepe, ellipticize, semimajor, eccentricity)
  * 3. Plane changes (changeinclination, lan, longitude)
- * 4. Interplanetary transfer (hohmann, coursecorrection)
- * 5. Rendezvous operations (killrelvel)
- * 6. Utility maneuvers (resonant)
+ * 4. Transfer maneuvers (hohmann, interplanetary)
+ * 5. Mid-course corrections (coursecorrection)
+ * 6. Rendezvous operations (matchplanes, killrelvel)
+ * 7. Return from moon (returnfrommoon)
+ * 8. Utility maneuvers (resonant)
  */
 
 const Sequencer = require('@jest/test-sequencer').default;
@@ -23,12 +25,17 @@ const MISSION_ORDER = [
   'changeap',
   'changepe',
   'ellipticize',
+  'semimajor',
+  'eccentricity',
   'changeinclination',
   'lan',
   'longitude',
   'hohmann',
+  'interplanetary',
   'coursecorrection',
+  'matchplanes',
   'killrelvel',
+  'returnfrommoon',
   'resonant',
 ];
 

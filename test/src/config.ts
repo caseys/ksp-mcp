@@ -81,6 +81,7 @@ export const TIMEOUTS = {
   KSP_STARTUP: 420000,     // 7 minutes for KSP to start
   KOS_READY: 180000,       // 3 minutes for kOS to be ready
   VESSEL_INIT: 60000,      // 1 minute for vessel initialization
+  LAUNCH_LIFTOFF: 60000,   // 1 minute for liftoff verification (quick ascent test)
   MANEUVER_OPERATION: 30000, // 30 seconds for maneuver operations
   BURN_EXECUTION: 2400000,  // 40 minutes for burn execution
 };
@@ -96,8 +97,12 @@ export const LOG_PATTERNS = {
 
 // Save configurations
 export const SAVES = {
-  ORBIT: 'test-in-orbit',   // Ship in orbit (for maneuver tests)
-  LAUNCHPAD: 'test-on-pad', // Ship on launchpad (for ascent tests)
+  ORBIT: 'test-in-orbit',             // Ship in Kerbin orbit (for maneuver tests)
+  LAUNCHPAD: 'test-on-pad',           // Ship on launchpad (for ascent tests)
+  TRANSIT_MUN: 'test-in-transit-to-mun',  // Ship on transfer trajectory to Mun (for course correction)
+  RENDEZVOUS: 'test-rendezvous-kerbin-orbit', // Ship in Kerbin orbit near test-station (for rendezvous)
+  MUN_ORBIT: 'test-in-munar-orbit',   // Ship in Mun orbit (for return from moon)
+  INTERPLANETARY: 'test-aligned-moho-transfer', // Ship aligned for Moho transfer in ~3 days
   DIRECTORY: 'stock',
 };
 

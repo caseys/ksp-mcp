@@ -211,6 +211,41 @@ export class AscentHandle {
   }
 
   /**
+   * Wait for the vessel to leave the launchpad (quick test mode)
+   * Returns as soon as altitude > 100m or phase is no longer 'prelaunch'
+   */
+  async waitForLiftoff(pollIntervalMs = 1000, timeoutMs = 60_000): Promise<AscentResult> {
+    console.log('[Ascent] Waiting for liftoff...');
+    const startTime = Date.now();
+
+    while (Date.now() - startTime < timeoutMs) {
+      const progress = await this.getProgress();
+
+      // Ship has lifted off when:
+      // - Phase changes from prelaunch, OR
+      // - Altitude exceeds 100m
+      if (progress.phase !== 'prelaunch' || progress.altitude > 100) {
+        console.log(`[Ascent] Liftoff confirmed! ALT: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
+        return {
+          success: true,
+          finalOrbit: { apoapsis: progress.apoapsis, periapsis: progress.periapsis },
+          aborted: false
+        };
+      }
+
+      await delay(pollIntervalMs);
+    }
+
+    // Timeout
+    console.log('[Ascent] Liftoff timeout - ship did not leave the pad');
+    return {
+      success: false,
+      finalOrbit: { apoapsis: 0, periapsis: 0 },
+      aborted: false
+    };
+  }
+
+  /**
    * Abort the ascent
    */
   async abort(): Promise<void> {

@@ -21,6 +21,8 @@ import { interplanetaryTransfer } from './transfer/interplanetary.js';
 export interface ManeuverOptions {
   /** Target name (body or vessel) to set before planning. If omitted, uses current target. */
   target?: string;
+  /** Target type: 'auto' tries body then vessel, 'body' for celestial bodies, 'vessel' for ships. Defaults to 'auto'. */
+  targetType?: 'auto' | 'body' | 'vessel';
   /** Whether to execute the node after planning. Defaults to true. */
   execute?: boolean;
 }
@@ -40,6 +42,7 @@ export interface OrchestratedResult extends ManeuverResult {
  *
  * @param conn - kOS connection
  * @param target - Optional target name to set before planning
+ * @param targetType - How to interpret target: 'auto' (try body then vessel), 'body', or 'vessel'
  * @param execute - Whether to execute the node after planning (default: true)
  * @param planFn - The function that creates the maneuver node
  * @returns Combined result from planning and optional execution
@@ -47,6 +50,7 @@ export interface OrchestratedResult extends ManeuverResult {
 export async function withTargetAndExecute(
   conn: KosConnection,
   target: string | undefined,
+  targetType: 'auto' | 'body' | 'vessel',
   execute: boolean,
   planFn: () => Promise<ManeuverResult>
 ): Promise<OrchestratedResult> {
@@ -54,7 +58,7 @@ export async function withTargetAndExecute(
   // Handle target setting if provided
   if (target !== undefined) {
     const maneuver = new ManeuverProgram(conn);
-    const targetResult = await maneuver.setTarget(target, 'auto');
+    const targetResult = await maneuver.setTarget(target, targetType);
     if (!targetResult.success) {
       return {
         success: false,
@@ -120,8 +124,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.circularize(timeRef)
     );
   }
@@ -134,8 +138,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.adjustPeriapsis(altitude, timeRef)
     );
   }
@@ -148,8 +152,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'PERIAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.adjustApoapsis(altitude, timeRef)
     );
   }
@@ -162,8 +166,8 @@ export class ManeuverOrchestrator {
     capture: boolean = false,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.hohmannTransfer(timeRef, capture)
     );
   }
@@ -175,8 +179,8 @@ export class ManeuverOrchestrator {
     finalPeA: number,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.courseCorrection(finalPeA)
     );
   }
@@ -189,8 +193,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'EQ_NEAREST_AD',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.changeInclination(newInclination, timeRef)
     );
   }
@@ -204,8 +208,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.ellipticize(peA, apA, timeRef)
     );
   }
@@ -218,8 +222,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.changeLAN(newLAN, timeRef)
     );
   }
@@ -232,8 +236,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.changeLongitude(newLong, timeRef)
     );
   }
@@ -247,8 +251,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.resonantOrbit(numerator, denominator, timeRef)
     );
   }
@@ -260,8 +264,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'CLOSEST_APPROACH',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.killRelVel(timeRef)
     );
   }
@@ -274,8 +278,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       changeSemiMajorAxis(this.conn, semiMajorAxis, timeRef)
     );
   }
@@ -288,8 +292,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       changeEccentricity(this.conn, eccentricity, timeRef)
     );
   }
@@ -301,8 +305,8 @@ export class ManeuverOrchestrator {
     timeRef: string = 'REL_NEAREST_AD',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       matchPlane(this.conn, timeRef)
     );
   }
@@ -314,8 +318,8 @@ export class ManeuverOrchestrator {
     targetPeriapsis: number,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       returnFromMoon(this.conn, targetPeriapsis)
     );
   }
@@ -327,8 +331,8 @@ export class ManeuverOrchestrator {
     waitForPhaseAngle: boolean = true,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, execute, () =>
+    const { target, targetType = 'auto', execute = true } = options ?? {};
+    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       interplanetaryTransfer(this.conn, waitForPhaseAngle)
     );
   }

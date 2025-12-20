@@ -4,8 +4,8 @@
  * Tests that MechJeb can create a course correction node during
  * an interplanetary/interlunar transfer.
  *
- * NOTE: This test requires the vessel to already be on an intercept
- * trajectory with a target body (e.g., after a Hohmann transfer).
+ * Uses test-in-transit-to-mun save where vessel is already on
+ * an intercept trajectory with Mun.
  */
 
 import { ensureKspReady, getManeuverProgram, clearNodes, SAVES, TIMEOUTS } from '../helpers/test-setup.js';
@@ -13,28 +13,51 @@ import type { OrchestratedResult } from 'ksp-mcp/mechjeb';
 
 describe('COURSECORRECTION', () => {
   beforeAll(async () => {
-    await ensureKspReady(SAVES.ORBIT);
+    // Use transit save - vessel already on intercept trajectory to Mun
+    await ensureKspReady(SAVES.TRANSIT_MUN);
   }, TIMEOUTS.KSP_STARTUP);
 
-  describe('after Hohmann transfer to Mun', () => {
-    let transferResult: OrchestratedResult;
+  describe('fine-tune Mun approach', () => {
     let correctionResult: OrchestratedResult;
 
     beforeAll(async () => {
       await clearNodes();
       const maneuver = await getManeuverProgram();
-      transferResult = await maneuver.hohmannTransfer('COMPUTED', false, { target: 'Mun', execute: false });
+      // Target should already be Mun from the save, but set it explicitly
+      await maneuver.setTarget('Mun');
       correctionResult = await maneuver.courseCorrection(50000, { execute: false });
-    }, TIMEOUTS.BURN_EXECUTION);
-
-    it('creates transfer node', () => {
-      expect(transferResult.success).toBe(true);
-    });
+    }, TIMEOUTS.MANEUVER_OPERATION);
 
     it('creates course correction node', () => {
-      // Course correction may fail if the transfer node is unexecuted,
-      // so we only verify the API returns a result
-      expect(correctionResult).toBeDefined();
+      expect(correctionResult.success).toBe(true);
+      expect(correctionResult.deltaV).toBeDefined();
+    });
+
+    it('has reasonable delta-v for mid-course correction', () => {
+      // Mid-course corrections are typically small (<100 m/s)
+      expect(correctionResult.deltaV).toBeGreaterThan(0);
+      expect(correctionResult.deltaV).toBeLessThan(500);
+    });
+  });
+
+  describe('adjust to different periapsis', () => {
+    let lowResult: OrchestratedResult;
+    let highResult: OrchestratedResult;
+
+    beforeAll(async () => {
+      await clearNodes();
+      const maneuver = await getManeuverProgram();
+      lowResult = await maneuver.courseCorrection(20000, { execute: false });
+      await clearNodes();
+      highResult = await maneuver.courseCorrection(100000, { execute: false });
+    }, TIMEOUTS.MANEUVER_OPERATION);
+
+    it('creates node for low periapsis', () => {
+      expect(lowResult.success).toBe(true);
+    });
+
+    it('creates node for high periapsis', () => {
+      expect(highResult.success).toBe(true);
     });
   });
 });
