@@ -24,7 +24,7 @@ import { clearNodes } from '../lib/kos/nodes.js';
 import { getShipTelemetry, formatTargetEncounterInfo, getOrbitInfo, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
 import { queryTargetEncounterInfo } from '../lib/mechjeb/shared.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
-import { executeNode, getNodeProgress } from '../lib/mechjeb/execute-node.js';
+import { executeNode } from '../lib/mechjeb/execute-node.js';
 import { warpTo, warpForward, WarpTarget } from '../lib/kos/warp.js';
 import { crashAvoidance } from '../lib/kos/crash-avoidance.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
@@ -91,7 +91,7 @@ const targetSchema = z.string()
 export function createServer(): McpServer {
   const server = new McpServer({
     name: 'ksp-mcp',
-    version: '0.1.0',
+    version: '0.3.0',
   });
 
   // Register connection tools
@@ -1006,38 +1006,6 @@ export function createServer(): McpServer {
           `Ecc: ${info.eccentricity.toFixed(4)}, LAN: ${info.lan.toFixed(1)}°`);
       } catch (error) {
         return errorResponse('orbit_info', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.registerTool(
-    'node_progress',
-    {
-      description: 'Get current maneuver node execution progress (nodes remaining, ETA, throttle, executing status).',
-      inputSchema: {},
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-      _meta: { tier: 2 },
-    },
-    async () => {
-      try {
-        const conn = await ensureConnected();
-        const progress = await getNodeProgress(conn);
-
-        if (progress.nodesRemaining === 0) {
-          return successResponse('node_progress', 'No maneuver nodes.');
-        }
-
-        const execStatus = progress.executing ? 'Burning' : 'Waiting';
-        return successResponse('node_progress',
-          `${execStatus}: ${progress.nodesRemaining} node(s), ` +
-          `T-${progress.etaToNode.toFixed(0)}s, Throttle: ${(progress.throttle * 100).toFixed(0)}%`);
-      } catch (error) {
-        return errorResponse('node_progress', error instanceof Error ? error.message : String(error));
       }
     }
   );

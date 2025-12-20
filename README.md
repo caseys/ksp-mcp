@@ -180,40 +180,39 @@ All maneuver commands support `--no-execute` to plan only (create node without e
 
 ```bash
 # Ascent
-npm run ascent              # Launch to orbit with MechJeb
+npm run launch-ascent              # Launch to orbit with MechJeb
 
 # Basic orbital maneuvers (auto-execute by default)
 npm run circularize                    # Circularize at apoapsis
 npm run circularize PERIAPSIS          # Circularize at periapsis
 npm run circularize -- --no-execute    # Plan only
-npm run change-periapsis    # Adjust periapsis
-npm run change-apoapsis     # Adjust apoapsis
+npm run adjust-periapsis    # Adjust periapsis
+npm run adjust-apoapsis     # Adjust apoapsis
 npm run ellipticize         # Set both Pe and Ap
-npm run semimajor           # Change semi-major axis
+npm run change-semi-major-axis    # Change semi-major axis
 
 # Orbital adjustments
 npm run change-inclination 0                       # Change to 0° inclination
 npm run change-inclination 0 EQ_NEAREST_AD         # Specify timing
 npm run change-inclination 0 -- --no-execute       # Plan only
-npm run eccentricity        # Change eccentricity
-npm run lan                 # Change longitude of ascending node
-npm run longitude           # Change longitude of periapsis
+npm run change-eccentricity        # Change eccentricity
+npm run change-ascending-node      # Change longitude of ascending node
+npm run change-periapsis-longitude # Change longitude of periapsis
 
 # Transfers
-npm run hohmann                        # Transfer to Mun (default)
-npm run hohmann Minmus                 # Transfer to Minmus
-npm run hohmann Mun -- --capture       # Include capture burn
-npm run hohmann -- --no-execute        # Plan only
-npm run course-correction   # Fine-tune approach
-npm run interplanetary      # Interplanetary transfer
+npm run hohmann-transfer                   # Transfer to Mun (default)
+npm run hohmann-transfer Minmus            # Transfer to Minmus
+npm run hohmann-transfer Mun -- --capture  # Include capture burn
+npm run hohmann-transfer -- --no-execute   # Plan only
+npm run course-correct      # Fine-tune approach
+npm run interplanetary-transfer    # Interplanetary transfer
 npm run return-from-moon    # Return from moon
 npm run resonant-orbit      # Resonant orbit for satellite deployment
 
 # Rendezvous
 npm run set-target          # Set navigation target
-npm run match-plane         # Match orbital plane
+npm run match-planes        # Match orbital plane
 npm run match-velocities    # Match velocities at closest approach
-npm run kill-rel-vel        # Zero relative velocity
 
 # Node execution
 npm run execute-node        # Execute next maneuver node
@@ -238,10 +237,11 @@ npm run kos                 # Execute kOS command via daemon
 
 - **status** - Get connection status
 - **disconnect** - Disconnect from kOS
-- **execute** - Execute raw kOS commands
+- **command** - Execute raw kOS commands
 - **list_cpus** - List available kOS CPUs
-- **set_cpu** - Set CPU preference for session (by ID or label), or clear to auto-select
+- **switch_cpu** - Set CPU preference for session (by ID or label), or clear to auto-select
 - **telemetry** - Get ship orbit/status info
+- **orbit_info** - Get quick orbital parameters
 
 ### Targeting
 
@@ -261,18 +261,18 @@ npm run kos                 # Execute kOS command via daemon
 
 ### Basic Maneuvers
 
-- **adjust_pe** - Change periapsis altitude
-- **adjust_ap** - Change apoapsis altitude
+- **adjust_periapsis** - Change periapsis altitude
+- **adjust_apoapsis** - Change apoapsis altitude
 - **circularize** - Circularize orbit
 - **ellipticize** - Set both periapsis and apoapsis
-- **change_sma** - Change semi-major axis
+- **change_semi_major_axis** - Change semi-major axis
 
 ### Orbital Adjustments
 
-- **change_inc** - Change orbital inclination
-- **change_ecc** - Change orbital eccentricity
-- **change_lan** - Change longitude of ascending node
-- **change_lpe** - Change longitude of periapsis
+- **change_inclination** - Change orbital inclination
+- **change_eccentricity** - Change orbital eccentricity
+- **change_ascending_node** - Change longitude of ascending node
+- **change_periapsis_longitude** - Change longitude of periapsis
 
 ### Rendezvous
 
@@ -281,19 +281,24 @@ npm run kos                 # Execute kOS command via daemon
 
 ### Transfers
 
-- **hohmann** - Plan Hohmann transfer to target
+- **hohmann_transfer** - Plan Hohmann transfer to target
 - **course_correct** - Fine-tune closest approach
 - **resonant_orbit** - Create resonant orbit
 - **return_from_moon** - Return from moon to parent body
-- **interplanetary** - Plan interplanetary transfer
+- **interplanetary_transfer** - Plan interplanetary transfer
 
 ### Node Execution
 
 - **execute_node** - Execute next maneuver node
+- **clear_nodes** - Remove all maneuver nodes
 
 ### Ascent
 
-- **launch** - Launch to orbit
+- **launch_ascent** - Launch to orbit
+
+### Emergency
+
+- **crash_avoidance** - Emergency burn to raise periapsis
 
 ## Example Mission Flow
 
@@ -394,47 +399,36 @@ KOS_CPU_ID=0
 
 ```
 src/
-├── index.ts                    # CLI entry point (MCP server + transport options)
-├── lib.ts                      # Public API barrel exports
-├── server.ts                   # MCP tool definitions
-├── config.ts                   # Configuration with dotenv support
-├── transport/
-│   ├── kos-connection.ts       # kOS telnet connection
-│   ├── transport.ts            # Base transport interface
-│   ├── socket-transport.ts     # Socket transport layer (default)
-│   └── tmux-transport.ts       # Tmux transport layer
-├── mechjeb/
-│   ├── index.ts                # MechJeb exports
-│   ├── mechjeb-client.ts       # MechJeb client
-│   ├── discovery.ts            # Module discovery
-│   ├── telemetry.ts            # Vessel/orbit telemetry
-│   └── programs/
-│       ├── orchestrator.ts     # High-level API with target/execute handling
-│       ├── maneuver.ts         # Low-level maneuver planning
-│       ├── ascent.ts           # Ascent guidance
-│       ├── warp.ts             # Time warp control
-│       ├── basic/              # Basic orbital maneuvers
-│       ├── orbital/            # Orbital parameter changes
-│       ├── rendezvous/         # Rendezvous operations
-│       ├── transfer/           # Transfer operations
-│       └── node/               # Node execution
-├── kuniverse/                  # Save/load functionality
-├── daemon/                     # Background kOS connection daemon
-├── monitoring/                 # Connection monitoring
-├── tools/
-│   ├── connection-tools.ts     # Connection tool handlers
-│   └── list-cpus.ts            # CPU listing tool
-├── cli/                        # CLI commands
-│   ├── ascent/                 # Launch commands
-│   ├── basic/                  # Basic maneuver commands
-│   ├── orbital/                # Orbital adjustment commands
-│   ├── rendezvous/             # Rendezvous commands
-│   ├── transfer/               # Transfer commands
-│   ├── node/                   # Node execution commands
-│   ├── warp/                   # Time warp commands
-│   └── save/                   # Save/load commands
-└── scripts/
-    └── check-setup.ts          # Setup verification
+├── cli/                        # CLI command entry points
+│   ├── mechjeb/                # MechJeb maneuver commands
+│   │   ├── ascent/             # Launch commands
+│   │   ├── basic/              # Basic maneuvers (circularize, etc.)
+│   │   ├── orbital/            # Orbital adjustments
+│   │   ├── rendezvous/         # Rendezvous operations
+│   │   └── transfer/           # Transfer maneuvers
+│   ├── kos/                    # kOS utility commands
+│   └── daemon-cli.ts           # Daemon control
+├── lib/                        # Core library (public API)
+│   ├── index.ts                # Public exports
+│   ├── types.ts                # Type definitions
+│   ├── mechjeb/                # MechJeb operations
+│   │   ├── orchestrator.ts     # High-level API with target/execute
+│   │   ├── ascent.ts           # Ascent guidance
+│   │   ├── telemetry.ts        # Vessel/orbit info
+│   │   ├── basic/              # Basic maneuvers
+│   │   ├── orbital/            # Orbital adjustments
+│   │   ├── rendezvous/         # Rendezvous operations
+│   │   └── transfer/           # Transfer maneuvers
+│   └── kos/                    # kOS utilities (warp, nodes, etc.)
+├── service/                    # Server implementations
+│   ├── http-server.ts          # MCP server (stdio + HTTP)
+│   └── cli-daemon.ts           # Background connection daemon
+├── transport/                  # kOS connection layer
+│   ├── kos-connection.ts       # Main connection class
+│   ├── socket-transport.ts     # TCP socket transport
+│   └── tmux-transport.ts       # Tmux transport (fallback)
+├── config/                     # Configuration
+└── utils/                      # Utility functions
 ```
 
 

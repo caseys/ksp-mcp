@@ -48,8 +48,8 @@ export const config = Object.freeze({
 
   // KSP installation paths
   ksp: {
-    /** KSP installation directory */
-    path: process.env.KSP_PATH ?? '/Volumes/Flatty/SteamLibrary/steamapps/common/Kerbal Space Program',
+    /** KSP installation directory - MUST be set via KSP_PATH environment variable */
+    path: process.env.KSP_PATH ?? '',
     /** Scripts folder relative to KSP path (kOS Archive volume) */
     scriptsFolder: process.env.KSP_SCRIPTS_FOLDER ?? 'Ships/Script',
   },
