@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
- * Change orbital inclination
- * Usage: npm run change-inclination <target_degrees> [timeRef] [--no-execute]
+ * Change periapsis altitude
+ * Usage: npm run adjust-periapsis <altitude_km> [timeRef] [--no-execute]
  */
 
 import * as daemon from '../../daemon/index.js';
@@ -9,22 +9,23 @@ import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js'
 import type { OrbitInfo } from '../../mechjeb/types.js';
 
 async function main() {
-  // Parse arguments
   const args = process.argv.slice(2);
   const noExecute = args.includes('--no-execute');
   const positionalArgs = args.filter(a => !a.startsWith('--'));
 
-  const newInclination = positionalArgs[0] ? parseFloat(positionalArgs[0]) : null;
-  const timeRef = (positionalArgs[1]?.toUpperCase() || 'EQ_NEAREST_AD');
+  const altitudeKm = positionalArgs[0] ? parseFloat(positionalArgs[0]) : null;
+  const timeRef = (positionalArgs[1]?.toUpperCase() || 'APOAPSIS');
 
-  if (newInclination === null) {
-    console.error('Usage: npm run change-inclination <degrees> [timeRef] [--no-execute]');
-    console.error('Example: npm run change-inclination 0 EQ_NEAREST_AD');
+  if (altitudeKm === null) {
+    console.error('Usage: npm run adjust-periapsis <altitude_km> [APOAPSIS|PERIAPSIS] [--no-execute]');
+    console.error('Example: npm run adjust-periapsis 80 APOAPSIS');
     process.exit(1);
   }
 
-  console.log(`=== Change Inclination ===\n`);
-  console.log(`Target inclination: ${newInclination}°`);
+  const altitude = altitudeKm * 1000;
+
+  console.log(`=== Change Periapsis ===\n`);
+  console.log(`Target periapsis: ${altitudeKm} km`);
   console.log(`Execution point: ${timeRef}`);
   console.log(`Execute: ${noExecute ? 'NO (plan only)' : 'YES'}\n`);
 
@@ -32,28 +33,27 @@ async function main() {
     // Check current orbit
     console.log('1. Current orbit...');
     const orbit = await daemon.call<OrbitInfo>('orbitInfo');
-    console.log(`   Inclination: ${orbit.inclination.toFixed(2)}°`);
     console.log(`   Periapsis: ${(orbit.periapsis / 1000).toFixed(1)} km`);
     console.log(`   Apoapsis: ${(orbit.apoapsis / 1000).toFixed(1)} km\n`);
 
-    // Create and optionally execute inclination change
-    console.log(`2. ${noExecute ? 'Planning' : 'Executing'} inclination change...`);
-    const result = await daemon.call<OrchestratedResult>('changeInclination', {
-      newInclination,
+    // Create and optionally execute periapsis change
+    console.log(`2. ${noExecute ? 'Creating' : 'Executing'} CHANGEPE node...`);
+    const result = await daemon.call<OrchestratedResult>('adjustPeriapsis', {
+      altitude,
       timeRef,
       execute: !noExecute,
     });
 
     if (!result.success) {
-      console.log('   Failed');
-      console.log(`   ${result.error || 'Operation error'}`);
+      console.log('   Failed to create node');
+      console.log(`   ${result.error || 'Note: Cannot raise Pe above current Ap (orbital mechanics)'}`);
       return;
     }
 
     console.log(`   ΔV: ${result.deltaV?.toFixed(1) || '?'} m/s\n`);
 
     if (result.executed) {
-      console.log(`✅ Inclination changed to ${newInclination}°!`);
+      console.log('✅ Periapsis change complete!');
     } else {
       console.log('✅ Node created! Use "npm run execute-node" to execute.');
     }

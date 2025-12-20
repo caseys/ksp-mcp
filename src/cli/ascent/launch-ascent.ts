@@ -10,8 +10,14 @@
  * 4. Monitors progress until orbit is achieved
  */
 
-import { KosConnection } from '../../transport/kos-connection.js';
-import { AscentProgram } from '../../mechjeb/programs/ascent.js';
+import * as daemon from '../../daemon/index.js';
+import type { AscentResult } from '../../mechjeb/types.js';
+
+interface ExecuteResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+}
 
 async function main() {
   const TARGET_ALTITUDE = 100000;  // 100km
@@ -19,43 +25,30 @@ async function main() {
 
   console.log('=== MechJeb Ascent to 100km Orbit ===\n');
 
-  const conn = new KosConnection();
-
   try {
-    // Connect to kOS
-    console.log('1. Connecting to kOS...');
-    const state = await conn.connect();
-    console.log(`   Connected to: ${state.vesselName}\n`);
-
     // Check current status
-    console.log('2. Checking vessel status...');
-    const result = await conn.execute('PRINT SHIP:STATUS.');
-    const status = result.output.toLowerCase();
+    console.log('1. Checking vessel status...');
+    const result = await daemon.call<ExecuteResult>('execute', {
+      command: 'PRINT SHIP:STATUS.',
+    });
+    const status = result.output?.toLowerCase() || '';
 
     if (!status.includes('prelaunch') && !status.includes('landed')) {
       throw new Error('Ship must be on launchpad (PRELAUNCH or LANDED status)');
     }
     console.log('   Ship is on the launchpad. Preparing for ascent...\n');
 
-    // Create ascent program using library
-    console.log('3. Initializing MechJeb...');
-    const ascent = new AscentProgram(conn);
-
     // Launch to orbit using library
     // This handles MechJeb initialization, configuration, and launch
-    console.log(`4. Launching to ${TARGET_ALTITUDE / 1000}km orbit...\n`);
-    const handle = await ascent.launchToOrbit({
+    console.log(`2. Launching to ${TARGET_ALTITUDE / 1000}km orbit...`);
+    console.log('   (MechJeb is in control - this may take several minutes)\n');
+
+    const ascentResult = await daemon.call<AscentResult>('launchAscent', {
       altitude: TARGET_ALTITUDE,
       inclination: TARGET_INCLINATION,
       autoStage: true,
-      autoWarp: true
+      autoWarp: true,
     });
-
-    // Monitor progress until orbit is achieved
-    console.log('5. Monitoring ascent (MechJeb is in control)...');
-    console.log('   (Press Ctrl+C to stop monitoring)\n');
-
-    const ascentResult = await handle.waitForCompletion();
 
     if (ascentResult.success) {
       console.log('\n=== ORBIT ACHIEVED! ===');
@@ -73,13 +66,10 @@ async function main() {
     console.error('\nError:', error instanceof Error ? error.message : String(error));
     // Try to safe the vessel
     try {
-      await conn.execute('UNLOCK THROTTLE.');
-      await conn.execute('SAS ON.');
+      await daemon.call('execute', { command: 'UNLOCK THROTTLE.' });
+      await daemon.call('execute', { command: 'SAS ON.' });
     } catch { /* ignore */ }
     process.exit(1);
-  } finally {
-    await conn.disconnect();
-    console.log('Disconnected from kOS.');
   }
 }
 

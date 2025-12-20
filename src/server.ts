@@ -24,7 +24,8 @@ import {
   TRANSPORT_OPTIONS,
 } from './mcp-resources.js';
 import { ManeuverProgram } from './mechjeb/programs/maneuver.js';
-import { AscentProgram, AscentHandle } from './mechjeb/programs/ascent.js';
+import { AscentProgram, AscentHandle, getAscentProgress, abortAscent } from './mechjeb/programs/ascent.js';
+import { clearNodes } from './mechjeb/programs/nodes.js';
 import { getShipTelemetry, formatTargetEncounterInfo, type ShipTelemetryOptions } from './mechjeb/telemetry.js';
 import { queryTargetEncounterInfo } from './mechjeb/programs/shared.js';
 import { withTargetAndExecute } from './mechjeb/programs/orchestrator.js';
@@ -171,91 +172,10 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected();
 
-        // Use current handle if available, otherwise create temporary one
-        let progress;
-        if (currentAscentHandle) {
-          progress = await currentAscentHandle.getProgress();
-        } else {
-          const parseNum = (s: string) => {
-            const m = s.match(/-?[\d.]+(?:E[+-]?\d+)?/i);
-            return m ? parseFloat(m[0]) : 0;
-          };
-          const normalizeLines = (text: string) =>
-            text
-              .split('\n')
-              .map(line => line.trim())
-              .filter(line => line.length > 0);
-          const lastLine = (text: string) => {
-            const lines = normalizeLines(text);
-            return lines.length > 0 ? lines[lines.length - 1] : '';
-          };
-
-          const parseCombined = (output: string) => {
-            const combinedMatch = output.match(/ASC\|([^|]+)\|([^|]+)\|([^|]+)\|(True|False)\|([\s\S]+)/i);
-            if (!combinedMatch) {
-              return null;
-            }
-            return {
-              altitude: parseNum(combinedMatch[1]),
-              apoapsis: parseNum(combinedMatch[2]),
-              periapsis: parseNum(combinedMatch[3]),
-              enabled: combinedMatch[4].toLowerCase() === 'true',
-              shipStatus: combinedMatch[5].trim()
-            };
-          };
-
-          const combinedResult = await conn.execute(
-            'PRINT "ASC|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ADDONS:MJ:ASCENT:ENABLED + "|" + SHIP:STATUS.'
-          );
-
-          let telemetry = parseCombined(combinedResult.output);
-
-          if (!telemetry) {
-            // Fallback to sequential queries if combined output could not be parsed
-            const altResult = await conn.execute('PRINT ALTITUDE.');
-            const apoResult = await conn.execute('PRINT APOAPSIS.');
-            const perResult = await conn.execute('PRINT PERIAPSIS.');
-            const enabledResult = await conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.');
-            const statusResult = await conn.execute('PRINT SHIP:STATUS.');
-
-            telemetry = {
-              altitude: parseNum(altResult.output),
-              apoapsis: parseNum(apoResult.output),
-              periapsis: parseNum(perResult.output),
-              enabled: /^true$/i.test(lastLine(enabledResult.output)),
-              shipStatus: lastLine(statusResult.output)
-            };
-          }
-
-          const { altitude, apoapsis, periapsis, enabled, shipStatus } = telemetry;
-
-          // Determine phase
-          let phase: 'prelaunch' | 'launching' | 'gravity_turn' | 'coasting' | 'circularizing' | 'complete' | 'unknown';
-          if (shipStatus.toLowerCase().includes('prelaunch') ||
-              shipStatus.toLowerCase().includes('landed')) {
-            phase = 'prelaunch';
-          } else if (periapsis > 70000) {
-            phase = 'complete';
-          } else if (altitude > 70000) {
-            phase = 'coasting';
-          } else if (altitude > 1000) {
-            phase = 'gravity_turn';
-          } else {
-            phase = 'launching';
-          }
-
-          progress = { altitude, apoapsis, periapsis, enabled, shipStatus, phase };
-        }
-
-        const phaseDescriptions: Record<string, string> = {
-          prelaunch: 'On launchpad',
-          launching: 'Initial launch',
-          gravity_turn: 'Gravity turn in progress',
-          coasting: 'Coasting to apoapsis',
-          circularizing: 'Circularization burn',
-          complete: 'In orbit!',
-          unknown: 'Unknown phase',
-        };
+        // Use current handle if available, otherwise use standalone function
+        const progress = currentAscentHandle
+          ? await currentAscentHandle.getProgress()
+          : await getAscentProgress(conn);
 
         return successResponse('ascent_status',
           `${progress.phase}: Alt ${Math.round(progress.altitude / 1000)}km, Ap ${Math.round(progress.apoapsis / 1000)}km, Pe ${Math.round(progress.periapsis / 1000)}km`);
@@ -286,7 +206,7 @@ export function createServer(): McpServer {
           await currentAscentHandle.abort();
           currentAscentHandle = null;
         } else {
-          await conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
+          await abortAscent(conn);
         }
 
         return successResponse('abort_ascent', 'Ascent guidance disabled.');
@@ -1243,11 +1163,13 @@ export function createServer(): McpServer {
     async () => {
       try {
         const conn = await ensureConnected();
-        await conn.execute(
-          'SET _N TO ALLNODES:LENGTH. UNTIL NOT HASNODE { REMOVE NEXTNODE. } PRINT "Cleared " + _N + " node(s)".',
-          5000
-        );
-        return successResponse('clear_nodes', 'Maneuver nodes cleared!');
+        const result = await clearNodes(conn);
+
+        if (result.success) {
+          return successResponse('clear_nodes', `Cleared ${result.nodesCleared} node(s)`);
+        } else {
+          return errorResponse('clear_nodes', result.error ?? 'Failed to clear nodes');
+        }
       } catch (error) {
         return errorResponse('clear_nodes', error instanceof Error ? error.message : String(error));
       }

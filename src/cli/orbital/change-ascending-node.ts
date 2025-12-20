@@ -3,9 +3,9 @@
  * Change longitude of ascending node (LAN)
  */
 
-import { KosConnection } from '../../transport/kos-connection.js';
-import { changeLAN } from '../../mechjeb/programs/orbital/index.js';
-import { getOrbitInfo } from '../../mechjeb/telemetry.js';
+import * as daemon from '../../daemon/index.js';
+import type { ManeuverResult } from '../../mechjeb/programs/maneuver.js';
+import type { OrbitInfo } from '../../mechjeb/types.js';
 
 async function main() {
   // Parse command line arguments
@@ -22,18 +22,10 @@ async function main() {
 
   console.log(`=== Change Longitude of Ascending Node to ${targetLanDegrees}° at ${timeRef} ===\n`);
 
-  const conn = new KosConnection({
-    cpuLabel: 'guidance',
-  });
-
   try {
-    console.log('1. Connecting to kOS...');
-    await conn.connect();
-    console.log('   Connected!\n');
-
     // Check current orbit using library
-    console.log('2. Current orbit...');
-    const orbit = await getOrbitInfo(conn);
+    console.log('1. Current orbit...');
+    const orbit = await daemon.call<OrbitInfo>('orbitInfo');
     console.log(`   Inclination: ${orbit.inclination.toFixed(2)}°`);
     console.log(`   LAN: ${orbit.lan.toFixed(2)}°`);
     console.log(`   Periapsis: ${(orbit.periapsis / 1000).toFixed(1)} km`);
@@ -45,8 +37,11 @@ async function main() {
     }
 
     // Create LAN node using library
-    console.log(`3. Creating LAN node (${timeRef.toLowerCase()})...`);
-    const result = await changeLAN(conn, targetLanDegrees, timeRef);
+    console.log(`2. Creating LAN node (${timeRef.toLowerCase()})...`);
+    const result = await daemon.call<ManeuverResult>('changeAscendingNode', {
+      lan: targetLanDegrees,
+      timeRef,
+    });
 
     if (!result.success) {
       console.log('   Failed to create LAN node');
@@ -57,7 +52,7 @@ async function main() {
     console.log('   Node created!\n');
 
     // Show node details from result
-    console.log('4. Node info...');
+    console.log('3. Node info...');
     console.log(`   ΔV: ${result.deltaV?.toFixed(1) || '?'} m/s in ${result.timeToNode?.toFixed(0) || '?'} seconds\n`);
 
     console.log('✅ Node created! Use "npm run execute-node" to execute.');
@@ -67,9 +62,6 @@ async function main() {
 
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : String(error));
-  } finally {
-    await conn.disconnect();
-    console.log('\nDisconnected.\n');
   }
 }
 

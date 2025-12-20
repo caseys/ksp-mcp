@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 /**
- * Time warp CLI - thin wrapper around warp library
+ * Time warp CLI - thin wrapper around daemon handlers
  * Usage:
  *   npm run warp node [leadTime]   - Warp to next maneuver node (default 60s before)
  *   npm run warp soi [leadTime]    - Warp to next SOI change
@@ -9,8 +9,8 @@
  *   npm run warp <seconds>         - Warp forward by N seconds
  */
 
-import { KosConnection } from '../transport/kos-connection.js';
-import { warpTo, warpForward, WarpTarget } from '../mechjeb/programs/warp.js';
+import * as daemon from '../daemon/index.js';
+import type { WarpResult, WarpTarget } from '../mechjeb/programs/warp.js';
 
 async function main() {
   const target = process.argv[2] || 'node';
@@ -18,18 +18,12 @@ async function main() {
 
   console.log('=== Time Warp ===\n');
 
-  const conn = new KosConnection({ cpuLabel: 'guidance' });
-
   try {
-    console.log('1. Connecting to kOS...');
-    await conn.connect();
-    console.log('   Connected!\n');
-
     // Check if target is a number (warp forward by seconds)
     const seconds = parseFloat(target);
     if (!isNaN(seconds)) {
-      console.log(`2. Warping forward ${seconds} seconds...`);
-      const result = await warpForward(conn, seconds);
+      console.log(`1. Warping forward ${seconds} seconds...`);
+      const result = await daemon.call<WarpResult>('warpForward', { seconds });
       if (result.success) {
         console.log(`\n✅ Warped forward ${seconds}s`);
         console.log(`   Body: ${result.body}, Alt: ${(result.altitude || 0) / 1000} km\n`);
@@ -51,8 +45,11 @@ async function main() {
       return;
     }
 
-    console.log(`2. Warping to ${normalizedTarget} (${param}s lead time)...`);
-    const result = await warpTo(conn, normalizedTarget, { leadTime: param });
+    console.log(`1. Warping to ${normalizedTarget} (${param}s lead time)...`);
+    const result = await daemon.call<WarpResult>('warpTo', {
+      target: normalizedTarget,
+      leadTime: param,
+    });
 
     if (result.success) {
       console.log(`\n✅ Warped to ${normalizedTarget}`);
@@ -64,9 +61,6 @@ async function main() {
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : String(error));
     process.exit(1);
-  } finally {
-    await conn.disconnect();
-    console.log('Disconnected.\n');
   }
 }
 

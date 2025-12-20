@@ -433,3 +433,62 @@ export class AscentProgram {
     return new AscentHandle(this.conn, handleId, altitude);
   }
 }
+
+// =============================================================================
+// Standalone Functions (for CLI and MCP without active AscentHandle)
+// =============================================================================
+
+/**
+ * Get current ascent progress without needing an AscentHandle.
+ * Useful for status checks when there's no active ascent operation.
+ *
+ * @param conn kOS connection
+ * @returns Current ascent progress
+ */
+export async function getAscentProgress(conn: KosConnection): Promise<AscentProgress> {
+  const result = await conn.execute(
+    'PRINT "PROG|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ADDONS:MJ:ASCENT:ENABLED + "|" + SHIP:STATUS.',
+    3000
+  );
+
+  const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|(.+?)(?:\s*>|$)/i);
+
+  const altitude = match ? parseFloat(match[1]) : 0;
+  const apoapsis = match ? parseFloat(match[2]) : 0;
+  const periapsis = match ? parseFloat(match[3]) : 0;
+  const enabled = match ? match[4].toLowerCase() === 'true' : false;
+  const shipStatus = match ? match[5].toLowerCase().trim() : 'unknown';
+
+  // Determine phase
+  let phase: AscentProgress['phase'];
+  if (shipStatus.includes('prelaunch') || shipStatus.includes('landed')) {
+    phase = 'prelaunch';
+  } else if (periapsis > 70000) {
+    phase = 'complete';
+  } else if (altitude > 70000) {
+    phase = 'coasting';
+  } else if (altitude > 1000) {
+    phase = 'gravity_turn';
+  } else {
+    phase = 'launching';
+  }
+
+  return {
+    phase,
+    altitude,
+    apoapsis,
+    periapsis,
+    enabled,
+    shipStatus: match ? match[5].trim() : 'Unknown'
+  };
+}
+
+/**
+ * Abort ascent guidance.
+ * Disables MechJeb ascent autopilot.
+ *
+ * @param conn kOS connection
+ */
+export async function abortAscent(conn: KosConnection): Promise<void> {
+  await conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
+}

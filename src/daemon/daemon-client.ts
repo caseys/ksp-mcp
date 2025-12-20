@@ -16,11 +16,13 @@ const SPAWN_RETRY_DELAY_MS = 200;
 const MAX_SPAWN_RETRIES = 15; // 3 seconds total
 
 export interface DaemonRequest {
-  type: 'execute' | 'connect' | 'disconnect' | 'status' | 'shutdown' | 'ping';
+  type: 'execute' | 'connect' | 'disconnect' | 'status' | 'shutdown' | 'ping' | 'call';
   command?: string;
   timeout?: number;
   cpuId?: number;
   cpuLabel?: string;
+  handler?: string;
+  args?: Record<string, unknown>;
 }
 
 export interface DaemonResponse {
@@ -31,6 +33,7 @@ export interface DaemonResponse {
   vessel?: string;
   cpuId?: number;
   cpuTag?: string;
+  data?: unknown;
 }
 
 /**
@@ -241,4 +244,31 @@ export async function shutdown(): Promise<DaemonResponse> {
  */
 export async function ping(): Promise<DaemonResponse> {
   return sendRequest({ type: 'ping' });
+}
+
+/**
+ * Call a handler via daemon
+ *
+ * Generic dispatch for all operations. The daemon auto-connects if needed.
+ *
+ * @param handler - Handler name (e.g., 'execute', 'telemetry')
+ * @param args - Handler arguments
+ * @returns Handler result
+ * @throws Error if handler fails
+ */
+export async function call<T = unknown>(
+  handler: string,
+  args?: Record<string, unknown>
+): Promise<T> {
+  const response = await sendRequest({
+    type: 'call',
+    handler,
+    args,
+  });
+
+  if (!response.success) {
+    throw new Error(response.error || 'Handler call failed');
+  }
+
+  return response.data as T;
 }

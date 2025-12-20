@@ -1,15 +1,15 @@
 #!/usr/bin/env node
 /**
  * Execute Hohmann transfer to target
- * Usage: npm run hohmann [target] [--capture] [--no-execute]
+ * Usage: npm run hohmann-transfer [target] [--capture] [--no-execute]
  *   target: Target body name (default: Mun)
  *   --capture: Include capture burn
  *   --no-execute: Plan only, don't execute
  */
 
-import { KosConnection } from '../../transport/kos-connection.js';
-import { ManeuverOrchestrator } from '../../mechjeb/programs/orchestrator.js';
-import { getOrbitInfo } from '../../mechjeb/telemetry.js';
+import * as daemon from '../../daemon/index.js';
+import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js';
+import type { OrbitInfo } from '../../mechjeb/types.js';
 
 async function main() {
   // Parse arguments
@@ -23,24 +23,18 @@ async function main() {
   console.log(`Capture burn: ${capture ? 'YES' : 'NO (transfer only)'}`);
   console.log(`Execute: ${noExecute ? 'NO (plan only)' : 'YES'}\n`);
 
-  const conn = new KosConnection({ cpuLabel: 'guidance' });
-
   try {
-    console.log('1. Connecting to kOS...');
-    await conn.connect();
-    console.log('   Connected!\n');
-
     // Check current orbit
-    console.log('2. Current orbit...');
-    const orbit = await getOrbitInfo(conn);
+    console.log('1. Current orbit...');
+    const orbit = await daemon.call<OrbitInfo>('orbitInfo');
     console.log(`   Periapsis: ${(orbit.periapsis / 1000).toFixed(1)} km`);
     console.log(`   Apoapsis: ${(orbit.apoapsis / 1000).toFixed(1)} km\n`);
 
     // Execute Hohmann transfer with target setting and optional execution
-    console.log(`3. ${noExecute ? 'Planning' : 'Executing'} Hohmann transfer to ${targetName}...`);
-    const orchestrator = new ManeuverOrchestrator(conn);
-    const result = await orchestrator.hohmannTransfer('COMPUTED', capture, {
+    console.log(`2. ${noExecute ? 'Planning' : 'Executing'} Hohmann transfer to ${targetName}...`);
+    const result = await daemon.call<OrchestratedResult>('hohmannTransfer', {
       target: targetName,
+      capture,
       execute: !noExecute,
     });
 
@@ -60,9 +54,6 @@ async function main() {
 
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : String(error));
-  } finally {
-    await conn.disconnect();
-    console.log('Disconnected.\n');
   }
 }
 

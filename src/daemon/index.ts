@@ -21,6 +21,7 @@ export {
   status,
   shutdown,
   ping,
+  call,
   isDaemonRunning,
   sendRequest,
   type DaemonRequest,

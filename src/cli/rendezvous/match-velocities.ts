@@ -1,85 +1,103 @@
 #!/usr/bin/env node
 /**
- * Match velocities with target vessel
- * This command creates the node AND auto-executes it
+ * Match velocities with target (kill relative velocity)
+ * Usage: npm run match-velocities [target] [timeRef] [--no-execute]
+ * Examples:
+ *   npm run match-velocities                           # Uses current target, auto-executes
+ *   npm run match-velocities MUN                       # Targets Mun, auto-executes
+ *   npm run match-velocities "Vessel Name"             # Targets specific vessel
+ *   npm run match-velocities MUN CLOSEST_APPROACH      # Explicit timeRef
+ *   npm run match-velocities -- --no-execute           # Create node only, don't execute
  */
 
-import { KosConnection } from '../../transport/kos-connection.js';
-import { ManeuverProgram } from '../../mechjeb/programs/maneuver.js';
-import { killRelativeVelocity } from '../../mechjeb/programs/rendezvous/index.js';
-import { executeNode } from '../../mechjeb/programs/node/index.js';
+import * as daemon from '../../daemon/index.js';
+import type { OrchestratedResult } from '../../mechjeb/programs/orchestrator.js';
+import type { SetTargetResult, GetTargetInfo } from '../../mechjeb/programs/maneuver.js';
+
+interface ExecuteResult {
+  success: boolean;
+  output?: string;
+  error?: string;
+}
 
 async function main() {
-  console.log('=== Match Velocities with Target ===\n');
+  // Parse args (skip --no-execute for positional parsing)
+  const args = process.argv.slice(2).filter(a => a !== '--no-execute');
+  const targetName = args[0];
+  const timeRef = (args[1]?.toUpperCase() || 'CLOSEST_APPROACH') as
+    'CLOSEST_APPROACH' | 'X_FROM_NOW';
+  const shouldExecute = !process.argv.includes('--no-execute');
 
-  const conn = new KosConnection({
-    cpuLabel: 'guidance',
-  });
+  console.log(`=== Match Velocities with Target ===\n`);
+  if (targetName) console.log(`Target: ${targetName}`);
+  console.log(`Execution point: ${timeRef}`);
+  console.log(`Auto-execute: ${shouldExecute}\n`);
 
   try {
-    console.log('1. Connecting to kOS...');
-    await conn.connect();
-    console.log('   Connected!\n');
+    // Set or verify target
+    console.log('1. Setting/verifying target...');
 
-    // Verify target is set
-    console.log('2. Verifying target...');
-    const maneuver = new ManeuverProgram(conn);
-    const target = await maneuver.getTarget();
-    if (!target) {
-      console.log('   No target set! Use "npm run set-target" first.');
-      return;
+    if (targetName) {
+      const targetResult = await daemon.call<SetTargetResult>('setTarget', {
+        name: targetName,
+        type: 'auto',
+      });
+      if (!targetResult.success) {
+        console.log(`   ERROR: ${targetResult.error ?? 'Failed to set target'}`);
+        return;
+      }
+      console.log(`   Target set to: ${targetResult.name} (${targetResult.type})\n`);
+    } else {
+      const targetInfo = await daemon.call<GetTargetInfo>('getTarget');
+      if (!targetInfo.hasTarget) {
+        console.log('   No target set! Provide target name or use "npm run set-target" first.');
+        return;
+      }
+      console.log(`   Using current target: ${targetInfo.name}\n`);
     }
-    console.log(`   Target: ${target}\n`);
 
     // Check relative velocity
-    console.log('3. Current relative velocity...');
-    const relVelResult = await conn.execute(
-      'SET RELVEL TO TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT. ' +
-      'PRINT "Relative velocity: " + ROUND(RELVEL:MAG, 1) + " m/s".'
-    );
-    console.log(`   ${relVelResult.output.trim()}\n`);
+    console.log('2. Current relative velocity...');
+    const relVelResult = await daemon.call<ExecuteResult>('execute', {
+      command:
+        'SET RELVEL TO TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT. ' +
+        'PRINT "Relative velocity: " + ROUND(RELVEL:MAG, 1) + " m/s".',
+    });
+    console.log(`   ${relVelResult.output?.trim() || 'Unknown'}\n`);
 
-    // Create match velocities node using library
-    console.log('4. Creating match velocities node (at closest approach)...');
-    const nodeResult = await killRelativeVelocity(conn, 'CLOSEST_APPROACH');
+    // Create match velocities node using orchestrator
+    console.log(`3. ${shouldExecute ? 'Executing' : 'Creating'} match velocities maneuver (at ${timeRef.toLowerCase().replace('_', ' ')})...`);
+    const result = await daemon.call<OrchestratedResult>('matchVelocities', {
+      timeRef,
+      execute: shouldExecute,
+    });
 
-    if (!nodeResult.success) {
+    if (!result.success) {
       console.log('   Failed to create match velocities node');
-      console.log(`   ${nodeResult.error || 'Operation error'}`);
+      console.log(`   ${result.error || 'Operation error'}`);
       return;
     }
 
-    console.log('   Node created!\n');
-
     // Show node details
-    console.log('5. Match velocities node info...');
-    console.log(`   ΔV: ${nodeResult.deltaV?.toFixed(1) || '?'} m/s in ${nodeResult.timeToNode?.toFixed(0) || '?'} seconds\n`);
+    console.log(`   ΔV: ${result.deltaV?.toFixed(1) || '?'} m/s\n`);
 
-    // Execute node using library
-    console.log('6. Executing node with MechJeb...');
-    console.log('   (Monitoring execution...)\n');
-
-    const execResult = await executeNode(conn, { timeoutMs: 240000, pollIntervalMs: 5000 });
-
-    if (execResult.success) {
+    if (result.executed) {
       console.log('✅ Match velocities executed!\n');
-    } else {
-      console.log(`   Execution issue: ${execResult.error || 'Unknown error'}\n`);
-    }
 
-    // Final verification
-    console.log('7. Final relative velocity...');
-    const finalRelVel = await conn.execute(
-      'SET RELVEL TO TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT. ' +
-      'PRINT "Relative velocity: " + ROUND(RELVEL:MAG, 1) + " m/s".'
-    );
-    console.log(`   ${finalRelVel.output.trim()}\n`);
+      // Final verification
+      console.log('4. Final relative velocity...');
+      const finalRelVel = await daemon.call<ExecuteResult>('execute', {
+        command:
+          'SET RELVEL TO TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT. ' +
+          'PRINT "Relative velocity: " + ROUND(RELVEL:MAG, 1) + " m/s".',
+      });
+      console.log(`   ${finalRelVel.output?.trim() || 'Unknown'}\n`);
+    } else {
+      console.log('✅ Node created! Use "npm run execute-node" to execute.\n');
+    }
 
   } catch (error) {
     console.error('Error:', error instanceof Error ? error.message : String(error));
-  } finally {
-    await conn.disconnect();
-    console.log('Disconnected.\n');
   }
 }
 

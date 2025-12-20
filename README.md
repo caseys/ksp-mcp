@@ -542,6 +542,84 @@ npm run kos "PRINT WARP."
 npm run kos "PRINT SHIP:ORBIT:HASNEXTPATCH."
 ```
 
+## Contributing: Adding a New Tool
+
+This project maintains parity between MCP tools and CLI scripts. Both interfaces are thin wrappers around shared library functions.
+
+### Architecture
+
+```
+┌─────────────────────────────────────────────────────┐
+│  CLI (stdio)          │  MCP Server (stdio/http)   │
+│  - Parse args         │  - Parse JSON-RPC          │
+│  - Format output      │  - Format responses        │
+└───────────┬───────────┴───────────┬─────────────────┘
+            │                       │
+            ▼                       ▼
+┌─────────────────────────────────────────────────────┐
+│              Shared Libraries                        │
+│  - KosConnection      - ManeuverProgram             │
+│  - AscentProgram      - executeNode()               │
+│  - getShipTelemetry() - clearNodes()                │
+└─────────────────────────────────────────────────────┘
+```
+
+### Steps to Add a New Tool
+
+1. **Implement the library function** in `src/mechjeb/programs/` (or appropriate location)
+   ```typescript
+   // src/mechjeb/programs/example.ts
+   export async function myOperation(conn: KosConnection, param: number): Promise<OperationResult> {
+     // Implementation using conn.execute()
+   }
+   ```
+
+2. **Add the MCP tool** in `src/server.ts`
+   ```typescript
+   server.registerTool(
+     'my_operation',  // Use snake_case for MCP tools
+     {
+       description: 'Does something useful',
+       inputSchema: { param: z.number() },
+     },
+     async (args) => {
+       const result = await myOperation(conn, args.param);
+       return result.success ? successResponse(...) : errorResponse(...);
+     }
+   );
+   ```
+
+3. **Add the CLI script** in `src/cli/` (use kebab-case matching the MCP name)
+   ```typescript
+   // src/cli/my-operation.ts
+   import { KosConnection } from '../transport/kos-connection.js';
+   import { myOperation } from '../mechjeb/programs/example.js';
+
+   async function main() {
+     const conn = new KosConnection({ cpuLabel: 'guidance' });
+     await conn.connect();
+     const result = await myOperation(conn, parseInt(process.argv[2]));
+     console.log(result.success ? '✅ Done' : `❌ ${result.error}`);
+     await conn.disconnect();
+   }
+   main().catch(console.error);
+   ```
+
+4. **Add npm script** to `package.json`
+   ```json
+   "my-operation": "tsx src/cli/my-operation.ts"
+   ```
+
+5. **Verify parity** with `npm run check:parity`
+
+### Naming Convention
+
+| MCP Tool (snake_case) | CLI Script (kebab-case) |
+|----------------------|------------------------|
+| `launch_ascent`      | `launch-ascent`        |
+| `hohmann_transfer`   | `hohmann-transfer`     |
+| `match_velocities`   | `match-velocities`     |
+
 ## License
 
 MIT
