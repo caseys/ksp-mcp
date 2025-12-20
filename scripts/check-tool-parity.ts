@@ -19,9 +19,9 @@ const EXCLUDED_TOOLS = new Set([
   // None currently - all tools should have CLI equivalents
 ]);
 
-// Read and parse server.ts to extract MCP tool names
+// Read and parse http-server.ts to extract MCP tool names
 function getMcpTools(): string[] {
-  const serverPath = join(projectRoot, 'src/server.ts');
+  const serverPath = join(projectRoot, 'src/service/http-server.ts');
   const content = readFileSync(serverPath, 'utf-8');
 
   // Match server.registerTool( followed by 'tool_name' on next line
