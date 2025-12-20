@@ -23,21 +23,21 @@ import * as fs from 'node:fs';
 import { KosConnection } from '../transport/kos-connection.js';
 import { config } from '../config/index.js';
 import { SOCKET_PATH, PID_PATH, isWindows } from './daemon-paths.js';
-import { clearNodes } from '../lib/programs/nodes.js';
-import { getShipTelemetry } from '../lib/telemetry.js';
-import { ManeuverOrchestrator } from '../lib/programs/orchestrator.js';
-import { getOrbitInfo } from '../lib/telemetry.js';
-import { ManeuverProgram } from '../lib/programs/maneuver.js';
-import { executeNode, getNodeProgress } from '../lib/programs/node/index.js';
-import { warpTo, warpForward, type WarpTarget } from '../lib/programs/warp.js';
-import { quicksave, listQuicksaves, quickload } from '../lib/kuniverse.js';
-import { matchPlane } from '../lib/programs/rendezvous/index.js';
-import { changeSemiMajorAxis } from '../lib/programs/basic/index.js';
-import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from '../lib/programs/orbital/index.js';
-import { returnFromMoon, interplanetaryTransfer } from '../lib/programs/transfer/index.js';
-import { crashAvoidance } from '../lib/programs/manual/index.js';
-import { runScript } from '../lib/script/index.js';
-import { getAscentProgress, abortAscent, AscentProgram } from '../lib/programs/ascent.js';
+import { clearNodes } from '../lib/kos/nodes.js';
+import { getShipTelemetry } from '../lib/mechjeb/telemetry.js';
+import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
+import { getOrbitInfo } from '../lib/mechjeb/telemetry.js';
+import { ManeuverProgram } from '../lib/mechjeb/maneuver.js';
+import { executeNode, getNodeProgress } from '../lib/mechjeb/execute-node.js';
+import { warpTo, warpForward, type WarpTarget } from '../lib/kos/warp.js';
+import { quicksave, listQuicksaves, quickload } from '../lib/kos/kuniverse.js';
+import { matchPlane } from '../lib/mechjeb/rendezvous/index.js';
+import { changeSemiMajorAxis } from '../lib/mechjeb/basic/index.js';
+import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from '../lib/mechjeb/orbital/index.js';
+import { returnFromMoon, interplanetaryTransfer } from '../lib/mechjeb/transfer/index.js';
+import { crashAvoidance } from '../lib/kos/crash-avoidance.js';
+import { runScript } from '../lib/kos/run-script.js';
+import { getAscentProgress, abortAscent, AscentProgram } from '../lib/mechjeb/ascent.js';
 const IDLE_TIMEOUT_MS = 30_000; // 30 seconds
 
 interface DaemonRequest {

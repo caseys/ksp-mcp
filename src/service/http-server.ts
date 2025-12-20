@@ -19,17 +19,17 @@ import {
   CPU_MENU_FORMAT,
   TRANSPORT_OPTIONS,
 } from '../config/mcp-resources.js';
-import { AscentProgram, AscentHandle, getAscentProgress, abortAscent } from '../lib/programs/ascent.js';
-import { clearNodes } from '../lib/programs/nodes.js';
-import { getShipTelemetry, formatTargetEncounterInfo, getOrbitInfo, type ShipTelemetryOptions } from '../lib/telemetry.js';
-import { queryTargetEncounterInfo } from '../lib/programs/shared.js';
-import { ManeuverOrchestrator } from '../lib/programs/orchestrator.js';
-import { executeNode, getNodeProgress } from '../lib/programs/node/index.js';
-import { warpTo, warpForward, WarpTarget } from '../lib/programs/warp.js';
-import { crashAvoidance } from '../lib/programs/manual/index.js';
+import { AscentProgram, AscentHandle, getAscentProgress, abortAscent } from '../lib/mechjeb/ascent.js';
+import { clearNodes } from '../lib/kos/nodes.js';
+import { getShipTelemetry, formatTargetEncounterInfo, getOrbitInfo, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
+import { queryTargetEncounterInfo } from '../lib/mechjeb/shared.js';
+import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
+import { executeNode, getNodeProgress } from '../lib/mechjeb/execute-node.js';
+import { warpTo, warpForward, WarpTarget } from '../lib/kos/warp.js';
+import { crashAvoidance } from '../lib/kos/crash-avoidance.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
-import { listQuicksaves, quicksave, quickload } from '../lib/kuniverse.js';
-import { runScript } from '../lib/script/index.js';
+import { listQuicksaves, quicksave, quickload } from '../lib/kos/kuniverse.js';
+import { runScript } from '../lib/kos/run-script.js';
 
 // Track current ascent handle for status/abort
 let currentAscentHandle: AscentHandle | null = null;

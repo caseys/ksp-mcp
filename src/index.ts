@@ -70,19 +70,6 @@ export type { EnsureConnectedOptions, WaitForKosOptions } from './transport/conn
 export { KosMonitor, globalKosMonitor } from './utils/kos-monitor.js';
 export type { MonitorStatus, LoopDetection } from './utils/kos-monitor.js';
 
-// KUNIVERSE (Save/Load, Game State)
-export {
-  listQuicksaves,
-  quicksave,
-  quickload,
-  canQuicksave,
-} from './lib/kuniverse.js';
-export type {
-  QuicksaveResult,
-  QuickloadResult,
-  ListSavesResult,
-} from './lib/kuniverse.js';
-
 // Workarounds Configuration
 export {
   setWorkaroundsEnabled,

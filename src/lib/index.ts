@@ -1,18 +1,24 @@
 /**
- * MechJeb Interface for kOS.MechJeb2.Addon
+ * ksp-mcp Library
+ *
+ * Re-exports from mechjeb/ (MechJeb programs) and kos/ (pure kOS programs)
  */
 
+// =============================================================================
+// MechJeb Programs (require kOS.MechJeb2.Addon)
+// =============================================================================
+
 // Main client
-export { MechJebClient } from './mechjeb-client.js';
+export { MechJebClient } from './mechjeb/index.js';
 
 // Programs
-export { AscentProgram, AscentHandle } from './programs/ascent.js';
-export { ManeuverProgram } from './programs/maneuver.js';
-export type { ManeuverResult, SetTargetResult, GetTargetInfo, ClearTargetResult } from './programs/maneuver.js';
+export { AscentProgram, AscentHandle } from './mechjeb/ascent.js';
+export { ManeuverProgram } from './mechjeb/maneuver.js';
+export type { ManeuverResult, SetTargetResult, GetTargetInfo, ClearTargetResult } from './mechjeb/maneuver.js';
 
 // Orchestrator - high-level API with target/execute handling
-export { ManeuverOrchestrator, withTargetAndExecute } from './programs/orchestrator.js';
-export type { ManeuverOptions, OrchestratedResult } from './programs/orchestrator.js';
+export { ManeuverOrchestrator, withTargetAndExecute } from './mechjeb/orchestrator.js';
+export type { ManeuverOptions, OrchestratedResult } from './mechjeb/orchestrator.js';
 
 // Node execution
 export {
@@ -20,26 +26,48 @@ export {
   getNodeProgress,
   isNodeExecutorEnabled,
   disableNodeExecutor
-} from './programs/node/index.js';
-export type { ExecuteNodeResult, ExecuteNodeProgress } from './programs/node/index.js';
+} from './mechjeb/execute-node.js';
+export type { ExecuteNodeResult, ExecuteNodeProgress } from './mechjeb/execute-node.js';
 
 // Maneuver operations - Basic
-export { ellipticize, changeSemiMajorAxis } from './programs/basic/index.js';
+export { ellipticize, changeSemiMajorAxis } from './mechjeb/basic/index.js';
 
 // Maneuver operations - Orbital
-export { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from './programs/orbital/index.js';
+export { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from './mechjeb/orbital/index.js';
 
 // Maneuver operations - Rendezvous
-export { matchPlane, killRelativeVelocity } from './programs/rendezvous/index.js';
+export { matchPlane, killRelativeVelocity } from './mechjeb/rendezvous/index.js';
 
 // Maneuver operations - Transfer
-export { resonantOrbit, returnFromMoon, interplanetaryTransfer } from './programs/transfer/index.js';
+export { resonantOrbit, returnFromMoon, interplanetaryTransfer } from './mechjeb/transfer/index.js';
 
-// Manual control operations
-export { crashAvoidance } from './programs/manual/index.js';
-export type { CrashAvoidanceResult, CrashAvoidanceOptions } from './programs/manual/index.js';
+// Discovery (for advanced use)
+export {
+  discoverModules,
+  isMechJebAvailable,
+  discoverAscentSuffixes,
+  discoverVesselSuffixes,
+  discoverInfoSuffixes
+} from './mechjeb/discovery.js';
 
-// Types
+// Telemetry (for advanced use)
+export {
+  getVesselState,
+  getOrbitInfo,
+  getMechJebInfo,
+  getQuickStatus
+} from './mechjeb/telemetry.js';
+
+// =============================================================================
+// Pure kOS Programs (no MechJeb dependency)
+// =============================================================================
+
+export * from './kos/index.js';
+
+// =============================================================================
+// Shared Types
+// =============================================================================
+
 export type {
   MechJebModules,
   VesselState,
@@ -51,20 +79,3 @@ export type {
   AscentResult,
   LaunchOptions
 } from './types.js';
-
-// Discovery (for advanced use)
-export {
-  discoverModules,
-  isMechJebAvailable,
-  discoverAscentSuffixes,
-  discoverVesselSuffixes,
-  discoverInfoSuffixes
-} from './discovery.js';
-
-// Telemetry (for advanced use)
-export {
-  getVesselState,
-  getOrbitInfo,
-  getMechJebInfo,
-  getQuickStatus
-} from './telemetry.js';
