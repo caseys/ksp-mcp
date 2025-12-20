@@ -294,8 +294,6 @@ npm run kos                 # Execute kOS command via daemon
 ### Ascent
 
 - **launch** - Launch to orbit
-- **ascent_status** - Get ascent progress
-- **abort_ascent** - Abort ascent
 
 ## Example Mission Flow
 

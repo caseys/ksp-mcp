@@ -37,7 +37,7 @@ import { changeEccentricity, changeLAN, changeLongitudeOfPeriapsis } from '../li
 import { returnFromMoon, interplanetaryTransfer } from '../lib/mechjeb/transfer/index.js';
 import { crashAvoidance } from '../lib/kos/crash-avoidance.js';
 import { runScript } from '../lib/kos/run-script.js';
-import { getAscentProgress, abortAscent, AscentProgram } from '../lib/mechjeb/ascent.js';
+import { AscentProgram } from '../lib/mechjeb/ascent.js';
 const IDLE_TIMEOUT_MS = 30_000; // 30 seconds
 
 interface DaemonRequest {
@@ -615,17 +615,6 @@ class KosDaemon {
         const cleanup = (args.cleanup as boolean) ?? true;
         if (!sourcePath) throw new Error('sourcePath required');
         return runScript(conn, sourcePath, { timeout, cleanup });
-      },
-
-      // Get ascent progress
-      getAscentProgress: async (conn) => {
-        return getAscentProgress(conn);
-      },
-
-      // Abort ascent guidance
-      abortAscent: async (conn) => {
-        await abortAscent(conn);
-        return { success: true };
       },
 
       // Launch to orbit (blocking - waits for completion)

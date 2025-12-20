@@ -19,7 +19,7 @@ import {
   CPU_MENU_FORMAT,
   TRANSPORT_OPTIONS,
 } from '../config/mcp-resources.js';
-import { AscentProgram, AscentHandle, getAscentProgress, abortAscent } from '../lib/mechjeb/ascent.js';
+import { AscentProgram, AscentHandle } from '../lib/mechjeb/ascent.js';
 import { clearNodes } from '../lib/kos/nodes.js';
 import { getShipTelemetry, formatTargetEncounterInfo, getOrbitInfo, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
 import { queryTargetEncounterInfo } from '../lib/mechjeb/shared.js';
@@ -100,7 +100,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'launch_ascent',
     {
-      description: 'Launch to orbit. Blocks until orbit achieved or aborted (up to 15 min). Use launch_ascent_abort to cancel.',
+      description: 'Launch to orbit. Blocks until orbit achieved or aborted (up to 15 min).',
       inputSchema: {
         altitude: z.number().describe('Target orbit altitude in meters (e.g., 100000 for 100km)'),
         inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees'),
@@ -135,67 +135,6 @@ export function createServer(): McpServer {
             `In orbit: Ap ${Math.round(result.finalOrbit.apoapsis / 1000)}km, Pe ${Math.round(result.finalOrbit.periapsis / 1000)}km`) : errorResponse('launch_ascent', result.aborted ? 'Ascent aborted' : 'Ascent failed');
       } catch (error) {
         return errorResponse('launch_ascent', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.registerTool(
-    'launch_ascent_status',
-    {
-      description: 'Get launch progress (only valid during ascent from launchpad).',
-      inputSchema: {},
-      annotations: {
-        readOnlyHint: true,
-        destructiveHint: false,
-        idempotentHint: true,
-        openWorldHint: false,
-      },
-      _meta: { tier: 2 },
-    },
-    async () => {
-      try {
-        const conn = await ensureConnected();
-
-        // Use current handle if available, otherwise use standalone function
-        const progress = currentAscentHandle
-          ? await currentAscentHandle.getProgress()
-          : await getAscentProgress(conn);
-
-        return successResponse('ascent_status',
-          `${progress.phase}: Alt ${Math.round(progress.altitude / 1000)}km, Ap ${Math.round(progress.apoapsis / 1000)}km, Pe ${Math.round(progress.periapsis / 1000)}km`);
-      } catch (error) {
-        return errorResponse('ascent_status', error instanceof Error ? error.message : String(error));
-      }
-    }
-  );
-
-  server.registerTool(
-    'launch_ascent_abort',
-    {
-      description: 'Abort launch ascent guidance.',
-      inputSchema: {},
-      annotations: {
-        readOnlyHint: false,
-        destructiveHint: true,
-        idempotentHint: false,
-        openWorldHint: false,
-      },
-      _meta: { tier: 2 },
-    },
-    async () => {
-      try {
-        const conn = await ensureConnected();
-
-        if (currentAscentHandle) {
-          await currentAscentHandle.abort();
-          currentAscentHandle = null;
-        } else {
-          await abortAscent(conn);
-        }
-
-        return successResponse('abort_ascent', 'Ascent guidance disabled.');
-      } catch (error) {
-        return errorResponse('abort_ascent', error instanceof Error ? error.message : String(error));
       }
     }
   );
