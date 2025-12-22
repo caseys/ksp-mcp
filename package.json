@@ -93,8 +93,6 @@
     "execute-node": "tsx src/cli/mechjeb/execute-node.ts",
     "change-periapsis-longitude": "tsx src/cli/mechjeb/orbital/change-periapsis-longitude.ts",
     "change-ascending-node": "tsx src/cli/mechjeb/orbital/change-ascending-node.ts",
-    "telemetry": "tsx src/cli/mechjeb/telemetry.ts",
-    "orbit-info": "tsx src/cli/mechjeb/orbit-info.ts",
     "get-target": "tsx src/cli/mechjeb/get-target.ts",
     "clear-target": "tsx src/cli/mechjeb/clear-target.ts",
     "daemon": "tsx src/cli/daemon-cli.ts",

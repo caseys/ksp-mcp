@@ -26,7 +26,6 @@ import { SOCKET_PATH, PID_PATH, isWindows } from './daemon-paths.js';
 import { clearNodes } from '../lib/kos/nodes.js';
 import { getShipTelemetry } from '../lib/mechjeb/telemetry.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
-import { getOrbitInfo } from '../lib/mechjeb/telemetry.js';
 import { ManeuverProgram } from '../lib/mechjeb/maneuver.js';
 import { executeNode, getNodeProgress } from '../lib/mechjeb/execute-node.js';
 import { warpTo, warpForward, type WarpTarget } from '../lib/kos/warp.js';
@@ -370,8 +369,8 @@ class KosDaemon {
         return conn.execute(command, timeout);
       },
 
-      // Ship telemetry
-      telemetry: async (conn, args) => {
+      // Ship status (telemetry, orbit info, nodes, encounters)
+      status: async (conn, args) => {
         const options = args.options as Record<string, boolean> | undefined;
         return getShipTelemetry(conn, options);
       },
@@ -379,11 +378,6 @@ class KosDaemon {
       // Clear maneuver nodes
       clearNodes: async (conn) => {
         return clearNodes(conn);
-      },
-
-      // Get orbit info
-      orbitInfo: async (conn) => {
-        return getOrbitInfo(conn);
       },
 
       // Circularize orbit
@@ -466,6 +460,12 @@ class KosDaemon {
       getTarget: async (conn) => {
         const maneuver = new ManeuverProgram(conn);
         return maneuver.getTargetInfo();
+      },
+
+      // List all targets (bodies and vessels)
+      listTargets: async (conn) => {
+        const maneuver = new ManeuverProgram(conn);
+        return maneuver.listTargets();
       },
 
       // Set target

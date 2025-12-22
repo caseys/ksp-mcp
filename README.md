@@ -6,6 +6,17 @@
 
 STATUS: EARLY DEV
 
+
+## Prologue
+
+Long before the first brave Kerbal dared to ask “what does this button do?”, the engineers back on Kerbin reached a hard limit: thinking is heavy.
+
+Deep-space vessels simply can’t carry the mass, power draw, or cooling systems required to run advanced LLMs onboard. The solution isn't more batteries or bigger radiators -- it's cloud hosting on KWS, Koogle, and Kzure!
+
+ksp-mcp will allow spacecraft to utilizie and be utilized by LLMs hosted on Kerbin.
+
+## Purpose Beyond 4th Wall
+
 MCP (Model Context Protocol) server for Kerbal Space Program automation via kOS and MechJeb2.
 
 Enables LLMs to directly control KSP spacecraft through kOS scripting and MechJeb autopilot features.

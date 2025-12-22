@@ -11,5 +11,6 @@
   "ignore": [
     "src/tests/**",
     "src/repl.ts"
-  ]
+  ],
+  "ignoreExportsUsedInFile": true
 }

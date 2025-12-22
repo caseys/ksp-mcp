@@ -359,9 +359,23 @@ export class ManeuverOrchestrator {
   }
 
   /**
+   * List all targetable bodies and vessels sorted by distance.
+   */
+  async listTargets() {
+    return this.maneuver.listTargets();
+  }
+
+  /**
    * Check if target is set.
    */
   async hasTarget() {
     return this.maneuver.hasTarget();
+  }
+
+  /**
+   * Get the name of the body the ship is currently orbiting (SOI body)
+   */
+  async getSOIBody() {
+    return this.maneuver.getSOIBody();
   }
 }

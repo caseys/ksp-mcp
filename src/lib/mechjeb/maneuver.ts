@@ -14,6 +14,15 @@ import {
 import { bringKspToForeground } from '../../utils/bring-to-foreground.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 
+/**
+ * Format distance for display: m for <10km, km for <10Mm, Mm for larger
+ */
+function formatDistance(d: number): string {
+  if (d < 10_000) return `${d} m`;
+  if (d < 10_000_000) return `${(d / 1000).toFixed(1)} km`;
+  return `${(d / 1_000_000).toFixed(2)} Mm`;
+}
+
 // Re-export for external use
 export type { ManeuverResult } from './shared.js';
 
@@ -53,6 +62,18 @@ export interface ClearTargetResult {
   cleared: boolean;
   /** Warning message if target may not have been cleared */
   warning?: string;
+}
+
+/**
+ * Result from listTargets operation.
+ */
+export interface ListTargetsResult {
+  /** All celestial bodies sorted by distance */
+  bodies: Array<{ name: string; distance: number }>;
+  /** All vessels in current SOI sorted by distance */
+  vessels: Array<{ name: string; distance: number }>;
+  /** Formatted output string */
+  formatted: string;
 }
 
 /**
@@ -193,29 +214,21 @@ export class ManeuverProgram {
     const result = await this.conn.execute(atomicCmd, 5000);
     const output = result.output?.trim() ?? '';
 
-    // Check for success FIRST (command echo contains "TARGET_FAILED" text, so can't check that first)
+    // Only success case: explicit TARGET_OK marker
     const okMatch = output.match(/TARGET_OK\|([^|]+)\|(\w+)/);
     if (okMatch) {
       const [, targetName, targetType] = okMatch;
       return { success: true, name: targetName, type: targetType };
     }
 
-    // Check for explicit failure (only in actual output, not command echo)
-    // The actual TARGET_FAILED output appears at the end, after the command echo
-    if (output.endsWith('TARGET_FAILED') || /TARGET_FAILED[^"]*$/.test(output)) {
-      return {
-        success: false,
-        error: `Target "${name}" not found or not loaded.`
-      };
-    }
-
-    // Fallback: command ran but unclear result - check for errors
-    if (output.toLowerCase().includes('error')) {
-      return { success: false, error: output };
-    }
-
-    // No clear marker but no error - assume success (fallback)
-    return { success: true, name, type };
+    // Everything else is failure - provide helpful error message
+    const typeHint = type === 'body'
+      ? 'Valid bodies: Mun, Minmus, Duna, Eve, Jool, Eeloo, Moho, Dres, Kerbin.'
+      : 'Check vessel name spelling and ensure it is loaded.';
+    return {
+      success: false,
+      error: `Target "${name}" not found. ${typeHint}`
+    };
   }
 
   /**
@@ -259,6 +272,16 @@ export class ManeuverProgram {
     const output = result.output.trim().toLowerCase();
     // kOS returns "True" or "False" - check for true anywhere in output
     return output.includes('true');
+  }
+
+  /**
+   * Get the name of the body the ship is currently orbiting (SOI body)
+   */
+  async getSOIBody(): Promise<string> {
+    const result = await this.conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+    // Extract body name from output (may have kOS prompt chars)
+    const match = result.output.match(/([A-Za-z]+)/);
+    return match ? match[1] : result.output.trim();
   }
 
   /**
@@ -382,6 +405,72 @@ export class ManeuverProgram {
       type,
       distance: distanceKm ? Number.parseFloat(distanceKm) * 1000 : undefined,
       details: detailLines.join('\n')
+    };
+  }
+
+  /**
+   * List all targetable bodies and vessels sorted by distance.
+   *
+   * Returns all celestial bodies in the solar system and all vessels
+   * in the current SOI, both sorted by distance from ship.
+   */
+  async listTargets(): Promise<ListTargetsResult> {
+    // Single atomic kOS command that lists bodies and vessels with distances
+    // Uses markers for reliable parsing
+    const cmd = [
+      'LIST BODIES IN bods.',
+      'LIST TARGETS IN tgts.',
+      'FOR b IN bods { PRINT "BODY|" + b:NAME + "|" + ROUND(VDISTANCE(b:POSITION, SHIP:POSITION)). }',
+      'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|" + ROUND(VDISTANCE(t:POSITION, SHIP:POSITION)). } }',
+      'PRINT "LIST_DONE".',
+    ].join(' ');
+
+    const result = await this.conn.execute(cmd, 10_000);
+    const output = result.output;
+
+    // Parse bodies
+    const bodies: Array<{ name: string; distance: number }> = [];
+    const bodyRegex = /BODY\|([^|]+)\|(\d+)/g;
+    let match: RegExpExecArray | null;
+    while ((match = bodyRegex.exec(output)) !== null) {
+      bodies.push({ name: match[1], distance: Number.parseInt(match[2]) });
+    }
+
+    // Parse vessels
+    const vessels: Array<{ name: string; distance: number }> = [];
+    const vesselRegex = /VESSEL\|([^|]+)\|(\d+)/g;
+    while ((match = vesselRegex.exec(output)) !== null) {
+      vessels.push({ name: match[1], distance: Number.parseInt(match[2]) });
+    }
+
+    // Sort by distance (nearest first)
+    bodies.sort((a, b) => a.distance - b.distance);
+    vessels.sort((a, b) => a.distance - b.distance);
+
+    // Format output (cap at 15 each)
+    const MAX_DISPLAY = 15;
+    const lines: string[] = ['=== Bodies (by distance) ==='];
+    for (const b of bodies.slice(0, MAX_DISPLAY)) {
+      lines.push(`${b.name}: ${formatDistance(b.distance)}`);
+    }
+    if (bodies.length > MAX_DISPLAY) {
+      lines.push(`... and ${bodies.length - MAX_DISPLAY} more`);
+    }
+
+    if (vessels.length > 0) {
+      lines.push('', '=== Vessels in SOI (by distance) ===');
+      for (const v of vessels.slice(0, MAX_DISPLAY)) {
+        lines.push(`${v.name}: ${formatDistance(v.distance)}`);
+      }
+      if (vessels.length > MAX_DISPLAY) {
+        lines.push(`... and ${vessels.length - MAX_DISPLAY} more`);
+      }
+    }
+
+    return {
+      bodies,
+      vessels,
+      formatted: lines.join('\n'),
     };
   }
 

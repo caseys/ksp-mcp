@@ -239,13 +239,13 @@ export async function getShipTelemetry(
   const { timeoutMs = 2500 } = options;
   const lines: string[] = [];
 
-  // Query 1: Combined base + node check + post-node encounter check
+  // Query 1: Combined base + orbital params + node check + encounter check
   // This single query gets everything we need to know what additional data to fetch
   const baseResult = await conn.execute(
     'IF HASNODE { ' +
-      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ROUND(APOAPSIS) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + NEXTNODE:DELTAV:MAG + "${SEP}" + NEXTNODE:ETA + "${SEP}" + NEXTNODE:ORBIT:HASNEXTPATCH. ` +
+      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ROUND(APOAPSIS) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + ROUND(ORBIT:PERIOD) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + NEXTNODE:DELTAV:MAG + "${SEP}" + NEXTNODE:ETA + "${SEP}" + NEXTNODE:ORBIT:HASNEXTPATCH. ` +
     '} ELSE { ' +
-      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ROUND(APOAPSIS) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}0${SEP}0${SEP}" + ORBIT:HASNEXTPATCH. ` +
+      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ROUND(APOAPSIS) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + ROUND(ORBIT:PERIOD) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}0${SEP}0${SEP}" + ORBIT:HASNEXTPATCH. ` +
     '}',
     timeoutMs
   );
@@ -254,9 +254,9 @@ export async function getShipTelemetry(
     return `Telemetry error: ${baseResult.error}`;
   }
 
-  // Parse "BASE|soi|apo|per|dv|eta|hasEnc"
+  // Parse "BASE|soi|apo|per|period|inc|ecc|lan|dv|eta|hasEnc"
   // Note: ETA can be negative if node is in the past, deltaV is always positive
-  const baseMatch = baseResult.output.match(/BASE\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
+  const baseMatch = baseResult.output.match(/BASE\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
   if (!baseMatch) {
     // Include raw output for debugging parse failures
     const preview = baseResult.output.slice(0, 200);
@@ -266,14 +266,19 @@ export async function getShipTelemetry(
   const soi = baseMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
   const apo = parseNumber(baseMatch[2]);
   const per = parseNumber(baseMatch[3]);
-  const nodeDv = parseNumber(baseMatch[4]);
-  const nodeEta = parseNumber(baseMatch[5]);
-  const hasEncounter = parseBool(baseMatch[6]);
+  const period = parseNumber(baseMatch[4]);
+  const inc = parseNumber(baseMatch[5]);
+  const ecc = parseNumber(baseMatch[6]);
+  const lan = parseNumber(baseMatch[7]);
+  const nodeDv = parseNumber(baseMatch[8]);
+  const nodeEta = parseNumber(baseMatch[9]);
+  const hasEncounter = parseBool(baseMatch[10]);
   const hasNode = nodeDv > 0;
 
   lines.push('=== Ship Status ===', `SOI: ${soi}`);
   lines.push(`Apoapsis: ${(apo / 1000).toFixed(1)} km`);
   lines.push(`Periapsis: ${(per / 1000).toFixed(1)} km`);
+  lines.push(`Period: ${period.toFixed(0)}s | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
