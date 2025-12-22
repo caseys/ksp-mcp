@@ -221,13 +221,25 @@ export class ManeuverProgram {
       return { success: true, name: targetName, type: targetType };
     }
 
-    // Everything else is failure - provide helpful error message
-    const typeHint = type === 'body'
-      ? 'Valid bodies: Mun, Minmus, Duna, Eve, Jool, Eeloo, Moho, Dres, Kerbin.'
-      : 'Check vessel name spelling and ensure it is loaded.';
+    // Everything else is failure - fetch available targets for helpful error
+    let availableTargets = '';
+    try {
+      const targets = await this.listTargets();
+      const bodyNames = targets.bodies.map(b => b.name).join(', ');
+      const vesselNames = targets.vessels.map(v => v.name).join(', ');
+      availableTargets = `\nAvailable bodies: ${bodyNames || '(none)'}`;
+      if (vesselNames) {
+        availableTargets += `\nAvailable vessels: ${vesselNames}`;
+      }
+    } catch {
+      // If listing fails, fall back to static hint
+      availableTargets = type === 'body'
+        ? '\nCommon bodies: Mun, Minmus, Duna, Eve, Jool, Eeloo, Moho, Dres.'
+        : '\nCheck vessel name spelling and ensure it is loaded.';
+    }
     return {
       success: false,
-      error: `Target "${name}" not found. ${typeHint}`
+      error: `Target "${name}" not found.${availableTargets}`
     };
   }
 

@@ -85,7 +85,7 @@ const executeSchema = z.boolean()
  */
 const targetSchema = z.string()
   .optional()
-  .describe('Target name (body or vessel). If omitted, uses current target.');
+  .describe('Target name (body or vessel). Use get_targets to list available names. If omitted, uses current target.');
 
 /**
  * Optional target schema with auto-selection capability
@@ -93,7 +93,7 @@ const targetSchema = z.string()
  */
 const autoTargetSchema = z.string()
   .optional()
-  .describe('Target body or vessel. If omitted, uses current target or auto-selects closest body.');
+  .describe('Target name. Use get_targets to list available names. If omitted, auto-selects based on tool.');
 
 /**
  * Target selection modes for auto-select
