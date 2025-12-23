@@ -467,15 +467,66 @@ export class ManeuverOrchestrator {
 
   /**
    * Interplanetary transfer to target planet.
+   *
+   * Planning requires a proper SOI encounter (strict validation).
+   * After execution, allows close approach as fallback (< 33% of target orbit radius).
    */
   async interplanetaryTransfer(
     waitForPhaseAngle: boolean = true,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
     const { target, targetType = 'auto', execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
+
+    // Get the target name for post-execution validation
+    let targetName = target;
+    if (!targetName) {
+      const targetResult = await this.conn.execute('PRINT TARGET:NAME.', 2000);
+      targetName = targetResult.output.trim();
+    }
+
+    // Plan and optionally execute via standard flow
+    const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
       interplanetaryTransfer(this.conn, waitForPhaseAngle)
     );
+
+    // If planning failed or not executed, return as-is
+    if (!result.success || !result.executed) {
+      return result;
+    }
+
+    // Post-execution validation: check trajectory (same as Hohmann)
+    const trajectoryCheck = await checkPostBurnTrajectory(this.conn, targetName);
+
+    if (trajectoryCheck.hasEncounter) {
+      if (trajectoryCheck.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
+        return result;
+      }
+      return {
+        ...result,
+        error: `⚠️ Post-burn encounter is with ${trajectoryCheck.encounterBody}, not ${targetName}.\n` +
+               'Burn execution may have been imprecise. Consider course correction.',
+      };
+    }
+
+    // No encounter after execution - check for close approach
+    if (trajectoryCheck.isCloseApproach) {
+      return {
+        ...result,
+        error: `⚠️ Close approach created (no SOI encounter after burn).\n` +
+               `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
+               `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
+               `A course_correct burn is recommended.`,
+      };
+    }
+
+    // No encounter and no close approach - burn failed
+    return {
+      ...result,
+      success: false,
+      error: `❌ Burn executed but trajectory does not reach target!\n` +
+             `Predicted separation: ${trajectoryCheck.separation > 0 ? (trajectoryCheck.separation / 1000).toFixed(0) + ' km' : 'unknown'}\n` +
+             'Burn may have been severely off-target. Manual intervention required.',
+    };
   }
 
   /**
