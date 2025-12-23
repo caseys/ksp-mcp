@@ -214,7 +214,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'launch_ascent',
     {
-      description: 'Launch to orbit. Blocks until orbit achieved or aborted (up to 15 min).',
+      description: 'Launch into orbit from launchpad. Blocks until complete (up to 15 min).',
       inputSchema: {
         altitude: z.number().optional().describe('Target orbit altitude in meters (default: atmosphere + 20km, or 20km if no atmosphere)'),
         inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees'),
@@ -259,7 +259,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'circularize',
     {
-      description: 'Circularize the orbit. Auto-detects best timing if not specified.',
+      description: 'Make orbit circular. Use after launch or transfer.',
       inputSchema: {
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
           .optional()
@@ -315,7 +315,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'adjust_apoapsis',
     {
-      description: 'Set a new high point (apoapsis) in the orbit.',
+      description: 'Change orbit high point. Use to raise/lower orbit.',
       inputSchema: {
         altitude: z.number().optional().describe('Target apoapsis altitude in meters (default: current + 10km)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -362,7 +362,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'adjust_periapsis',
     {
-      description: 'Set a new low point (periapsis) in the orbit.',
+      description: 'Change orbit low point. Use for deorbit or orbit adjustments.',
       inputSchema: {
         altitude: z.number().optional().describe('Target periapsis altitude in meters (default: current - 10km)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -409,7 +409,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'ellipticize',
     {
-      description: 'Set both periapsis and apoapsis in one maneuver.',
+      description: 'Set both orbit high and low points in one maneuver.',
       inputSchema: {
         periapsis: z.number().optional().describe('Target periapsis altitude in meters (default: current periapsis)'),
         apoapsis: z.number().optional().describe('Target apoapsis altitude in meters (default: current apoapsis)'),
@@ -464,7 +464,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'change_inclination',
     {
-      description: 'Change orbital inclination.',
+      description: 'Tilt orbit. Use for polar orbit or equatorial orbit.',
       inputSchema: {
         newInclination: z.number().optional().default(0).describe('Target inclination in degrees (default: 0 for equatorial)'),
         timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])
@@ -503,7 +503,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'change_ascending_node',
     {
-      description: 'Change longitude of ascending node (LAN).',
+      description: 'Change LAN. Advanced orbital adjustment.',
       inputSchema: {
         lan: z.number().optional().default(90).describe('Target LAN in degrees (0 to 360, default: 90)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -542,7 +542,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'change_periapsis_longitude',
     {
-      description: 'Change longitude of periapsis (rotates orbit).',
+      description: 'Rotate orbit orientation. Advanced.',
       inputSchema: {
         longitude: z.number().optional().default(90).describe('Target longitude in degrees (-180 to 180, default: 90)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -581,7 +581,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'change_semi_major_axis',
     {
-      description: 'Change semi-major axis (affects orbital period).',
+      description: 'Change orbital period. Advanced.',
       inputSchema: {
         semiMajorAxis: z.number().optional().default(1_000_000).describe('Target semi-major axis in meters (default: 1000km)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -620,7 +620,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'change_eccentricity',
     {
-      description: 'Change orbital eccentricity (0=circular, higher=more elliptical).',
+      description: 'Change orbit shape (0=circular). Advanced.',
       inputSchema: {
         eccentricity: z.number().min(0).max(0.99).optional().default(0).describe('Target eccentricity (0 = circular, <1 = elliptical, default: 0)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
@@ -659,7 +659,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'hohmann_transfer',
     {
-      description: 'Hohmann transfer to target body or vessel.',
+      description: 'Go to a moon or planet. Use for: fly to Mun, navigate to Minmus, transfer to vessel.',
       inputSchema: {
         target: autoTargetSchema,
         timeReference: z.enum(['COMPUTED', 'PERIAPSIS', 'APOAPSIS'])
@@ -727,7 +727,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'course_correct',
     {
-      description: 'Fine-tune approach to target with course correction. Use after hohmann_transfer to adjust periapsis.',
+      description: 'Fine-tune approach after transfer. Adjusts periapsis at destination.',
       inputSchema: {
         target: targetSchema,
         targetDistance: z.number().optional().default(50_000).describe('Target periapsis (bodies) or closest approach (vessels) in meters (default: 50km)'),
@@ -797,7 +797,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'match_planes',
     {
-      description: 'Match orbital plane with target body or vessel.',
+      description: 'Align orbit with target for rendezvous or docking.',
       inputSchema: {
         target: autoTargetSchema,
         timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])
@@ -846,7 +846,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'match_velocities',
     {
-      description: 'Match velocity with target vessel for rendezvous.',
+      description: 'Match speed with target for docking. Use at closest approach.',
       inputSchema: {
         target: autoTargetSchema,
         timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])
@@ -895,7 +895,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'interplanetary_transfer',
     {
-      description: 'Interplanetary transfer to target planet.',
+      description: 'Go to another planet: Duna, Eve, Jool. Waits for transfer window.',
       inputSchema: {
         target: autoTargetSchema,
         waitForPhaseAngle: z.boolean()
@@ -944,7 +944,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'return_from_moon',
     {
-      description: 'Return from moon to parent body.',
+      description: 'Return from Mun/Minmus to Kerbin. Sets up reentry trajectory.',
       inputSchema: {
         targetPeriapsis: z.number().optional().default(40_000).describe('Target periapsis at parent body in meters (default: 40km)'),
         execute: executeSchema,
@@ -979,7 +979,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'resonant_orbit',
     {
-      description: 'Create resonant orbit for constellation deployment.',
+      description: 'Create orbit for deploying satellite constellation.',
       inputSchema: {
         numerator: z.number().int().positive().optional().default(2).describe('Numerator of resonance ratio (default: 2 for 2:3)'),
         denominator: z.number().int().positive().optional().default(3).describe('Denominator of resonance ratio (default: 3 for 2:3)'),
@@ -1019,7 +1019,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'set_target',
     {
-      description: 'Set target for transfers. Prefer using target parameter on maneuver tools instead.',
+      description: 'Set navigation target. Prefer target param on transfer tools.',
       inputSchema: {
         name: z.string().optional().describe('Target name. Use get_targets to list available names. (default: 2nd closest body)'),
         type: z.enum(['auto', 'body', 'vessel']).optional().default('auto')
@@ -1063,7 +1063,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'get_target',
     {
-      description: 'Get information about the current target.',
+      description: 'Show current navigation target.',
       inputSchema: {},
       annotations: {
         readOnlyHint: true,
@@ -1093,7 +1093,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'get_targets',
     {
-      description: 'List all targetable bodies and vessels sorted by distance.',
+      description: 'List all moons, planets, and vessels you can travel to.',
       inputSchema: {},
       annotations: {
         readOnlyHint: true,
@@ -1118,7 +1118,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'clear_target',
     {
-      description: 'Clear the current target.',
+      description: 'Clear navigation target.',
       inputSchema: {},
       annotations: {
         readOnlyHint: false,
@@ -1148,7 +1148,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'execute_node',
     {
-      description: 'Execute the next maneuver node. Prefer using execute parameter on maneuver tools instead.',
+      description: 'Execute next maneuver. Prefer execute param on maneuver tools.',
       inputSchema: {
         async: z.boolean()
           .optional()
@@ -1205,7 +1205,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'clear_nodes',
     {
-      description: 'Remove all maneuver nodes.',
+      description: 'Delete all planned maneuvers.',
       inputSchema: {},
       annotations: {
         readOnlyHint: false,
@@ -1230,7 +1230,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'command',
     {
-      description: 'Run raw kOS script - advanced use.',
+      description: 'Run raw kOS command. Advanced.',
       inputSchema: {
         command: z.string().describe('kOS script command to send'),
         timeout: z.number().optional().default(5000).describe('Command timeout in milliseconds'),
@@ -1256,7 +1256,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'run_script',
     {
-      description: 'Run a kOS script file. Copies script to KSP Archive (Ships/Script) and executes it. LIMITATION: Scripts using TERMINAL:INPUT will hang - use only non-interactive scripts.',
+      description: 'Run kOS script file. Advanced.',
       inputSchema: {
         sourcePath: z.string().describe('Absolute path to the .ks script file to run'),
         timeout: z.number()
@@ -1304,7 +1304,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'status',
     {
-      description: 'Get current ship status including orbit, SOI, maneuver nodes, and encounters.',
+      description: 'Get ship info: orbit, fuel, position, encounters.',
       inputSchema: {},
       annotations: {
         readOnlyHint: true,
@@ -1328,7 +1328,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'disconnect',
     {
-      description: 'Disconnect from kOS terminal.',
+      description: 'Disconnect from kOS.',
       inputSchema: {},
       annotations: {
         readOnlyHint: false,
@@ -1351,7 +1351,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'list_cpus',
     {
-      description: 'List available kOS CPUs without connecting.',
+      description: 'List kOS CPUs.',
       inputSchema: listCpusInputSchema.shape,
       annotations: {
         readOnlyHint: true,
@@ -1377,7 +1377,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'switch_cpu',
     {
-      description: 'Switch to a different kOS CPU. Only needed when multiple CPUs exist.',
+      description: 'Switch kOS CPU.',
       inputSchema: {
         cpuId: z.number().optional().describe('CPU ID (1-based) to switch to'),
         cpuLabel: z.string().optional().describe('CPU label/tag. Use list_cpus to see available CPUs.'),
@@ -1485,7 +1485,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'warp',
     {
-      description: 'Time warp to an event: "soi" (SOI change), "node" (next maneuver), "periapsis", "apoapsis", or a number of seconds.',
+      description: 'Fast-forward time to maneuver, SOI change, or specific point.',
       inputSchema: {
         target: z.enum(['node', 'soi', 'periapsis', 'apoapsis'])
           .or(z.number())
@@ -1531,7 +1531,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'crash_avoidance',
     {
-      description: 'Emergency burn to raise periapsis above safe altitude. Uses RCS, SAS radial-out, and full throttle with auto-staging.',
+      description: 'Emergency burn to prevent crash. Raises periapsis to safe altitude.',
       inputSchema: {
         targetPeriapsis: z.number()
           .optional()
@@ -1571,7 +1571,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'load_save',
     {
-      description: 'Load a KSP quicksave. Connection will be reset after load.',
+      description: 'Load a quicksave.',
       inputSchema: {
         saveName: z.string().describe('Quicksave name. Use list_saves to see available saves.'),
       },
@@ -1594,7 +1594,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'list_saves',
     {
-      description: 'List available KSP quicksaves.',
+      description: 'List quicksaves.',
       inputSchema: {},
       annotations: {
         readOnlyHint: true,
@@ -1622,7 +1622,7 @@ export function createServer(): McpServer {
   server.registerTool(
     'quicksave',
     {
-      description: 'Create a KSP quicksave with the given name.',
+      description: 'Create quicksave.',
       inputSchema: {
         saveName: z.string().describe('Name for the quicksave'),
       },
