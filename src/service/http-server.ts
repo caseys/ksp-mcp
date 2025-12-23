@@ -1802,5 +1802,209 @@ export function createServer(): McpServer {
     }
   );
 
+  // =============================================================================
+  // KSP Data Resources (live game data)
+  // =============================================================================
+
+  server.resource(
+    'status',
+    'ksp://status',
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
+        return {
+          contents: [{
+            uri: 'ksp://status',
+            mimeType: 'application/json',
+            text: JSON.stringify(telemetry, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: 'ksp://status',
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+              connected: false,
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  server.resource(
+    'targets',
+    'ksp://targets',
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const result = await orchestrator.listTargets();
+        return {
+          contents: [{
+            uri: 'ksp://targets',
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              bodies: result.bodies,
+              vessels: result.vessels,
+              formatted: result.formatted,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: 'ksp://targets',
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+              bodies: [],
+              vessels: [],
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  server.resource(
+    'target',
+    'ksp://target',
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        const orchestrator = new ManeuverOrchestrator(conn);
+        const info = await orchestrator.getTargetInfo();
+        return {
+          contents: [{
+            uri: 'ksp://target',
+            mimeType: 'application/json',
+            text: JSON.stringify(info, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: 'ksp://target',
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+              hasTarget: false,
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  server.resource(
+    'saves',
+    'ksp://saves',
+    async () => {
+      try {
+        const conn = await ensureConnected();
+        const result = await listQuicksaves(conn);
+        return {
+          contents: [{
+            uri: 'ksp://saves',
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              success: result.success,
+              saves: result.saves,
+            }, null, 2),
+          }],
+        };
+      } catch (error) {
+        return {
+          contents: [{
+            uri: 'ksp://saves',
+            mimeType: 'application/json',
+            text: JSON.stringify({
+              error: error instanceof Error ? error.message : String(error),
+              saves: [],
+            }, null, 2),
+          }],
+        };
+      }
+    }
+  );
+
+  // =============================================================================
+  // MCP Prompts (workflow templates)
+  // =============================================================================
+
+  server.prompt(
+    'launch-to-orbit',
+    {
+      altitude: z.string().optional().describe('Target orbit altitude (e.g., "100km")'),
+    },
+    async (args) => ({
+      messages: [{
+        role: 'user',
+        content: {
+          type: 'text',
+          text: `Launch to ${args.altitude || '80km'} circular orbit:
+
+1. Use the launch_ascent tool with altitude=${args.altitude || '80000'}
+2. Wait for orbit insertion (the tool blocks until complete)
+3. If orbit is not circular, use circularize tool
+
+The launch_ascent tool handles staging, gravity turn, and fairing deployment automatically.`,
+        },
+      }],
+    })
+  );
+
+  server.prompt(
+    'transfer-to-moon',
+    {
+      target: z.string().describe('Target moon (Mun or Minmus)'),
+    },
+    async (args) => ({
+      messages: [{
+        role: 'user',
+        content: {
+          type: 'text',
+          text: `Transfer to ${args.target}:
+
+1. set_target to "${args.target}"
+2. hohmann_transfer - plans and executes the transfer burn
+3. If no SOI encounter after burn, use course_correct to fine-tune
+4. warp to SOI change
+5. circularize at destination
+
+Note: hohmann_transfer will report if it achieves an encounter or just a close approach.
+If you get a close approach warning, course_correct should establish the encounter.`,
+        },
+      }],
+    })
+  );
+
+  server.prompt(
+    'return-to-kerbin',
+    {
+      targetPeriapsis: z.string().optional().describe('Kerbin periapsis (e.g., "40km")'),
+    },
+    async (args) => ({
+      messages: [{
+        role: 'user',
+        content: {
+          type: 'text',
+          text: `Return to Kerbin with ${args.targetPeriapsis || '40km'} periapsis:
+
+1. return_from_moon - plans and executes escape burn back to Kerbin
+2. warp to Kerbin SOI
+3. If needed, adjust_periapsis to set reentry altitude
+
+For aerobraking/landing, target 30-40km periapsis.
+For capture into orbit, target higher periapsis (70km+) and circularize.`,
+        },
+      }],
+    })
+  );
+
   return server;
 }
