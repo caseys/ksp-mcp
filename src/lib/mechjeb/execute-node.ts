@@ -97,8 +97,8 @@ export async function executeNode(
     };
   }
 
-  // Get estimated burn duration from MechJeb for timing adjustment
-  const burnDuration = await queryNumber(conn, 'ADDONS:MJ:NEXTMANEUVERNODEBURNTIME');
+  // Get estimated burn duration from MechJeb INFO wrapper
+  const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
   console.error(`[ExecuteNode] Estimated burn: ${burnDuration.toFixed(1)}s, will shift node by ${halfBurn.toFixed(1)}s`);
 
