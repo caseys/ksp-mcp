@@ -116,9 +116,11 @@ export class AscentHandle {
     // Get atmosphere height for this body using labeled output
     const atmResult = await this.conn.execute('PRINT "ATM:" + ROUND(SHIP:BODY:ATM:HEIGHT).');
     const atmMatch = atmResult.output.match(/ATM:(-?\d+)/);
-    const atmHeight = atmMatch ? Number.parseInt(atmMatch[1]) : 70_000; // Default to Kerbin
-    const minOrbit = atmHeight > 0 ? atmHeight + 10_000 : 10_000;
-    console.log(`[Ascent] Target: periapsis > ${Math.round(minOrbit/1000)}km (atmosphere ${Math.round(atmHeight/1000)}km + 10km)`);
+    if (!atmMatch) {
+      throw new Error(`Failed to query atmosphere height. kOS output: ${atmResult.output.slice(0, 100)}`);
+    }
+    const atmHeight = Number.parseInt(atmMatch[1]);
+    console.log(`[Ascent] Target: periapsis >= ${Math.round(atmHeight/1000)}km (atmosphere height)`);
 
     while (Date.now() - startTime < MAX_WAIT_MS) {
       // Query current status (use SET then PRINT for reliable MechJeb addon output)
@@ -170,24 +172,26 @@ export class AscentHandle {
       }
 
       // Check completion conditions:
-      // 1. Ascent autopilot disabled (manual abort or completed)
-      // 2. Orbit achieved (periapsis above atmosphere + 10km)
-      const inOrbit = periapsis > minOrbit;
+      // 1. Orbit achieved (periapsis above atmosphere)
+      // 2. Ascent autopilot disabled (manual abort or MechJeb completed)
+      // Use >= and check against atmHeight (not atmHeight+10km) to be more lenient
+      const inOrbit = periapsis >= atmHeight;
 
-      if (!enabled || inOrbit) {
+      if (inOrbit || !enabled) {
         // Disable autopilot if we're in orbit but it's still enabled
         if (inOrbit && enabled) {
           await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
         }
 
+        // Success if we achieved orbit (periapsis above atmosphere)
         const success = inOrbit;
-        console.log(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km, Min orbit: ${Math.round(minOrbit/1000)}km`);
+        console.log(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
         console.log(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${success ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
 
         return {
           success,
           finalOrbit: { apoapsis, periapsis },
-          aborted: !enabled && !inOrbit
+          aborted: !success
         };
       }
 
