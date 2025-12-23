@@ -573,8 +573,7 @@ export class ManeuverProgram {
         success: false,
         error: '❌ Hohmann transfer nodes created but NO ENCOUNTER detected!\n' +
                'The transfer trajectory does not intersect the target.\n' +
-               'This indicates a problem with the transfer planning.\n' +
-               'DO NOT EXECUTE this burn - it will waste fuel without reaching the target.'
+               'Consider waiting for better phase angle or use interplanetary_transfer.'
       };
     }
 

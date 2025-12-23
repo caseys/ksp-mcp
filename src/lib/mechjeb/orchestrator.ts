@@ -97,6 +97,91 @@ export async function withTargetAndExecute(
   };
 }
 
+/** Close approach check result */
+interface CloseApproachResult {
+  hasEncounter: boolean;
+  encounterBody?: string;
+  isCloseApproach: boolean;
+  separation: number;
+  targetOrbitRadius: number;
+}
+
+/**
+ * Check post-burn trajectory for encounter or close approach.
+ * Used after Hohmann transfer execution to verify we're still on target.
+ *
+ * A "close approach" is defined as predicted separation < 33% of target's average orbit radius.
+ */
+async function checkPostBurnTrajectory(
+  conn: KosConnection,
+  targetName: string
+): Promise<CloseApproachResult> {
+  const CLOSE_APPROACH_THRESHOLD = 0.33; // 33% of target's orbit radius
+
+  try {
+    // First check if we have an encounter
+    const encounterCheck = await conn.execute(
+      'IF SHIP:ORBIT:HASNEXTPATCH { PRINT SHIP:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NO_ENCOUNTER". }',
+      3000
+    );
+    const encounterBody = encounterCheck.output.trim();
+
+    if (encounterBody !== 'NO_ENCOUNTER') {
+      // We have an encounter - check if it's with the correct target
+      const isCorrectTarget = encounterBody.toLowerCase() === targetName.toLowerCase();
+      return {
+        hasEncounter: true,
+        encounterBody,
+        isCloseApproach: isCorrectTarget, // If correct target, we're good
+        separation: 0,
+        targetOrbitRadius: 0,
+      };
+    }
+
+    // No encounter - check for close approach using current orbit
+    const checkScript = `
+      SET futureOrbit TO SHIP:ORBIT.
+      SET timeAtAp TO TIME:SECONDS + futureOrbit:ETA:APOAPSIS.
+      SET futurePosShip TO POSITIONAT(SHIP, timeAtAp).
+      SET futurePosTgt TO POSITIONAT(TARGET, timeAtAp).
+      SET predictedDist TO (futurePosShip - futurePosTgt):MAG.
+      SET targetPe TO TARGET:ORBIT:PERIAPSIS.
+      SET targetAp TO TARGET:ORBIT:APOAPSIS.
+      PRINT "DIST:" + ROUND(predictedDist) + "|PE:" + ROUND(targetPe) + "|AP:" + ROUND(targetAp).
+    `.trim().replaceAll('\n', ' ');
+
+    const result = await conn.execute(checkScript, 5000);
+
+    // Parse output: "DIST:12345|PE:67890|AP:111213"
+    const distMatch = result.output.match(/DIST:(-?\d+)/);
+    const peMatch = result.output.match(/PE:(-?\d+)/);
+    const apMatch = result.output.match(/AP:(-?\d+)/);
+
+    if (!distMatch || !peMatch || !apMatch) {
+      console.error('[checkPostBurnTrajectory] Failed to parse kOS output:', result.output);
+      return { hasEncounter: false, isCloseApproach: false, separation: 0, targetOrbitRadius: 0 };
+    }
+
+    const separation = Math.abs(Number.parseInt(distMatch[1]));
+    const targetPe = Number.parseInt(peMatch[1]);
+    const targetAp = Number.parseInt(apMatch[1]);
+    const targetOrbitRadius = (targetPe + targetAp) / 2;
+
+    // Check if separation is within threshold
+    const threshold = targetOrbitRadius * CLOSE_APPROACH_THRESHOLD;
+    const isCloseApproach = separation < threshold;
+
+    console.error(`[checkPostBurnTrajectory] Target: ${targetName}, Separation: ${(separation / 1000).toFixed(0)} km, ` +
+                  `Orbit radius: ${(targetOrbitRadius / 1000).toFixed(0)} km, ` +
+                  `Threshold: ${(threshold / 1000).toFixed(0)} km, Close: ${isCloseApproach}`);
+
+    return { hasEncounter: false, isCloseApproach, separation, targetOrbitRadius };
+  } catch (error) {
+    console.error('[checkPostBurnTrajectory] Error:', error);
+    return { hasEncounter: false, isCloseApproach: false, separation: 0, targetOrbitRadius: 0 };
+  }
+}
+
 /**
  * Orchestrated maneuver operations.
  *
@@ -160,6 +245,9 @@ export class ManeuverOrchestrator {
 
   /**
    * Hohmann transfer to target.
+   *
+   * Planning requires a proper SOI encounter (strict validation).
+   * After execution, allows close approach as fallback (< 33% of target orbit radius).
    */
   async hohmannTransfer(
     timeRef: string = 'COMPUTED',
@@ -167,9 +255,62 @@ export class ManeuverOrchestrator {
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
     const { target, targetType = 'auto', execute = true } = options ?? {};
-    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
+
+    // Get the target name for post-execution validation
+    // We need this before execution since TARGET might change
+    let targetName = target;
+    if (!targetName) {
+      // Query current target name
+      const targetResult = await this.conn.execute('PRINT TARGET:NAME.', 2000);
+      targetName = targetResult.output.trim();
+    }
+
+    // Plan and optionally execute via standard flow
+    const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
       this.maneuver.hohmannTransfer(timeRef, capture)
     );
+
+    // If planning failed or not executed, return as-is
+    if (!result.success || !result.executed) {
+      return result;
+    }
+
+    // Post-execution validation: check trajectory
+    const trajectoryCheck = await checkPostBurnTrajectory(this.conn, targetName);
+
+    if (trajectoryCheck.hasEncounter) {
+      // We have an encounter
+      if (trajectoryCheck.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
+        // Correct target - success
+        return result;
+      }
+      // Wrong encounter target - this shouldn't happen after planning succeeded
+      return {
+        ...result,
+        error: `⚠️ Post-burn encounter is with ${trajectoryCheck.encounterBody}, not ${targetName}.\n` +
+               'Burn execution may have been imprecise. Consider course correction.',
+      };
+    }
+
+    // No encounter after execution - check for close approach
+    if (trajectoryCheck.isCloseApproach) {
+      return {
+        ...result,
+        error: `⚠️ Close approach created (no SOI encounter after burn).\n` +
+               `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
+               `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
+               `A course_correct burn is recommended.`,
+      };
+    }
+
+    // No encounter and no close approach - burn failed
+    return {
+      ...result,
+      success: false,
+      error: `❌ Burn executed but trajectory does not reach target!\n` +
+             `Predicted separation: ${trajectoryCheck.separation > 0 ? (trajectoryCheck.separation / 1000).toFixed(0) + ' km' : 'unknown'}\n` +
+             'Burn may have been severely off-target. Manual intervention required.',
+    };
   }
 
   /**

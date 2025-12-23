@@ -179,7 +179,11 @@ export async function executeNode(
       );
 
       // Node removed = burn complete (MechJeb removes node when done)
-      if (progressResult.output.includes('NONODE')) {
+      // IMPORTANT: Check for NONODE as actual output, not in command echo (which has "NONODE" in quotes)
+      // The kOS output format after cleanOutput is like: `...PRINT "".NONODE` where NONODE is the actual result
+      // We look for NONODE at end of string, after newline, or after the sentinel marker (PRINT "".)
+      const isNoNode = /(?:^|\n|PRINT ""\.)NONODE(?:\n|$|")/i.test(progressResult.output);
+      if (isNoNode) {
         return {
           success: true,
           nodesExecuted: initialNodeCount,
