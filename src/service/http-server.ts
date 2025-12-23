@@ -96,6 +96,33 @@ const autoTargetSchema = z.string()
   .describe('Target name. Use get_targets to list available names. If omitted, auto-selects based on tool.');
 
 /**
+ * Parse distance string with optional units (km, m, Mm) to meters.
+ * Handles LLM outputs like "50km" or "100m" and converts to meters.
+ */
+function parseDistance(val: unknown): number | unknown {
+  if (typeof val === 'number') return val;
+  if (typeof val !== 'string') return val;
+
+  const match = val.trim().match(/^([\d.]+)\s*(km|m|Mm)?$/i);
+  if (!match) return val; // Let Zod handle invalid input
+
+  const num = Number.parseFloat(match[1]);
+  const unit = (match[2] || 'm').toLowerCase();
+
+  switch (unit) {
+    case 'km': return num * 1000;
+    case 'mm': return num * 1_000_000;
+    default: return num; // meters
+  }
+}
+
+/**
+ * Zod schema for distance values that accepts numbers or strings with units.
+ * Examples: 50000, "50km", "100m", "1.5Mm"
+ */
+const distanceSchema = z.preprocess(parseDistance, z.number());
+
+/**
  * Target selection modes for auto-select
  */
 type TargetSelectMode =
@@ -216,7 +243,7 @@ export function createServer(): McpServer {
     {
       description: 'Launch into orbit from launchpad. Blocks until complete (up to 15 min).',
       inputSchema: {
-        altitude: z.number().optional().describe('Target orbit altitude in meters (default: atmosphere + 20km, or 20km if no atmosphere)'),
+        altitude: distanceSchema.optional().describe('Target orbit altitude in meters (default: atmosphere + 20km, or 20km if no atmosphere)'),
         inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees'),
         skipCircularization: z.boolean().optional().default(false).describe('Skip circularization burn (leaves in elliptical orbit)'),
       },
@@ -261,7 +288,7 @@ export function createServer(): McpServer {
     {
       description: 'Make orbit circular. Use after launch or transfer.',
       inputSchema: {
-        timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
+        timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'])
           .optional()
           .describe('When to circularize. If omitted, auto-picks based on orbit (periapsis for hyperbolic, nearest apse for elliptical)'),
         execute: executeSchema,
@@ -317,7 +344,7 @@ export function createServer(): McpServer {
     {
       description: 'Change orbit high point. Use to raise/lower orbit.',
       inputSchema: {
-        altitude: z.number().optional().describe('Target apoapsis altitude in meters (default: current + 10km)'),
+        altitude: distanceSchema.optional().describe('Target apoapsis altitude in meters (default: current + 10km)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
           .optional()
           .default('PERIAPSIS')
@@ -364,7 +391,7 @@ export function createServer(): McpServer {
     {
       description: 'Change orbit low point. Use for deorbit or orbit adjustments.',
       inputSchema: {
-        altitude: z.number().optional().describe('Target periapsis altitude in meters (default: current - 10km)'),
+        altitude: distanceSchema.optional().describe('Target periapsis altitude in meters (default: current - 10km)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
           .optional()
           .default('APOAPSIS')
@@ -411,8 +438,8 @@ export function createServer(): McpServer {
     {
       description: 'Set both orbit high and low points in one maneuver.',
       inputSchema: {
-        periapsis: z.number().optional().describe('Target periapsis altitude in meters (default: current periapsis)'),
-        apoapsis: z.number().optional().describe('Target apoapsis altitude in meters (default: current apoapsis)'),
+        periapsis: distanceSchema.optional().describe('Target periapsis altitude in meters (default: current periapsis)'),
+        apoapsis: distanceSchema.optional().describe('Target apoapsis altitude in meters (default: current apoapsis)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
           .optional()
           .default('APOAPSIS')
@@ -583,7 +610,7 @@ export function createServer(): McpServer {
     {
       description: 'Change orbital period. Advanced.',
       inputSchema: {
-        semiMajorAxis: z.number().optional().default(1_000_000).describe('Target semi-major axis in meters (default: 1000km)'),
+        semiMajorAxis: distanceSchema.optional().default(1_000_000).describe('Target semi-major axis in meters (default: 1000km)'),
         timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
           .optional()
           .default('APOAPSIS')
@@ -730,7 +757,7 @@ export function createServer(): McpServer {
       description: 'Fine-tune approach after transfer. Adjusts periapsis at destination.',
       inputSchema: {
         target: targetSchema,
-        targetDistance: z.number().optional().default(50_000).describe('Target periapsis (bodies) or closest approach (vessels) in meters (default: 50km)'),
+        targetDistance: distanceSchema.optional().default(50_000).describe('Target periapsis (bodies) or closest approach (vessels) in meters (default: 50km)'),
         execute: executeSchema,
         includeTelemetry: z.boolean()
           .optional()
@@ -946,7 +973,7 @@ export function createServer(): McpServer {
     {
       description: 'Return from Mun/Minmus to Kerbin. Sets up reentry trajectory.',
       inputSchema: {
-        targetPeriapsis: z.number().optional().default(40_000).describe('Target periapsis at parent body in meters (default: 40km)'),
+        targetPeriapsis: distanceSchema.optional().default(40_000).describe('Target periapsis at parent body in meters (default: 40km)'),
         execute: executeSchema,
       },
       annotations: {
@@ -1533,7 +1560,7 @@ export function createServer(): McpServer {
     {
       description: 'Emergency burn to prevent crash. Raises periapsis to safe altitude.',
       inputSchema: {
-        targetPeriapsis: z.number()
+        targetPeriapsis: distanceSchema
           .optional()
           .default(10_000)
           .describe('Target periapsis in meters (default: 10000 = 10km)'),
