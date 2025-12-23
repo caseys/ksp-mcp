@@ -81,17 +81,127 @@ const executeSchema = z.boolean()
   .describe('Execute the maneuver node after planning. Optional, defaults to true.');
 
 /**
- * Common zod schema for the optional target parameter
+ * Stock KSP celestial bodies for fuzzy matching.
+ * Keys are canonical names, values are common misspellings/STT errors.
+ * Spaces in aliases are removed during matching.
  */
-const targetSchema = z.string()
+const KSP_BODIES: Record<string, string[]> = {
+  // Kerbol system star
+  'Sun': ['sol', 'kerbol', 'star', 'the sun', 'son'],
+  // Inner planets - Moho (Mercury analog)
+  'Moho': ['mojo', 'mo ho', 'moo ho', 'mohoe', 'moho'],
+  // Eve system (Venus analog)
+  'Eve': ['eva', 'eave', 'eev', 'eve', 'eves'],
+  'Gilly': ['gillie', 'ghillie', 'jilly', 'gill e', 'gily', 'gilley'],
+  // Kerbin system (Earth analog)
+  'Kerbin': ['kirbin', 'kerban', 'curbing', 'carbon', 'curbin', 'kerben', 'kirben', 'curb in', 'curve in'],
+  'Mun': ['moon', 'munn', 'the mun', 'mune', 'mon', 'the moon'],
+  'Minmus': ['minimus', 'minimum', 'mimmus', 'minmas', 'min mouse', 'min mus', 'minimums', 'min miss', 'minmis', 'minmes'],
+  // Duna system (Mars analog)
+  'Duna': ['dune', 'doona', 'donna', 'tuna', 'duner', 'do na', 'dune a', 'dunah', 'djna'],
+  'Ike': ['ik', 'ica', 'iky', 'ike', 'mike', 'bike', 'like'],
+  // Dres (Ceres analog)
+  'Dres': ['dress', 'drez', 'drес', 'dressed', 'dris', 'drace'],
+  // Jool system (Jupiter analog)
+  'Jool': ['jule', 'joel', 'jewel', 'joule', 'jul', 'jewl', 'drool', 'juel', 'juul', 'joole'],
+  'Laythe': ['lathe', 'laith', 'lath', 'late', 'lay the', 'lazy', 'lathey', 'laythee', 'laitha'],
+  'Vall': ['val', 'wall', 'vaal', 'vahl', 'vol', 'ball', 'fall', 'vahl'],
+  'Tylo': ['tilo', 'taylo', 'tyelow', 'tyler', 'tile', 'tile oh', 'ty lo', 'tyo', 'tallo'],
+  'Bop': ['bob', 'bopp', 'pop', 'bap', 'bahp', 'baup'],
+  'Pol': ['poll', 'pole', 'paul', 'pall', 'pull', 'pawl'],
+  // Eeloo (Pluto analog)
+  'Eeloo': ['eloo', 'elu', 'eelu', 'yellow', 'ee loo', 'eelou', 'elou', 'eelo', 'pluto'],
+};
+
+/**
+ * Calculate Levenshtein distance between two strings.
+ */
+function levenshtein(a: string, b: string): number {
+  const matrix: number[][] = [];
+  for (let i = 0; i <= b.length; i++) matrix[i] = [i];
+  for (let j = 0; j <= a.length; j++) matrix[0][j] = j;
+  for (let i = 1; i <= b.length; i++) {
+    for (let j = 1; j <= a.length; j++) {
+      matrix[i][j] = b[i - 1] === a[j - 1]
+        ? matrix[i - 1][j - 1]
+        : Math.min(matrix[i - 1][j - 1] + 1, matrix[i][j - 1] + 1, matrix[i - 1][j] + 1);
+    }
+  }
+  return matrix[b.length][a.length];
+}
+
+/**
+ * Find the best matching KSP body name for a given input.
+ * Returns the canonical name if a good match is found, otherwise the original input.
+ * Removes whitespace to handle STT errors like "min mouse" -> "Minmus".
+ */
+function matchTargetName(input: string): string {
+  // Remove whitespace for matching (STT often adds spaces: "min mouse" for "Minmus")
+  const normalized = input.toLowerCase().trim().replaceAll(/\s+/g, '');
+
+  // First check exact match on canonical names (case-insensitive)
+  for (const canonical of Object.keys(KSP_BODIES)) {
+    if (canonical.toLowerCase() === normalized) return canonical;
+  }
+
+  // Check aliases/misspellings (also with spaces removed)
+  for (const [canonical, aliases] of Object.entries(KSP_BODIES)) {
+    for (const alias of aliases) {
+      if (alias.toLowerCase().replaceAll(/\s+/g, '') === normalized) return canonical;
+    }
+  }
+
+  // Fuzzy match using Levenshtein distance
+  let bestMatch = input;
+  let bestScore = Infinity;
+  const maxDistance = Math.max(2, Math.floor(normalized.length * 0.4)); // Allow ~40% errors
+
+  for (const canonical of Object.keys(KSP_BODIES)) {
+    const distance = levenshtein(normalized, canonical.toLowerCase());
+    if (distance < bestScore && distance <= maxDistance) {
+      bestScore = distance;
+      bestMatch = canonical;
+    }
+  }
+
+  // Also check aliases for fuzzy match (with spaces removed)
+  for (const [canonical, aliases] of Object.entries(KSP_BODIES)) {
+    for (const alias of aliases) {
+      const aliasNorm = alias.toLowerCase().replaceAll(/\s+/g, '');
+      const distance = levenshtein(normalized, aliasNorm);
+      if (distance < bestScore && distance <= maxDistance) {
+        bestScore = distance;
+        bestMatch = canonical;
+      }
+    }
+  }
+
+  return bestMatch;
+}
+
+/**
+ * Preprocess target name to handle common misspellings and STT errors.
+ * Only processes strings; non-strings pass through unchanged.
+ */
+function parseTarget(val: unknown): string | unknown {
+  if (typeof val !== 'string') return val;
+  return matchTargetName(val);
+}
+
+/**
+ * Common zod schema for the optional target parameter.
+ * Preprocesses input to fuzzy-match against known KSP body names.
+ */
+const targetSchema = z.preprocess(parseTarget, z.string())
   .optional()
   .describe('Target name (body or vessel). Use get_targets to list available names. If omitted, uses current target.');
 
 /**
- * Optional target schema with auto-selection capability
- * When target is not provided and no target is set, auto-selects closest non-SOI body
+ * Optional target schema with auto-selection capability.
+ * Preprocesses input to fuzzy-match against known KSP body names.
+ * When target is not provided and no target is set, auto-selects closest non-SOI body.
  */
-const autoTargetSchema = z.string()
+const autoTargetSchema = z.preprocess(parseTarget, z.string())
   .optional()
   .describe('Target name. Use get_targets to list available names. If omitted, auto-selects based on tool.');
 
@@ -1048,7 +1158,7 @@ export function createServer(): McpServer {
     {
       description: 'Set navigation target. Prefer target param on transfer tools.',
       inputSchema: {
-        name: z.string().optional().describe('Target name. Use get_targets to list available names. (default: 2nd closest body)'),
+        name: z.preprocess(parseTarget, z.string()).optional().describe('Target name. Use get_targets to list available names. (default: 2nd closest body)'),
         type: z.enum(['auto', 'body', 'vessel']).optional().default('auto')
           .describe('Target type: "auto" tries name directly, "body" for celestial bodies, "vessel" for ships'),
       },
