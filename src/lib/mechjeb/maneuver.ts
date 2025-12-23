@@ -227,21 +227,17 @@ export class ManeuverProgram {
       const targets = await this.listTargets();
       const bodyNames = targets.bodies.map(b => b.name).join(', ');
       const vesselNames = targets.vessels.map(v => v.name).join(', ');
-      // If listTargets returned empty (parsing failed), use static fallback
       if (bodyNames) {
         availableTargets = `\nAvailable bodies: ${bodyNames}`;
         if (vesselNames) {
           availableTargets += `\nAvailable vessels: ${vesselNames}`;
         }
       } else {
-        // Parsing failed - use static hint
-        availableTargets = '\nCommon bodies: Mun, Minmus, Duna, Eve, Jool, Eeloo, Moho, Dres.';
+        // listTargets returned empty - include raw output for debugging
+        availableTargets = `\nlistTargets returned 0 bodies (parsing may have failed)`;
       }
-    } catch {
-      // If listing throws, fall back to static hint
-      availableTargets = type === 'body'
-        ? '\nCommon bodies: Mun, Minmus, Duna, Eve, Jool, Eeloo, Moho, Dres.'
-        : '\nCheck vessel name spelling and ensure it is loaded.';
+    } catch (err) {
+      availableTargets = `\nFailed to list targets: ${err instanceof Error ? err.message : String(err)}`;
     }
     return {
       success: false,
@@ -438,8 +434,8 @@ export class ManeuverProgram {
     const cmd = [
       'LIST BODIES IN bods.',
       'LIST TARGETS IN tgts.',
-      'FOR b IN bods { PRINT "BODY|" + b:NAME + "|" + ROUND(VDISTANCE(b:POSITION, SHIP:POSITION)). }',
-      'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|" + ROUND(VDISTANCE(t:POSITION, SHIP:POSITION)). } }',
+      'FOR b IN bods { PRINT "BODY|" + b:NAME + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). }',
+      'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|" + ROUND((t:POSITION - SHIP:POSITION):MAG). } }',
       'PRINT "LIST_DONE".',
     ].join(' ');
 
