@@ -227,12 +227,18 @@ export class ManeuverProgram {
       const targets = await this.listTargets();
       const bodyNames = targets.bodies.map(b => b.name).join(', ');
       const vesselNames = targets.vessels.map(v => v.name).join(', ');
-      availableTargets = `\nAvailable bodies: ${bodyNames || '(none)'}`;
-      if (vesselNames) {
-        availableTargets += `\nAvailable vessels: ${vesselNames}`;
+      // If listTargets returned empty (parsing failed), use static fallback
+      if (bodyNames) {
+        availableTargets = `\nAvailable bodies: ${bodyNames}`;
+        if (vesselNames) {
+          availableTargets += `\nAvailable vessels: ${vesselNames}`;
+        }
+      } else {
+        // Parsing failed - use static hint
+        availableTargets = '\nCommon bodies: Mun, Minmus, Duna, Eve, Jool, Eeloo, Moho, Dres.';
       }
     } catch {
-      // If listing fails, fall back to static hint
+      // If listing throws, fall back to static hint
       availableTargets = type === 'body'
         ? '\nCommon bodies: Mun, Minmus, Duna, Eve, Jool, Eeloo, Moho, Dres.'
         : '\nCheck vessel name spelling and ensure it is loaded.';
