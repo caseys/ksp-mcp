@@ -28,8 +28,15 @@ function checkSetup(): void {
   // Check KSP_DIR
   if (!kspDir) {
     console.log('⚠️  KSP_DIR environment variable not set');
-    console.log('   Set it to your KSP installation path:');
-    console.log('   export KSP_DIR="/path/to/Kerbal Space Program"\n');
+    console.log('   Set it to your KSP installation path:\n');
+    if (process.platform === 'win32') {
+      console.log('   Windows (PowerShell):');
+      console.log(String.raw`   $env:KSP_DIR = "C:\Program Files\Steam\steamapps\common\Kerbal Space Program"`);
+      console.log('   # Or set permanently via System Properties > Environment Variables\n');
+    } else {
+      console.log('   macOS/Linux (add to ~/.bashrc or ~/.zshrc):');
+      console.log('   export KSP_DIR="/path/to/Kerbal Space Program"\n');
+    }
     console.log('   Addon check skipped.\n');
     printRerunInstructions();
     return;

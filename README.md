@@ -94,7 +94,8 @@ import {
 } from 'ksp-mcp';
 
 // MechJeb telemetry
-import { getVesselState, getOrbitInfo, getMechJebInfo, getQuickStatus } from 'ksp-mcp';
+import { getVesselState, getOrbitInfo, getMechJebInfo, getQuickStatus, getShipTelemetry } from 'ksp-mcp';
+import type { ShipTelemetry, VesselInfo, OrbitTelemetry, ManeuverInfo, EncounterInfo, TargetInfo } from 'ksp-mcp';
 
 // MechJeb discovery
 import { discoverModules, isMechJebAvailable } from 'ksp-mcp';
@@ -246,13 +247,11 @@ npm run kos                 # Execute kOS command via daemon
 
 ### Connection & Utility
 
-- **status** - Get connection status
+- **status** - Get ship telemetry (returns structured JSON with vessel, orbit, maneuver, encounter, target, and formatted output)
 - **disconnect** - Disconnect from kOS
 - **command** - Execute raw kOS commands
 - **list_cpus** - List available kOS CPUs
 - **switch_cpu** - Set CPU preference for session (by ID or label), or clear to auto-select
-- **telemetry** - Get ship orbit/status info
-- **orbit_info** - Get quick orbital parameters
 
 ### Targeting
 
@@ -310,6 +309,66 @@ npm run kos                 # Execute kOS command via daemon
 ### Emergency
 
 - **crash_avoidance** - Emergency burn to raise periapsis
+
+## MCP Resources
+
+Read-only data endpoints for MCP clients. Access via `resources/read`:
+
+- **ksp://status** - Ship telemetry (structured JSON)
+- **ksp://targets** - Available bodies and vessels
+- **ksp://target** - Current navigation target
+- **ksp://saves** - Available quicksaves
+
+### Status Resource Schema
+
+The `ksp://status` resource returns structured data:
+
+```json
+{
+  "vessel": {
+    "name": "My Ship",
+    "type": "Ship",
+    "status": "ORBITING"
+  },
+  "orbit": {
+    "body": "Kerbin",
+    "apoapsis": 150000,
+    "periapsis": 100000,
+    "period": 2400,
+    "inclination": 0.5,
+    "eccentricity": 0.015,
+    "lan": 45.2
+  },
+  "maneuver": {
+    "deltaV": 500.5,
+    "timeToNode": 300,
+    "estimatedBurnTime": 45
+  },
+  "encounter": {
+    "body": "Mun",
+    "periapsis": 50000
+  },
+  "target": {
+    "name": "Mun",
+    "type": "Body",
+    "distance": 12000000
+  },
+  "formatted": "=== Ship Status ===\nVessel: My Ship (Ship) - ORBITING\n..."
+}
+```
+
+Optional fields (`maneuver`, `encounter`, `target`) are only present when applicable.
+
+## MCP Prompts
+
+Workflow templates for common missions:
+
+- **launch-to-orbit** - Standard ascent workflow
+  - Args: `altitude` (optional, default "80km")
+- **transfer-to-moon** - Moon transfer sequence
+  - Args: `target` (required: "Mun" or "Minmus")
+- **return-to-kerbin** - Return from moon
+  - Args: `targetPeriapsis` (optional, default "40km")
 
 ## Example Mission Flow
 

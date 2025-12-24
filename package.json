@@ -58,7 +58,8 @@
     "tsconfig.json"
   ],
   "scripts": {
-    "prepare": "tsc && node dist/utils/check-setup.js",
+    "prepare": "tsc && chmod +x dist/index.js dist/utils/check-setup.js",
+    "postinstall": "node dist/utils/check-setup.js",
     "build": "tsc && chmod +x dist/index.js dist/utils/check-setup.js",
     "check": "node dist/utils/check-setup.js",
     "check:parity": "tsx scripts/check-tool-parity.ts",

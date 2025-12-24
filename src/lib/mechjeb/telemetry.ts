@@ -220,7 +220,7 @@ function formatTime(seconds: number): string {
 
 /**
  * Ship telemetry for operation outputs
- * Optimized: max 2 queries for typical maneuver scenarios
+ * Optimized: max 3 queries for typical maneuver scenarios
  */
 export interface ShipTelemetryOptions {
   /**
@@ -229,59 +229,187 @@ export interface ShipTelemetryOptions {
   timeoutMs?: number;
 }
 
+/**
+ * Structured vessel information
+ */
+export interface VesselInfo {
+  name: string;
+  type: string;
+  status: string;
+}
+
+/**
+ * Structured orbit information
+ */
+export interface OrbitTelemetry {
+  body: string;
+  apoapsis: number;
+  periapsis: number;
+  period: number;
+  inclination: number;
+  eccentricity: number;
+  lan: number;
+}
+
+/**
+ * Structured maneuver node information
+ */
+export interface ManeuverInfo {
+  deltaV: number;
+  timeToNode: number;
+  estimatedBurnTime: number;
+}
+
+/**
+ * Structured encounter information
+ */
+export interface EncounterInfo {
+  body: string;
+  periapsis: number;
+}
+
+/**
+ * Structured target information
+ */
+export interface TargetInfo {
+  name: string;
+  type: string;
+  distance: number;
+}
+
+/**
+ * Available targets for navigation
+ */
+export interface AvailableTargets {
+  bodies: string[];
+  vessels: string[];
+}
+
+/**
+ * Complete ship telemetry with structured data and formatted output
+ */
+export interface ShipTelemetry {
+  vessel: VesselInfo;
+  orbit: OrbitTelemetry;
+  maneuver?: ManeuverInfo;
+  encounter?: EncounterInfo;
+  target?: TargetInfo;
+  availableTargets: AvailableTargets;
+  /** Human-readable formatted output */
+  formatted: string;
+}
+
 // Separator for inline PRINT values
 const SEP = '|~|';
 
+/**
+ * Format distance for human-readable output
+ */
+function formatDistance(meters: number): string {
+  if (meters >= 1_000_000) {
+    return `${(meters / 1_000_000).toFixed(2)} Mm`;
+  } else if (meters >= 1000) {
+    return `${(meters / 1000).toFixed(1)} km`;
+  } else {
+    return `${meters.toFixed(0)} m`;
+  }
+}
+
+/**
+ * Get structured ship telemetry with formatted output.
+ *
+ * Returns structured data for programmatic use plus a human-readable formatted string.
+ */
 export async function getShipTelemetry(
   conn: KosConnection,
   options: ShipTelemetryOptions = {}
-): Promise<string> {
+): Promise<ShipTelemetry> {
   const { timeoutMs = 2500 } = options;
   const lines: string[] = [];
 
-  // Query 1: Combined base + orbital params + node check + encounter check
+  // Query 1: Combined base + orbital params + vessel info + node check + encounter check
   // This single query gets everything we need to know what additional data to fetch
+  // Note: On escape trajectories (ecc >= 1), APOAPSIS and PERIOD are infinity which breaks ROUND()
+  // We use CHOOSE to output -1 as a sentinel value for these cases
   const baseResult = await conn.execute(
     'IF HASNODE { ' +
-      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ROUND(APOAPSIS) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + ROUND(ORBIT:PERIOD) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + NEXTNODE:DELTAV:MAG + "${SEP}" + NEXTNODE:ETA + "${SEP}" + NEXTNODE:ORBIT:HASNEXTPATCH. ` +
+      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}" + NEXTNODE:DELTAV:MAG + "${SEP}" + NEXTNODE:ETA + "${SEP}" + NEXTNODE:ORBIT:HASNEXTPATCH. ` +
     '} ELSE { ' +
-      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ROUND(APOAPSIS) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + ROUND(ORBIT:PERIOD) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}0${SEP}0${SEP}" + ORBIT:HASNEXTPATCH. ` +
+      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}0${SEP}0${SEP}" + ORBIT:HASNEXTPATCH. ` +
     '}',
     timeoutMs
   );
 
   if (baseResult.error) {
-    return `Telemetry error: ${baseResult.error}`;
+    throw new Error(`Telemetry error: ${baseResult.error}`);
   }
 
-  // Parse "BASE|soi|apo|per|period|inc|ecc|lan|dv|eta|hasEnc"
+  // Parse "BASE|soi|apo|per|period|inc|ecc|lan|name|type|status|dv|eta|hasEnc"
   // Note: ETA can be negative if node is in the past, deltaV is always positive
-  const baseMatch = baseResult.output.match(/BASE\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
+  // Note: SHIP:NAME can contain spaces/special chars, SHIP:TYPE and SHIP:STATUS are single words
+  const baseMatch = baseResult.output.match(/BASE\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
   if (!baseMatch) {
     // Include raw output for debugging parse failures
     const preview = baseResult.output.slice(0, 200);
-    return `Telemetry error: parse failed. Raw: ${preview}`;
+    throw new Error(`Telemetry error: parse failed. Raw: ${preview}`);
   }
 
   const soi = baseMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-  const apo = parseNumber(baseMatch[2]);
+  const apoRaw = parseNumber(baseMatch[2]);
   const per = parseNumber(baseMatch[3]);
-  const period = parseNumber(baseMatch[4]);
+  const periodRaw = parseNumber(baseMatch[4]);
   const inc = parseNumber(baseMatch[5]);
   const ecc = parseNumber(baseMatch[6]);
   const lan = parseNumber(baseMatch[7]);
-  const nodeDv = parseNumber(baseMatch[8]);
-  const nodeEta = parseNumber(baseMatch[9]);
-  const hasEncounter = parseBool(baseMatch[10]);
+  const vesselName = baseMatch[8].trim().replaceAll('"', '');
+  const vesselType = baseMatch[9].trim();
+  const vesselStatus = baseMatch[10].trim();
+  const nodeDv = parseNumber(baseMatch[11]);
+  const nodeEta = parseNumber(baseMatch[12]);
+  const hasEncounter = parseBool(baseMatch[13]);
   const hasNode = nodeDv > 0;
 
-  lines.push('=== Ship Status ===', `SOI: ${soi}`);
-  lines.push(`Apoapsis: ${(apo / 1000).toFixed(1)} km`);
+  // Handle escape trajectory sentinel values (-1 means infinity)
+  const isEscapeTrajectory = apoRaw < 0 || periodRaw < 0;
+  const apo = isEscapeTrajectory ? Infinity : apoRaw;
+  const period = isEscapeTrajectory ? Infinity : periodRaw;
+
+  // Build structured data
+  const vessel: VesselInfo = {
+    name: vesselName,
+    type: vesselType,
+    status: vesselStatus,
+  };
+
+  const orbit: OrbitTelemetry = {
+    body: soi,
+    apoapsis: apo,
+    periapsis: per,
+    period,
+    inclination: inc,
+    eccentricity: ecc,
+    lan,
+  };
+
+  let maneuver: ManeuverInfo | undefined;
+  let encounter: EncounterInfo | undefined;
+  let target: TargetInfo | undefined;
+
+  // Build formatted output
+  lines.push('=== Ship Status ===');
+  lines.push(`Vessel: ${vesselName} (${vesselType}) - ${vesselStatus}`);
+  lines.push(`SOI: ${soi}`);
+  lines.push(`Apoapsis: ${isEscapeTrajectory ? 'Escape' : `${(apo / 1000).toFixed(1)} km`}`);
   lines.push(`Periapsis: ${(per / 1000).toFixed(1)} km`);
-  lines.push(`Period: ${period.toFixed(0)}s | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
+  lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : `${period.toFixed(0)}s`} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
+    maneuver = {
+      deltaV: nodeDv,
+      timeToNode: nodeEta,
+      estimatedBurnTime,
+    };
     lines.push('', '=== Next Maneuver ===');
     lines.push(`Delta-V: ${nodeDv.toFixed(1)} m/s`);
     lines.push(`Time to node: ${formatTime(nodeEta)}`);
@@ -305,13 +433,83 @@ export async function getShipTelemetry(
         const encounterBody = encMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
         const encounterPe = parseNumber(encMatch[2]);
 
+        encounter = {
+          body: encounterBody,
+          periapsis: encounterPe,
+        };
+
         lines.push('', '=== Encounter ===', `Target: ${encounterBody}`);
         lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
       }
     }
   }
 
-  return lines.join('\n');
+  // Query 3: Get target info (if a target is set)
+  const targetResult = await conn.execute(
+    'IF HASTARGET { ' +
+      `PRINT "TGT|" + TARGET:NAME + "${SEP}" + TARGET:TYPENAME + "${SEP}" + ROUND(TARGET:DISTANCE). ` +
+    '} ELSE { PRINT "NOTGT". }',
+    timeoutMs
+  );
+
+  if (!targetResult.error && !targetResult.output.includes('NOTGT')) {
+    const tgtMatch = targetResult.output.match(/TGT\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)/);
+    if (tgtMatch) {
+      const targetName = tgtMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
+      const targetType = tgtMatch[2].trim();
+      const targetDist = parseNumber(tgtMatch[3]);
+
+      target = {
+        name: targetName,
+        type: targetType,
+        distance: targetDist,
+      };
+
+      lines.push('', '=== Target ===');
+      lines.push(`${targetName} (${targetType})`);
+      lines.push(`Distance: ${formatDistance(targetDist)}`);
+    }
+  }
+
+  // Query 4: Get available targets (bodies and vessels)
+  // Use BODY|name|0 format - the trailing |0 acts as sentinel to avoid matching command echo
+  const availableTargets: AvailableTargets = { bodies: [], vessels: [] };
+  const targetsResult = await conn.execute(
+    'LIST BODIES IN bods. LIST TARGETS IN tgts. ' +
+    'FOR b IN bods { PRINT "BODY|" + b:NAME + "|0". } ' +
+    'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|0". } } ' +
+    'PRINT "LIST_DONE".',
+    timeoutMs
+  );
+
+  if (!targetsResult.error) {
+    // Parse body names - BODY|name|0 pattern (sentinel |0 avoids command echo)
+    const bodyMatches = targetsResult.output.matchAll(/BODY\|([^|]+)\|0/g);
+    for (const m of bodyMatches) {
+      availableTargets.bodies.push(m[1].trim());
+    }
+    // Parse vessel names - VESSEL|name|0 pattern
+    const vesselMatches = targetsResult.output.matchAll(/VESSEL\|([^|]+)\|0/g);
+    for (const m of vesselMatches) {
+      availableTargets.vessels.push(m[1].trim());
+    }
+
+    lines.push('', '=== Available Targets ===');
+    lines.push(`Bodies: ${availableTargets.bodies.join(', ')}`);
+    if (availableTargets.vessels.length > 0) {
+      lines.push(`Vessels: ${availableTargets.vessels.join(', ')}`);
+    }
+  }
+
+  return {
+    vessel,
+    orbit,
+    maneuver,
+    encounter,
+    target,
+    availableTargets,
+    formatted: lines.join('\n'),
+  };
 }
 
 /**

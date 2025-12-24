@@ -848,7 +848,8 @@ export function createServer(): McpServer {
             if (targetInfo) {
               text += '\n\n' + formatTargetEncounterInfo(targetInfo);
             }
-            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+            const telemetry = await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+            text += '\n\n' + telemetry.formatted;
           }
 
           return successResponse('hohmann', text);
@@ -921,7 +922,8 @@ export function createServer(): McpServer {
           if (targetInfo) {
             text += '\n\n' + formatTargetEncounterInfo(targetInfo);
           }
-          text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+          const telemetry = await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+          text += '\n\n' + telemetry.formatted;
         }
 
         return successResponse('course_correct', text);
@@ -1245,7 +1247,7 @@ export function createServer(): McpServer {
         const conn = await ensureConnected();
         const orchestrator = new ManeuverOrchestrator(conn);
         const result = await orchestrator.listTargets();
-        return successResponse('get_targets', result.formatted);
+        return successResponse('get_targets', JSON.stringify(result, null, 2));
       } catch (error) {
         return errorResponse('get_targets', error instanceof Error ? error.message : String(error));
       }
@@ -1326,7 +1328,8 @@ export function createServer(): McpServer {
             if (targetInfo) {
               text += '\n\n' + formatTargetEncounterInfo(targetInfo);
             }
-            text += '\n\n' + await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+            const telemetry = await getShipTelemetry(conn, INLINE_TELEMETRY_OPTIONS);
+            text += '\n\n' + telemetry.formatted;
           }
 
           return successResponse('execute_node', text);
@@ -1455,7 +1458,7 @@ export function createServer(): McpServer {
       try {
         const conn = await ensureConnected();
         const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
-        return successResponse('status', telemetry);
+        return successResponse('status', JSON.stringify(telemetry, null, 2));
       } catch (error) {
         return errorResponse('status', error instanceof Error ? error.message : String(error));
       }
