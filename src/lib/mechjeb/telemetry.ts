@@ -472,24 +472,24 @@ export async function getShipTelemetry(
   }
 
   // Query 4: Get available targets (bodies and vessels)
-  // Use BODY|name|0 format - the trailing |0 acts as sentinel to avoid matching command echo
+  // Use __MARKER__ pattern consistent with other completion markers in the project
   const availableTargets: AvailableTargets = { bodies: [], vessels: [] };
   const targetsResult = await conn.execute(
     'LIST BODIES IN bods. LIST TARGETS IN tgts. ' +
-    'FOR b IN bods { PRINT "BODY|" + b:NAME + "|0". } ' +
-    'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|0". } } ' +
-    'PRINT "LIST_DONE".',
+    'FOR b IN bods { PRINT "__BODY__" + b:NAME + "__". } ' +
+    'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "__VESSEL__" + t:NAME + "__". } } ' +
+    'PRINT "__LIST_DONE__".',
     timeoutMs
   );
 
   if (!targetsResult.error) {
-    // Parse body names - BODY|name|0 pattern (sentinel |0 avoids command echo)
-    const bodyMatches = targetsResult.output.matchAll(/BODY\|([^|]+)\|0/g);
+    // Parse body names - __BODY__name__ pattern (non-greedy match to handle names with underscores)
+    const bodyMatches = targetsResult.output.matchAll(/__BODY__(.+?)__(?=__|$|\s)/g);
     for (const m of bodyMatches) {
       availableTargets.bodies.push(m[1].trim());
     }
-    // Parse vessel names - VESSEL|name|0 pattern
-    const vesselMatches = targetsResult.output.matchAll(/VESSEL\|([^|]+)\|0/g);
+    // Parse vessel names - __VESSEL__name__ pattern
+    const vesselMatches = targetsResult.output.matchAll(/__VESSEL__(.+?)__(?=__|$|\s)/g);
     for (const m of vesselMatches) {
       availableTargets.vessels.push(m[1].trim());
     }

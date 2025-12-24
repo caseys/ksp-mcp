@@ -114,6 +114,63 @@ If you see "Garbled selection" errors, the connection is stuck at CPU selection 
 2. Use `mcp__ksp-mcp__disconnect` to reset
 3. Wait a few seconds before reconnecting
 
+## Sentinel Pattern for Parsing kOS Output
+
+When parsing kOS command output, the raw output includes the **command echo** (the command text itself) followed by the actual output. This can cause regex patterns to match the wrong content.
+
+### The Problem
+
+```kos
+FOR b IN bods { PRINT "BODY|" + b:NAME. }
+```
+
+Output includes both:
+1. **Command echo**: `FOR b IN bods { PRINT "BODY|" + b:NAME. }`
+2. **Actual output**: `BODY|SunBODY|KerbinBODY|Mun...`
+
+A naive regex like `/BODY\|([^|]+)/g` will match `BODY|"` from the echo!
+
+### Solution: Use `__MARKER__` Sentinel Pattern
+
+Use double-underscore markers that won't appear in the command echo's quoted strings:
+
+```kos
+FOR b IN bods { PRINT "__BODY__" + b:NAME + "__". }
+```
+
+- **Command echo**: `PRINT "__BODY__" + b:NAME + "__"` (has quotes around markers)
+- **Actual output**: `__BODY__Sun____BODY__Kerbin__...` (no quotes)
+
+Regex: `/__BODY__(.+?)__(?=__|$|\s)/g`
+
+The echo has `"__BODY__"` with quotes, so the regex won't match it.
+
+### Examples in This Project
+
+| Pattern | Usage | Regex |
+|---------|-------|-------|
+| `__BODY__name__` | List bodies | `/__BODY__(.+?)__(?=__\|$\|\s)/g` |
+| `__VESSEL__name__` | List vessels | `/__VESSEL__(.+?)__(?=__\|$\|\s)/g` |
+| `__MCP_DONE_xxx__` | Command completion | Used by kos-connection.ts |
+| `__MCP_SCRIPT_COMPLETE__` | Script completion | Used by run-script.ts |
+
+### Alternative: Numeric Sentinel
+
+For simple cases, append a number that the echo won't have:
+
+```kos
+PRINT "BODY|" + b:NAME + "|" + ROUND(distance).
+```
+
+Regex: `/BODY\|([^|]+)\|(\d+)/g` - requires digits after the name, which the echo lacks.
+
+### Key Rules
+
+1. **Always use sentinels** - Never assume your marker won't appear in the echo
+2. **Prefer `__MARKER__` style** - Consistent with existing patterns in the project
+3. **Use non-greedy matching** - `(.+?)` handles names with special characters
+4. **Lookahead for termination** - `(?=__|$|\s)` ensures proper boundary matching
+
 ## Key Insight
 
 When testing blocking operations, the key is to:
