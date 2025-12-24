@@ -20,7 +20,7 @@ import {
 } from '../config/mcp-resources.js';
 import { AscentProgram, AscentHandle } from '../lib/mechjeb/ascent.js';
 import { clearNodes } from '../lib/kos/nodes.js';
-import { getShipTelemetry, formatTargetEncounterInfo, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
+import { getShipTelemetry, getStatus, formatTargetEncounterInfo, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
 import { queryTargetEncounterInfo } from '../lib/mechjeb/shared.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
 import { executeNode } from '../lib/mechjeb/execute-node.js';
@@ -1455,13 +1455,8 @@ export function createServer(): McpServer {
       _meta: { tier: 1 },
     },
     async () => {
-      try {
-        const conn = await ensureConnected();
-        const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
-        return successResponse('status', JSON.stringify(telemetry, null, 2));
-      } catch (error) {
-        return errorResponse('status', error instanceof Error ? error.message : String(error));
-      }
+      const status = await getStatus(undefined, FULL_TELEMETRY_OPTIONS);
+      return successResponse('status', JSON.stringify(status, null, 2));
     }
   );
 
@@ -1813,28 +1808,14 @@ export function createServer(): McpServer {
     'status',
     'ksp://status',
     async () => {
-      try {
-        const conn = await ensureConnected();
-        const telemetry = await getShipTelemetry(conn, FULL_TELEMETRY_OPTIONS);
-        return {
-          contents: [{
-            uri: 'ksp://status',
-            mimeType: 'application/json',
-            text: JSON.stringify(telemetry, null, 2),
-          }],
-        };
-      } catch (error) {
-        return {
-          contents: [{
-            uri: 'ksp://status',
-            mimeType: 'application/json',
-            text: JSON.stringify({
-              error: error instanceof Error ? error.message : String(error),
-              connected: false,
-            }, null, 2),
-          }],
-        };
-      }
+      const status = await getStatus(undefined, FULL_TELEMETRY_OPTIONS);
+      return {
+        contents: [{
+          uri: 'ksp://status',
+          mimeType: 'application/json',
+          text: JSON.stringify(status, null, 2),
+        }],
+      };
     }
   );
 

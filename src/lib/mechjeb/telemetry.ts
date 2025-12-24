@@ -8,6 +8,7 @@ import type { KosConnection } from '../../transport/kos-connection.js';
 import type { VesselState, OrbitInfo, MechJebInfo } from '../types.js';
 import type { TargetEncounterInfo, BodyEncounterInfo, VesselEncounterInfo } from './shared.js';
 import { config } from '../../config/index.js';
+import { ensureConnected } from '../../transport/connection-tools.js';
 
 function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -289,8 +290,12 @@ export interface AvailableTargets {
  * Complete ship telemetry with structured data and formatted output
  */
 export interface ShipTelemetry {
-  vessel: VesselInfo;
-  orbit: OrbitTelemetry;
+  /** Whether kOS is connected and responding */
+  connected: boolean;
+  /** Error reason if not connected */
+  reason?: string;
+  vessel?: VesselInfo;
+  orbit?: OrbitTelemetry;
   maneuver?: ManeuverInfo;
   encounter?: EncounterInfo;
   target?: TargetInfo;
@@ -502,6 +507,7 @@ export async function getShipTelemetry(
   }
 
   return {
+    connected: true,
     vessel,
     orbit,
     maneuver,
@@ -510,6 +516,35 @@ export async function getShipTelemetry(
     availableTargets,
     formatted: lines.join('\n'),
   };
+}
+
+/**
+ * Get ship status, handling connection automatically.
+ *
+ * This is a convenience wrapper around getShipTelemetry that handles
+ * connection errors gracefully. Always returns a valid ShipTelemetry
+ * object with `connected` field indicating accessibility.
+ *
+ * @param connection - Optional KosConnection. If not provided, auto-connects using shared connection.
+ * @param options - Telemetry options
+ * @returns Ship telemetry if connected, or disconnected status if not
+ */
+export async function getStatus(
+  connection?: KosConnection,
+  options?: ShipTelemetryOptions
+): Promise<ShipTelemetry> {
+  try {
+    const conn = connection ?? await ensureConnected();
+    return await getShipTelemetry(conn, options);
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      connected: false,
+      reason,
+      availableTargets: { bodies: [], vessels: [] },
+      formatted: `=== kOS Not Accessible ===\n${reason}`,
+    };
+  }
 }
 
 /**

@@ -24,7 +24,7 @@ import { KosConnection } from '../transport/kos-connection.js';
 import { config } from '../config/index.js';
 import { SOCKET_PATH, PID_PATH, isWindows } from './daemon-paths.js';
 import { clearNodes } from '../lib/kos/nodes.js';
-import { getShipTelemetry } from '../lib/mechjeb/telemetry.js';
+import { getShipTelemetry, getStatus } from '../lib/mechjeb/telemetry.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
 import { ManeuverProgram } from '../lib/mechjeb/maneuver.js';
 import { executeNode, getNodeProgress } from '../lib/mechjeb/execute-node.js';
@@ -640,6 +640,14 @@ class KosDaemon {
     const handler = handlers[request.handler];
     if (!handler) {
       return { success: false, error: `Unknown handler: ${request.handler}` };
+    }
+
+    // Special handling for 'status' - use getStatus() which handles connection errors gracefully
+    if (request.handler === 'status') {
+      const options = request.args?.options as Record<string, boolean> | undefined;
+      // Use daemon's connection if available, otherwise getStatus() will try to connect
+      const result = await getStatus(this.connection ?? undefined, options);
+      return { success: true, data: result };
     }
 
     // Auto-connect if not connected

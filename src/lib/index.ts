@@ -56,7 +56,8 @@ export {
   getOrbitInfo,
   getMechJebInfo,
   getQuickStatus,
-  getShipTelemetry
+  getShipTelemetry,
+  getStatus
 } from './mechjeb/telemetry.js';
 export type {
   ShipTelemetryOptions,
