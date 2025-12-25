@@ -64,6 +64,7 @@
     "build": "tsc && chmod +x dist/index.js dist/cli/index.js dist/utils/check-setup.js",
     "check": "node dist/utils/check-setup.js",
     "knip": "knip",
+    "semgrep": "semgrep --config p/typescript src/",
     "lint": "eslint src/",
     "lint:fix": "eslint src/ --fix",
     "dev": "tsx watch src/index.ts",
