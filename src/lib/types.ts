@@ -119,8 +119,8 @@ export interface LaunchOptions {
   inclination?: number;
   /** Enable automatic staging (default: true) */
   autoStage?: boolean;
-  /** Skip circularization burn (default: false) */
-  skipCircularization?: boolean;
+  /** Circularize orbit after ascent (default: true) */
+  circularize?: boolean;
   /** Auto-warp to maneuver nodes (default: true) */
   autoWarp?: boolean;
 }

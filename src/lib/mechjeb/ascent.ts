@@ -405,7 +405,7 @@ export class AscentProgram {
       altitude,
       inclination = 0,
       autoStage = true,
-      skipCircularization = false,
+      circularize = true,
       autoWarp = true
     } = options;
 
@@ -417,7 +417,7 @@ export class AscentProgram {
       desiredAltitude: altitude,
       desiredInclination: inclination,
       autostage: autoStage,
-      skipCircularization,
+      skipCircularization: !circularize,
       autowarp: autoWarp
     });
 

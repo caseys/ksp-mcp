@@ -351,11 +351,11 @@ export function createServer(): McpServer {
   server.registerTool(
     'launch_ascent',
     {
-      description: 'Launch into orbit from launchpad. Blocks until complete (up to 15 min).',
+      description: 'Launch into orbit. Circularizes after ascent by default.',
       inputSchema: {
         altitude: distanceSchema.optional().describe('Target orbit altitude in meters (default: atmosphere + 20km, or 20km if no atmosphere)'),
         inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees'),
-        skipCircularization: z.boolean().optional().default(false).describe('Skip circularization burn (leaves in elliptical orbit)'),
+        circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
       },
       annotations: {
         readOnlyHint: false,
@@ -376,7 +376,7 @@ export function createServer(): McpServer {
         currentAscentHandle = await ascent.launchToOrbit({
           altitude,
           inclination: args.inclination,
-          skipCircularization: args.skipCircularization,
+          circularize: args.circularize,
           autoStage: true,
           autoWarp: true,
         });
@@ -1622,9 +1622,10 @@ export function createServer(): McpServer {
     {
       description: 'Fast-forward time to maneuver, SOI change, or specific point.',
       inputSchema: {
-        target: z.enum(['node', 'soi', 'periapsis', 'apoapsis'])
-          .or(z.number())
-          .describe('Warp target: "node", "soi", "periapsis", "apoapsis", or a number of seconds to warp forward'),
+        target: z.preprocess(
+          (val) => typeof val === 'string' ? val.toLowerCase() : val,
+          z.enum(['node', 'soi', 'periapsis', 'apoapsis']).or(z.number())
+        ).describe('Warp target: "node", "soi", "periapsis", "apoapsis", or a number of seconds to warp forward'),
         leadTime: z.number()
           .optional()
           .default(60)
