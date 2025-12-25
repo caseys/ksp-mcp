@@ -188,6 +188,13 @@ export class AscentHandle {
         console.log(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
         console.log(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${success ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
 
+        // Clear any leftover maneuver nodes (circularization may leave tiny residual)
+        try {
+          await this.conn.execute('UNTIL NOT HASNODE { REMOVE NEXTNODE. }');
+        } catch {
+          // Ignore - non-critical cleanup
+        }
+
         return {
           success,
           finalOrbit: { apoapsis, periapsis },
