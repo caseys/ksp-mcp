@@ -467,6 +467,18 @@ export class AscentProgram {
     await delay(500);  // Let the stage command process
     console.log('[Ascent] LAUNCHED - MechJeb in control');
 
+    // Enable 2x warp after 15 seconds if autoWarp is enabled
+    if (autoWarp) {
+      setTimeout(async () => {
+        try {
+          await this.conn.execute('SET WARP TO 1.');
+          console.log('[Ascent] Enabled 2x warp');
+        } catch {
+          // Ignore warp errors - non-critical
+        }
+      }, 15_000);
+    }
+
     // Create handle for monitoring
     const handleId = `ascent-${++this.handleCounter}-${Date.now()}`;
     return new AscentHandle(this.conn, handleId, altitude);
