@@ -3,7 +3,6 @@
   "entry": [
     "src/index.ts",
     "src/service/http-server.ts",
-    "src/service/cli-daemon.ts",
     "src/cli/**/*.ts",
     "src/utils/check-setup.ts"
   ],
