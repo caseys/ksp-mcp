@@ -170,7 +170,7 @@ async function warpToNode(
       error: `Cannot warp to node - will CRASH in ${crashCheck.encounterBody}!\n` +
              `Node is after SOI transition (${crashCheck.etaToSOI}s)\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
-             `Use course_correct or crash_avoidance first.`,
+             `Use course_correct to fix trajectory first.`,
     };
   }
 
@@ -295,7 +295,7 @@ async function warpToOrbitalPoint(
       error: `Cannot warp to ${point.toLowerCase()} - will CRASH in ${crashCheck.encounterBody}!\n` +
              `SOI transition in ${crashCheck.etaToSOI}s (before ${point.toLowerCase()} at ${initialEta.toFixed(0)}s)\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
-             `Use course_correct or crash_avoidance first.`,
+             `Use course_correct to fix trajectory first.`,
     };
   }
 
@@ -405,7 +405,7 @@ export async function warpForward(
       error: `Cannot warp forward ${seconds}s - will CRASH in ${crashCheck.encounterBody}!\n` +
              `SOI transition in ${crashCheck.etaToSOI}s\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
-             `Use course_correct or crash_avoidance first.`,
+             `Use course_correct to fix trajectory first.`,
     };
   }
 
