@@ -101,6 +101,7 @@ export async function withTargetAndExecute(
 interface CloseApproachResult {
   hasEncounter: boolean;
   encounterBody?: string;
+  encounterPeriapsis?: number;  // Periapsis at encounter body (negative = below surface)
   isCloseApproach: boolean;
   separation: number;
   targetOrbitRadius: number;
@@ -129,9 +130,27 @@ async function checkPostBurnTrajectory(
     if (encounterBody !== 'NO_ENCOUNTER') {
       // We have an encounter - check if it's with the correct target
       const isCorrectTarget = encounterBody.toLowerCase() === targetName.toLowerCase();
+
+      // Query the encounter periapsis to check for crash trajectory
+      let encounterPeriapsis: number | undefined;
+      try {
+        const peCheck = await conn.execute(
+          'PRINT SHIP:ORBIT:NEXTPATCH:PERIAPSIS.',
+          3000
+        );
+        encounterPeriapsis = parseFloat(peCheck.output.trim());
+        if (isNaN(encounterPeriapsis)) {
+          encounterPeriapsis = undefined;
+        }
+      } catch {
+        // Periapsis query failed - continue without it
+        console.error('[checkPostBurnTrajectory] Failed to query encounter periapsis');
+      }
+
       return {
         hasEncounter: true,
         encounterBody,
+        encounterPeriapsis,
         isCloseApproach: isCorrectTarget, // If correct target, we're good
         separation: 0,
         targetOrbitRadius: 0,
@@ -281,7 +300,17 @@ export class ManeuverOrchestrator {
     if (trajectoryCheck.hasEncounter) {
       // We have an encounter
       if (trajectoryCheck.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
-        // Correct target - success
+        // Correct target - check for crash trajectory
+        if (trajectoryCheck.encounterPeriapsis !== undefined && trajectoryCheck.encounterPeriapsis < 0) {
+          // Crash trajectory - warn user to run course correction
+          return {
+            ...result,
+            error: `⚠️ Transfer successful but trajectory will IMPACT ${trajectoryCheck.encounterBody}!\n` +
+                   `Encounter periapsis: ${(trajectoryCheck.encounterPeriapsis / 1000).toFixed(1)} km (below surface)\n` +
+                   `Run course_correct to raise periapsis before SOI entry.`,
+          };
+        }
+        // Success - no crash trajectory
         return result;
       }
       // Wrong encounter target - this shouldn't happen after planning succeeded
@@ -499,6 +528,17 @@ export class ManeuverOrchestrator {
 
     if (trajectoryCheck.hasEncounter) {
       if (trajectoryCheck.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
+        // Correct target - check for crash trajectory
+        if (trajectoryCheck.encounterPeriapsis !== undefined && trajectoryCheck.encounterPeriapsis < 0) {
+          // Crash trajectory - warn user to run course correction
+          return {
+            ...result,
+            error: `⚠️ Transfer successful but trajectory will IMPACT ${trajectoryCheck.encounterBody}!\n` +
+                   `Encounter periapsis: ${(trajectoryCheck.encounterPeriapsis / 1000).toFixed(1)} km (below surface)\n` +
+                   `Run course_correct to raise periapsis before SOI entry.`,
+          };
+        }
+        // Success - no crash trajectory
         return result;
       }
       return {
