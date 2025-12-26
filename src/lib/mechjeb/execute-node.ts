@@ -7,7 +7,6 @@
 
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { delay, queryNumber, unlockControls } from './shared.js';
-import { immediateTimeWarpKick } from '../../utils/time-warp-kick.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 
 export interface ExecuteNodeResult {
@@ -34,6 +33,73 @@ const MAX_RETRIES = 3;
 const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes
 const DEFAULT_POLL_INTERVAL_MS = 10_000; // 10 seconds
 const DV_THRESHOLD = 0.5; // m/s - consider burn complete below this
+
+// Alignment configuration
+const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
+const RCS_TRIGGER_TIME = 3000; // ms - enable RCS if no progress after this
+const MAX_ALIGN_TIME = 60_000; // ms - maximum time to wait for alignment
+
+/**
+ * Align ship to maneuver node using kOS LOCK STEERING before MechJeb takes over.
+ * Enables RCS if no angular progress is made after 3 seconds.
+ *
+ * @param conn kOS connection
+ */
+async function alignToNode(conn: KosConnection): Promise<boolean> {
+  // Check initial angle
+  const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+  console.error(`[AlignToNode] Initial angle: ${initialAngle.toFixed(1)}°`);
+
+  // Save RCS state
+  const rcsState = await conn.execute('PRINT RCS.');
+  const wasRcsOn = rcsState.output.includes('True');
+
+  // Use SAS MANEUVER mode - handles node removal gracefully (unlike LOCK STEERING)
+  // Must wait for SAS to initialize before setting mode
+  await conn.execute('SAS ON. WAIT 1. SET SASMODE TO "MANEUVER". WAIT 0.5.');
+  console.error('[AlignToNode] SAS set to MANEUVER mode, aligning...');
+
+  let lastAngle = 180;
+  let noProgressSince = Date.now();
+  const startTime = Date.now();
+  let aligned = false;
+
+  while (Date.now() - startTime < MAX_ALIGN_TIME) {
+    const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+    console.error(`[AlignToNode] Angle: ${angle.toFixed(1)}°`);
+
+    if (angle < ALIGN_THRESHOLD) {
+      console.error(`[AlignToNode] Aligned! (${angle.toFixed(2)}°)`);
+      aligned = true;
+      break;
+    }
+
+    // Check for progress (improvement of at least 0.5 degrees)
+    if (angle < lastAngle - 0.5) {
+      noProgressSince = Date.now();
+      lastAngle = angle;
+    } else if (Date.now() - noProgressSince > RCS_TRIGGER_TIME) {
+      // No progress for 3s - enable RCS to help rotation
+      await conn.execute('RCS ON.');
+      console.error(`[AlignToNode] No progress, enabled RCS (${angle.toFixed(1)}°)`);
+      noProgressSince = Date.now(); // Reset timer after enabling RCS
+    }
+
+    await delay(500);
+  }
+
+  // Keep SAS in MANEUVER mode - MechJeb will take over when enabled
+  // Restore RCS state only
+  if (!wasRcsOn) {
+    await conn.execute('RCS OFF.');
+  }
+
+  // Final verification
+  const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+  console.error(`[AlignToNode] Final angle: ${finalAngle.toFixed(1)}°, aligned: ${aligned}`);
+
+  return finalAngle < ALIGN_THRESHOLD;
+}
 
 interface ExecuteNodeOptions {
   timeoutMs?: number;
@@ -108,10 +174,23 @@ export async function executeNode(
     await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
   }
 
-  // Warp to node if it's far away (more than 120s)
+  // Align ship to maneuver node BEFORE warping
+  const isAligned = await alignToNode(conn);
+  if (!isAligned) {
+    await conn.execute('SAS OFF.');
+    const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+    return {
+      success: false,
+      nodesExecuted: 0,
+      error: `Failed to align ship to maneuver node. Current angle: ${angle.toFixed(1)}°`,
+      deltaV: { required: dvRequired, available: dvShipTotal }
+    };
+  }
+
+  // Warp to node if it's far away (more than 60s)
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
-  if (nodeEta > 120) {
-    const warpLeadTime = 60; // Stop warping 60s before node
+  if (nodeEta > 60) {
+    const warpLeadTime = 30; // Stop warping 30s before node
     console.error(`[ExecuteNode] Node is ${nodeEta.toFixed(0)}s away, warping to T-${warpLeadTime}s`);
 
     // Use KUNIVERSE:TIMEWARP:WARPTO which doesn't block
@@ -150,9 +229,18 @@ export async function executeNode(
     // Enable MechJeb node executor
     await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
 
-    // Time warp kick to unstick alignment (brief delay for MechJeb to start aligning)
-    await delay(500);
-    await immediateTimeWarpKick(conn);
+    // Turn off SAS - MechJeb handles its own steering now
+    await conn.execute('SAS OFF.');
+
+    // Warp assist: if node > 30s away, wait 3s then set warp to trigger MechJeb takeover
+    // Use HASNODE check to avoid error if burn completed very quickly
+    const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 3000);
+    const nodeEtaForWarp = Number.parseFloat(warpCheckResult.output.match(/[\d.]+/)?.[0] || '0');
+    if (nodeEtaForWarp > 30) {
+      await delay(3000);
+      await conn.execute('SET WARP TO 1.');
+      console.error('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
+    }
 
     // In async mode, return immediately after starting executor
     if (asyncMode) {
@@ -201,6 +289,19 @@ export async function executeNode(
 
         // Log progress every poll (every 10s)
         console.error(`[ExecuteNode] Progress: ${dvRemaining.toFixed(1)} m/s remaining, executor: ${executorEnabled ? 'ON' : 'OFF'}`);
+
+        // If dV is below threshold, burn is complete - clear node and return success
+        if (dvRemaining < DV_THRESHOLD) {
+          console.error(`[ExecuteNode] Burn complete! (${dvRemaining.toFixed(2)} m/s remaining < ${DV_THRESHOLD} m/s threshold)`);
+          // Clear the residual node to avoid "No maneuver nodes present!" errors
+          await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
+          return {
+            success: true,
+            nodesExecuted: initialNodeCount,
+            deltaV: { required: dvRequired, available: dvShipTotal, remaining: dvRemaining },
+            attempts: attempt
+          };
+        }
 
         // If executor stopped but burn incomplete, check if we should retry
         if (!executorEnabled && dvRemaining > DV_THRESHOLD) {
