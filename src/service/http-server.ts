@@ -255,29 +255,24 @@ async function selectTarget(
     return null; // Already has target, no auto-select needed
   }
 
-  // Get current SOI body to exclude from body selections
-  const soiBody = await orchestrator.getSOIBody();
-
   // Get all targets sorted by distance
   const targets = await orchestrator.listTargets();
 
-  // Filter bodies to exclude SOI body
-  const nonSOIBodies = targets.bodies.filter(
-    b => b.name.toLowerCase() !== soiBody.toLowerCase()
-  );
+  // Combine moons and planets for body selection (already excludes current body)
+  const allBodies = [...targets.moons, ...targets.planets];
 
   switch (mode) {
     case 'closest-body':
-      return nonSOIBodies[0]?.name ?? null;
+      return allBodies[0]?.name ?? null;
 
     case 'closest-vessel':
       return targets.vessels[0]?.name ?? null;
 
     case 'furthest-body':
-      return nonSOIBodies.at(-1)?.name ?? null;
+      return allBodies.at(-1)?.name ?? null;
 
     case 'second-closest':
-      return nonSOIBodies[1]?.name ?? nonSOIBodies[0]?.name ?? null;
+      return allBodies[1]?.name ?? allBodies[0]?.name ?? null;
 
     default:
       return null;
@@ -1844,7 +1839,8 @@ export function createServer(): McpServer {
             uri: 'ksp://targets',
             mimeType: 'application/json',
             text: JSON.stringify({
-              bodies: result.bodies,
+              moons: result.moons,
+              planets: result.planets,
               vessels: result.vessels,
               formatted: result.formatted,
             }, null, 2),
@@ -1857,7 +1853,8 @@ export function createServer(): McpServer {
             mimeType: 'application/json',
             text: JSON.stringify({
               error: error instanceof Error ? error.message : String(error),
-              bodies: [],
+              moons: [],
+              planets: [],
               vessels: [],
             }, null, 2),
           }],

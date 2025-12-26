@@ -68,8 +68,10 @@ export interface ClearTargetResult {
  * Result from listTargets operation.
  */
 export interface ListTargetsResult {
-  /** All celestial bodies sorted by distance */
-  bodies: Array<{ name: string; distance: number }>;
+  /** Moons of the parent planet (sorted by distance) */
+  moons: Array<{ name: string; distance: number }>;
+  /** All planets (sorted by distance) */
+  planets: Array<{ name: string; distance: number }>;
   /** All vessels in current SOI sorted by distance */
   vessels: Array<{ name: string; distance: number }>;
   /** Formatted output string */
@@ -225,13 +227,13 @@ export class ManeuverProgram {
     let availableTargets = '';
     try {
       const targets = await this.listTargets();
-      const bodyNames = targets.bodies.map(b => b.name).join(', ');
+      const moonNames = targets.moons.map(m => m.name).join(', ');
+      const planetNames = targets.planets.map(p => p.name).join(', ');
       const vesselNames = targets.vessels.map(v => v.name).join(', ');
-      if (bodyNames) {
-        availableTargets = `\nAvailable bodies: ${bodyNames}`;
-        if (vesselNames) {
-          availableTargets += `\nAvailable vessels: ${vesselNames}`;
-        }
+      if (moonNames || planetNames) {
+        if (moonNames) availableTargets += `\nMoons: ${moonNames}`;
+        if (planetNames) availableTargets += `\nPlanets: ${planetNames}`;
+        if (vesselNames) availableTargets += `\nVessels: ${vesselNames}`;
       } else {
         // listTargets returned empty - include raw output for debugging
         availableTargets = `\nlistTargets returned 0 bodies (parsing may have failed)`;
@@ -430,11 +432,14 @@ export class ManeuverProgram {
    */
   async listTargets(): Promise<ListTargetsResult> {
     // Single atomic kOS command that lists bodies and vessels with distances
-    // Uses markers for reliable parsing
+    // Categorizes bodies as MOON (of parent planet) or PLANET (orbits Sun)
+    // Excludes current body and Sun from all lists
     const cmd = [
       'LIST BODIES IN bods.',
       'LIST TARGETS IN tgts.',
-      'FOR b IN bods { PRINT "BODY|" + b:NAME + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). }',
+      'SET parentBody TO SHIP:BODY.',
+      'IF parentBody:BODY:NAME <> "Sun" { SET parentBody TO parentBody:BODY. }',
+      'FOR b IN bods { IF b <> SHIP:BODY AND b:NAME <> "Sun" { IF b:BODY:NAME = "Sun" { PRINT "PLANET|" + b:NAME + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). } ELSE IF b:BODY = parentBody { PRINT "MOON|" + b:NAME + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). } } }',
       'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|" + ROUND((t:POSITION - SHIP:POSITION):MAG). } }',
       'PRINT "LIST_DONE".',
     ].join(' ');
@@ -442,12 +447,19 @@ export class ManeuverProgram {
     const result = await this.conn.execute(cmd, 10_000);
     const output = result.output;
 
-    // Parse bodies
-    const bodies: Array<{ name: string; distance: number }> = [];
-    const bodyRegex = /BODY\|([^|]+)\|(\d+)/g;
+    // Parse moons
+    const moons: Array<{ name: string; distance: number }> = [];
+    const moonRegex = /MOON\|([^|]+)\|(\d+)/g;
     let match: RegExpExecArray | null;
-    while ((match = bodyRegex.exec(output)) !== null) {
-      bodies.push({ name: match[1], distance: Number.parseInt(match[2]) });
+    while ((match = moonRegex.exec(output)) !== null) {
+      moons.push({ name: match[1], distance: Number.parseInt(match[2]) });
+    }
+
+    // Parse planets
+    const planets: Array<{ name: string; distance: number }> = [];
+    const planetRegex = /PLANET\|([^|]+)\|(\d+)/g;
+    while ((match = planetRegex.exec(output)) !== null) {
+      planets.push({ name: match[1], distance: Number.parseInt(match[2]) });
     }
 
     // Parse vessels
@@ -458,21 +470,34 @@ export class ManeuverProgram {
     }
 
     // Sort by distance (nearest first)
-    bodies.sort((a, b) => a.distance - b.distance);
+    moons.sort((a, b) => a.distance - b.distance);
+    planets.sort((a, b) => a.distance - b.distance);
     vessels.sort((a, b) => a.distance - b.distance);
 
     // Format output (cap at 15 each)
     const MAX_DISPLAY = 15;
-    const lines: string[] = ['=== Bodies (by distance) ==='];
-    for (const b of bodies.slice(0, MAX_DISPLAY)) {
-      lines.push(`${b.name}: ${formatDistance(b.distance)}`);
+    const lines: string[] = [];
+
+    if (moons.length > 0) {
+      lines.push('=== Moons (nearby) ===');
+      for (const m of moons.slice(0, MAX_DISPLAY)) {
+        lines.push(`${m.name}: ${formatDistance(m.distance)}`);
+      }
+      if (moons.length > MAX_DISPLAY) {
+        lines.push(`... and ${moons.length - MAX_DISPLAY} more`);
+      }
     }
-    if (bodies.length > MAX_DISPLAY) {
-      lines.push(`... and ${bodies.length - MAX_DISPLAY} more`);
+
+    lines.push(lines.length > 0 ? '' : '', '=== Planets ===');
+    for (const p of planets.slice(0, MAX_DISPLAY)) {
+      lines.push(`${p.name}: ${formatDistance(p.distance)}`);
+    }
+    if (planets.length > MAX_DISPLAY) {
+      lines.push(`... and ${planets.length - MAX_DISPLAY} more`);
     }
 
     if (vessels.length > 0) {
-      lines.push('', '=== Vessels in SOI (by distance) ===');
+      lines.push('', '=== Vessels in SOI ===');
       for (const v of vessels.slice(0, MAX_DISPLAY)) {
         lines.push(`${v.name}: ${formatDistance(v.distance)}`);
       }
@@ -482,7 +507,8 @@ export class ManeuverProgram {
     }
 
     return {
-      bodies,
+      moons,
+      planets,
       vessels,
       formatted: lines.join('\n'),
     };
