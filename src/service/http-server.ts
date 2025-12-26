@@ -842,6 +842,11 @@ export function createServer(): McpServer {
           const execInfo = result.executed ? ' (executed)' : '';
           let text = `${nodeCount} node(s): ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
 
+          // Include warning if present (crash trajectory, close approach, etc.)
+          if (result.error) {
+            text += '\n\n' + result.error;
+          }
+
           if (args.includeTelemetry) {
             // Query target encounter info
             const targetInfo = await queryTargetEncounterInfo(conn);
@@ -1069,8 +1074,14 @@ export function createServer(): McpServer {
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
-          return successResponse('interplanetary',
-            `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+          let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+
+          // Include warning if present (crash trajectory, close approach, etc.)
+          if (result.error) {
+            text += '\n\n' + result.error;
+          }
+
+          return successResponse('interplanetary', text);
         } else {
           return errorResponse('interplanetary', result.error ?? 'Failed');
         }

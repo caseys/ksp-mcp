@@ -232,6 +232,20 @@ export async function executeNode(
     // Turn off SAS - MechJeb handles its own steering now
     await conn.execute('SAS OFF.');
 
+    // Warp assist: if node > 30s away, briefly trigger 2x warp to help MechJeb take over steering
+    // Only cancel warp if we actually set it (avoids interfering when warp wasn't needed)
+    const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 3000);
+    const nodeEtaForWarp = Number.parseFloat(warpCheckResult.output.match(/\d[\d.]*/)?.[0] || '0');
+    if (nodeEtaForWarp > 30) {
+      await delay(3000);
+      await conn.execute('SET WARP TO 1.');
+      console.error('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
+
+      // Brief delay then cancel - only runs if we set warp
+      await delay(500);
+      await conn.execute('SET WARP TO 0.');
+    }
+
     // In async mode, return immediately after starting executor
     if (asyncMode) {
       return {
