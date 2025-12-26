@@ -232,21 +232,6 @@ export async function executeNode(
     // Turn off SAS - MechJeb handles its own steering now
     await conn.execute('SAS OFF.');
 
-    // Warp assist: if node > 30s away, wait 3s then set warp to trigger MechJeb takeover
-    // Use HASNODE check to avoid error if burn completed very quickly
-    const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 3000);
-    const nodeEtaForWarp = Number.parseFloat(warpCheckResult.output.match(/[\d.]+/)?.[0] || '0');
-    if (nodeEtaForWarp > 30) {
-      await delay(3000);
-      await conn.execute('SET WARP TO 1.');
-      console.error('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
-    }
-
-    // Cancel any time warp to ensure MechJeb can execute burn
-    // Brief delay allows MechJeb to notice the warp and take over
-    await delay(500);
-    await conn.execute('SET WARP TO 0.');
-
     // In async mode, return immediately after starting executor
     if (asyncMode) {
       return {
@@ -286,7 +271,10 @@ export async function executeNode(
       }
 
       // Parse "dv|enabled" format
-      const progressMatch = progressResult.output.match(/([\d.]+)\|(True|False)/i);
+      // IMPORTANT: Use \d[\d.]* to require starting with a digit, not [\d.]+
+      // Otherwise the sentinel's trailing dot (PRINT "".) gets matched as ".25.48..."
+      // which parseFloat interprets as 0.25 instead of 25.48!
+      const progressMatch = progressResult.output.match(/(\d[\d.]*)\|(True|False)/i);
       if (progressMatch) {
         const dvRemaining = Number.parseFloat(progressMatch[1]);
         const executorEnabled = progressMatch[2].toLowerCase() === 'true';
