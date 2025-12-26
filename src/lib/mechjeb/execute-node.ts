@@ -242,6 +242,11 @@ export async function executeNode(
       console.error('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
     }
 
+    // Cancel any time warp to ensure MechJeb can execute burn
+    // Brief delay allows MechJeb to notice the warp and take over
+    await delay(500);
+    await conn.execute('SET WARP TO 0.');
+
     // In async mode, return immediately after starting executor
     if (asyncMode) {
       return {
