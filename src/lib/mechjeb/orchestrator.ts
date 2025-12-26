@@ -25,6 +25,8 @@ export interface ManeuverOptions {
   targetType?: 'auto' | 'body' | 'vessel';
   /** Whether to execute the node after planning. Defaults to true. */
   execute?: boolean;
+  /** Progress callback for MCP notifications. */
+  onProgress?: (message: string) => void;
 }
 
 /**
@@ -504,7 +506,7 @@ export class ManeuverOrchestrator {
     waitForPhaseAngle: boolean = true,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true } = options ?? {};
+    const { target, targetType = 'auto', execute = true, onProgress } = options ?? {};
 
     // Get the target name for post-execution validation
     let targetName = target;
@@ -515,7 +517,7 @@ export class ManeuverOrchestrator {
 
     // Plan and optionally execute via standard flow
     const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      interplanetaryTransfer(this.conn, waitForPhaseAngle)
+      interplanetaryTransfer(this.conn, { waitForPhaseAngle, onProgress })
     );
 
     // If planning failed or not executed, return as-is

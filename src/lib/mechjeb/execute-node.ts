@@ -101,10 +101,19 @@ async function alignToNode(conn: KosConnection): Promise<boolean> {
   return finalAngle < ALIGN_THRESHOLD;
 }
 
-interface ExecuteNodeOptions {
+export interface ExecuteNodeOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
   async?: boolean; // If true, return immediately after starting executor
+  onProgress?: (message: string) => void; // Progress callback for MCP notifications
+}
+
+/**
+ * Helper to log and send progress notifications.
+ */
+function logProgress(message: string, onProgress?: (msg: string) => void): void {
+  console.error(message);
+  onProgress?.(message);
 }
 
 /**
@@ -128,7 +137,11 @@ export async function executeNode(
     timeoutMs = DEFAULT_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     async: asyncMode = false,
+    onProgress,
   } = options;
+
+  // Helper for this invocation
+  const log = (msg: string) => logProgress(msg, onProgress);
   // Check if a node exists
   const nodeCheck = await conn.execute('PRINT HASNODE.', 2000);
   if (!nodeCheck.output.includes('True')) {
@@ -148,9 +161,9 @@ export async function executeNode(
   const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
 
   if (needsStaging) {
-    console.error(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s (will stage)`);
+    log(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s (will stage)`);
   } else {
-    console.error(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s`);
+    log(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s`);
   }
 
   if (dvShipTotal < dvRequired) {
@@ -166,11 +179,11 @@ export async function executeNode(
   // Get estimated burn duration from MechJeb INFO wrapper
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
-  console.error(`[ExecuteNode] Estimated burn: ${burnDuration.toFixed(1)}s, will shift node by ${halfBurn.toFixed(1)}s`);
+  log(`[ExecuteNode] Estimated burn: ${burnDuration.toFixed(1)}s, will shift node by ${halfBurn.toFixed(1)}s`);
 
   // Set up auto-staging if burn will require staging
   if (needsStaging) {
-    console.error('[ExecuteNode] Setting up auto-staging trigger');
+    log('[ExecuteNode] Setting up auto-staging trigger');
     await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
   }
 
@@ -191,7 +204,7 @@ export async function executeNode(
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
   if (nodeEta > 60) {
     const warpLeadTime = 30; // Stop warping 30s before node
-    console.error(`[ExecuteNode] Node is ${nodeEta.toFixed(0)}s away, warping to T-${warpLeadTime}s`);
+    log(`[ExecuteNode] Node is ${nodeEta.toFixed(0)}s away, warping to T-${warpLeadTime}s`);
 
     // Use KUNIVERSE:TIMEWARP:WARPTO which doesn't block
     await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${nodeEta - warpLeadTime}).`, 5000);
@@ -203,12 +216,12 @@ export async function executeNode(
       await delay(1000);
       const currentEta = await queryNumber(conn, 'NEXTNODE:ETA');
       if (currentEta <= warpLeadTime + 5) {
-        console.error(`[ExecuteNode] Warp complete, ETA: ${currentEta.toFixed(0)}s`);
+        log(`[ExecuteNode] Warp complete, ETA: ${currentEta.toFixed(0)}s`);
         break;
       }
       warpAttempts++;
       if (warpAttempts % 30 === 0) {
-        console.error(`[ExecuteNode] Still warping, ETA: ${currentEta.toFixed(0)}s`);
+        log(`[ExecuteNode] Still warping, ETA: ${currentEta.toFixed(0)}s`);
       }
     }
   }
@@ -218,7 +231,7 @@ export async function executeNode(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     lastAttempt = attempt;
-    console.error(`[ExecuteNode] Attempt ${attempt}/${MAX_RETRIES}`);
+    log(`[ExecuteNode] Attempt ${attempt}/${MAX_RETRIES}`);
 
     // Workaround: Shift node time earlier by half burn duration
     // MechJeb fires at node time instead of centering the burn
@@ -239,7 +252,7 @@ export async function executeNode(
     if (nodeEtaForWarp > 30) {
       await delay(3000);
       await conn.execute('SET WARP TO 1.');
-      console.error('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
+      log('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
 
       // Brief delay then cancel - only runs if we set warp
       await delay(500);
@@ -295,11 +308,11 @@ export async function executeNode(
         lastDvRemaining = dvRemaining;
 
         // Log progress every poll (every 10s)
-        console.error(`[ExecuteNode] Progress: ${dvRemaining.toFixed(1)} m/s remaining, executor: ${executorEnabled ? 'ON' : 'OFF'}`);
+        log(`[ExecuteNode] Progress: ${dvRemaining.toFixed(1)} m/s remaining, executor: ${executorEnabled ? 'ON' : 'OFF'}`);
 
         // If dV is below threshold, burn is complete - clear node and return success
         if (dvRemaining < DV_THRESHOLD) {
-          console.error(`[ExecuteNode] Burn complete! (${dvRemaining.toFixed(2)} m/s remaining < ${DV_THRESHOLD} m/s threshold)`);
+          log(`[ExecuteNode] Burn complete! (${dvRemaining.toFixed(2)} m/s remaining < ${DV_THRESHOLD} m/s threshold)`);
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
           return {
@@ -312,10 +325,10 @@ export async function executeNode(
 
         // If executor stopped but burn incomplete, check if we should retry
         if (!executorEnabled && dvRemaining > DV_THRESHOLD) {
-          console.error(`[ExecuteNode] Executor stopped with ${dvRemaining.toFixed(1)} m/s remaining`);
+          log(`[ExecuteNode] Executor stopped with ${dvRemaining.toFixed(1)} m/s remaining`);
 
           if (attempt < MAX_RETRIES) {
-            console.error(`[ExecuteNode] Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            log(`[ExecuteNode] Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
             await delay(2000);
             break; // Break inner loop to retry
           } else {

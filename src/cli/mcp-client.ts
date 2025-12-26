@@ -7,8 +7,10 @@
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
+import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve } from 'node:path';
+import { randomUUID } from 'node:crypto';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -85,12 +87,37 @@ export class McpCliClient {
   }
 
   /**
-   * Call a tool by name with arguments
+   * Call a tool by name with arguments.
+   * Sends a progressToken to receive progress notifications during long operations.
    */
   async callTool(name: string, args: Record<string, unknown> = {}): Promise<ToolResult> {
     await this.connect();
 
-    const result = await this.client.callTool({ name, arguments: args });
+    // Generate a unique progress token for this call
+    const progressToken = randomUUID();
+
+    // Call tool with progress token and timeout reset enabled
+    const result = await this.client.callTool(
+      {
+        name,
+        arguments: args,
+        _meta: { progressToken },
+      },
+      CallToolResultSchema,
+      {
+        // Handle progress notifications - display them to stderr
+        onprogress: (progress) => {
+          if (progress.message) {
+            // Progress messages go to stderr (same as server console.error)
+            process.stderr.write(`${progress.message}\n`);
+          }
+        },
+        // Reset timeout when receiving progress (keeps connection alive)
+        resetTimeoutOnProgress: true,
+        // Long timeout for operations like crash_avoidance (10 minutes)
+        timeout: 600_000,
+      }
+    );
 
     // Handle the result - it could have 'content' array or 'toolResult'
     let content: string;

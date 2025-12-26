@@ -1,4 +1,6 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import type { ServerNotification, ServerRequest, ProgressToken } from '@modelcontextprotocol/sdk/types.js';
 import { z } from 'zod';
 import {
   handleDisconnect,
@@ -70,6 +72,48 @@ function errorResponse(action: string, error: string) {
     content: [{ type: 'text' as const, text }],
     isError: true,
   };
+}
+
+/**
+ * Create a progress callback from the MCP request handler extra context.
+ * Sends MCP progress notifications to keep the connection alive during long operations.
+ * Falls back to logging notifications if client doesn't provide a progressToken.
+ *
+ * @param extra The RequestHandlerExtra from the tool callback
+ * @returns A callback function that sends progress or logging notifications
+ */
+function createProgressCallback(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+): (message: string) => void {
+  const progressToken = extra._meta?.progressToken as ProgressToken | undefined;
+
+  if (progressToken) {
+    // Client requested progress updates - use progress notifications
+    let progressCount = 0;
+    return (message: string) => {
+      progressCount++;
+      extra.sendNotification({
+        method: 'notifications/progress',
+        params: {
+          progressToken,
+          progress: progressCount,
+          message,
+        },
+      }).catch(() => {}); // Fire and forget
+    };
+  } else {
+    // No progressToken - fall back to logging notifications
+    return (message: string) => {
+      extra.sendNotification({
+        method: 'notifications/message',
+        params: {
+          level: 'info',
+          logger: 'ksp-mcp',
+          data: message,
+        },
+      }).catch(() => {}); // Fire and forget
+    };
+  }
 }
 
 /**
@@ -360,14 +404,15 @@ export function createServer(): McpServer {
       },
       _meta: { tier: 1 },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const conn = await ensureConnected();
+        const onProgress = createProgressCallback(extra);
 
         // Default altitude: atmosphere height + 20km
         const altitude = args.altitude ?? await getDefaultLaunchAltitude(conn);
 
-        const ascent = new AscentProgram(conn);
+        const ascent = new AscentProgram(conn, onProgress);
         currentAscentHandle = await ascent.launchToOrbit({
           altitude,
           inclination: args.inclination,
@@ -1051,10 +1096,11 @@ export function createServer(): McpServer {
       },
       _meta: { tier: 2 },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const conn = await ensureConnected();
         const orchestrator = new ManeuverOrchestrator(conn);
+        const onProgress = createProgressCallback(extra);
 
         // Auto-select furthest body if not provided (interplanetary = distant planets)
         let target = args.target;
@@ -1065,7 +1111,7 @@ export function createServer(): McpServer {
           }
         }
 
-        const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle, { target, execute: args.execute });
+        const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle, { target, execute: args.execute, onProgress });
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
@@ -1316,12 +1362,17 @@ export function createServer(): McpServer {
       },
       _meta: { tier: 3 },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const conn = await ensureConnected();
+
+        // Create progress callback from MCP request context (sends notifications/progress)
+        const onProgress = createProgressCallback(extra);
+
         const result = await executeNode(conn, {
           timeoutMs: args.timeoutSeconds * 1000,
           async: args.async,
+          onProgress,
         });
 
         if (result.success) {
@@ -1422,12 +1473,15 @@ export function createServer(): McpServer {
       },
       _meta: { tier: 2 },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const conn = await ensureConnected();
+        const onProgress = createProgressCallback(extra);
+
         const result = await runScript(conn, args.sourcePath, {
           timeout: args.timeout,
           cleanup: args.cleanup,
+          onProgress,
         });
 
         if (result.success) {
@@ -1645,11 +1699,14 @@ export function createServer(): McpServer {
       },
       _meta: { tier: 1 },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const conn = await ensureConnected();
+        const onProgress = createProgressCallback(extra);
 
-        const result = await (typeof args.target === 'number' ? warpForward(conn, args.target) : warpTo(conn, args.target as WarpTarget, { leadTime: args.leadTime }));
+        const result = await (typeof args.target === 'number'
+          ? warpForward(conn, args.target, undefined, onProgress)
+          : warpTo(conn, args.target as WarpTarget, { leadTime: args.leadTime, onProgress }));
 
         if (result.success) {
           let msg = `Warp complete: ${result.body}, ${((result.altitude || 0) / 1000).toFixed(0)}km`;
@@ -1692,12 +1749,17 @@ export function createServer(): McpServer {
       },
       _meta: { tier: 1 },
     },
-    async (args) => {
+    async (args, extra) => {
       try {
         const conn = await ensureConnected();
+
+        // Create progress callback from MCP request context (sends notifications/progress)
+        const onProgress = createProgressCallback(extra);
+
         const result = await crashAvoidance(conn, {
           targetPeriapsis: args.targetPeriapsis,
           timeoutMs: args.timeoutMs,
+          onProgress,
         });
 
         return result.success ? successResponse('crash_avoidance',

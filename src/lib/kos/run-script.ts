@@ -13,6 +13,14 @@ import { config } from '../../config/index.js';
 import { delay } from '../mechjeb/shared.js';
 import { globalKosMonitor } from '../../utils/kos-monitor.js';
 
+/**
+ * Helper to log and send progress notifications.
+ */
+function logProgress(message: string, onProgress?: (msg: string) => void): void {
+  console.error(message);
+  onProgress?.(message);
+}
+
 export interface RunScriptResult {
   success: boolean;
   output: string[];
@@ -25,6 +33,7 @@ interface RunScriptOptions {
   timeout?: number;        // Default: 60000 (60 seconds)
   pollInterval?: number;   // Default: 500ms
   cleanup?: boolean;       // Default: true - delete script after execution
+  onProgress?: (message: string) => void;  // Progress callback for MCP notifications
 }
 
 // Defaults
@@ -138,10 +147,14 @@ export async function runScript(
     timeout = DEFAULT_TIMEOUT_MS,
     pollInterval = DEFAULT_POLL_MS,
     cleanup = true,
+    onProgress,
   } = options;
 
+  const log = (msg: string) => logProgress(msg, onProgress);
   const scriptName = generateScriptName();
   const startTime = Date.now();
+
+  log(`[Script] Running ${path.basename(sourcePath)}...`);
 
   // Step 1: Copy script to Archive
   const copyResult = await copyScriptToArchive(sourcePath, scriptName);
@@ -179,6 +192,7 @@ export async function runScript(
 
     // Step 4: Poll for completion
     let elapsed = 0;
+    let lastLogTime = 0;
     while (elapsed < timeout) {
       await delay(pollInterval);
       elapsed = Date.now() - startTime;
@@ -190,12 +204,19 @@ export async function runScript(
       if (checkResult.output.includes('True')) {
         // Script completed successfully
         const executionTime = Date.now() - startTime;
+        log(`[Script] Completed in ${(executionTime / 1000).toFixed(1)}s`);
         return {
           success: true,
           output: globalKosMonitor.getRecentLines(100),
           scriptName,
           executionTime,
         };
+      }
+
+      // Log progress every 5 seconds
+      if (elapsed - lastLogTime >= 5000) {
+        log(`[Script] Running... (${(elapsed / 1000).toFixed(0)}s elapsed)`);
+        lastLogTime = elapsed;
       }
 
       // Check for errors in monitor

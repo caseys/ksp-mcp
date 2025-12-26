@@ -30,6 +30,7 @@ export interface CrashAvoidanceOptions {
   timeoutMs?: number;        // Default 300000 (5 min)
   pollIntervalMs?: number;   // Default 1000 (1 sec)
   alignmentThreshold?: number; // Default 10 degrees
+  onProgress?: (message: string) => void; // Progress callback for MCP notifications
 }
 
 // Defaults
@@ -41,6 +42,15 @@ const THROTTLE_START_ANGLE = 45;       // degrees - start throttling above this 
 const DV_STAGE_THRESHOLD = 1;          // m/s - stage when below this
 const HORIZONTAL_ANGLE_THRESHOLD = 80; // degrees - transition to circularize when angle to UP exceeds this (ship tilting toward horizontal)
 const MIN_VERTICAL_SPEED = 20; // m/s - minimum vertical speed before checking apoapsis target
+const LOW_ALTITUDE_THRESHOLD = 10_000; // 10km - check landing delta-v below this
+
+/**
+ * Helper to log and send progress notifications.
+ */
+function logProgress(message: string, onProgress?: (msg: string) => void): void {
+  console.error(message);
+  onProgress?.(message);
+}
 
 /**
  * Calculate throttle based on alignment angle.
@@ -51,6 +61,51 @@ function calculateThrottle(angle: number, fullThrottleAngle: number, startAngle:
   if (angle >= startAngle) return 0;
   // Linear interpolation between start and full throttle angles
   return 1 - ((angle - fullThrottleAngle) / (startAngle - fullThrottleAngle));
+}
+
+/**
+ * Compare delta-v cost of landing vs. circularizing at apoapsis.
+ * Uses trajectory-aware calculations that account for current velocity and falling.
+ * Returns NaN for dvOrbit if on suborbital trajectory with invalid orbital params.
+ */
+async function checkLandingDeltaV(conn: KosConnection): Promise<{dvLand: number, dvOrbit: number, landingCheaper: boolean | null}> {
+  // Calculate landing delta-v (accounts for current speed + speed gained from falling)
+  const dvLandResult = await conn.execute(
+    'SET g_local TO BODY:MU / (BODY:RADIUS + ALTITUDE)^2. ' +
+    'SET v_total_surface TO SHIP:VELOCITY:SURFACE:MAG. ' +
+    'PRINT SQRT(v_total_surface^2 + 2 * g_local * ALT:RADAR).',
+    5000
+  );
+  const dvLand = Number.parseFloat(dvLandResult.output.match(/[\d.]+/)?.[0] || '0');
+
+  // Calculate orbit delta-v (circularization cost at current apoapsis)
+  // For suborbital trajectories, apoapsis may be below surface or SMA may be invalid
+  // We need to check if apoapsis is above surface before calculating
+  const dvOrbitResult = await conn.execute(
+    'SET ap TO SHIP:ORBIT:APOAPSIS. ' +
+    'SET sma TO SHIP:ORBIT:SEMIMAJORAXIS. ' +
+    'IF ap > 0 AND sma > 0 { ' +
+      'SET v_circular_at_ap TO SQRT(BODY:MU / (BODY:RADIUS + ap)). ' +
+      'SET v_at_ap TO SQRT(BODY:MU * (2/(BODY:RADIUS + ap) - 1/sma)). ' +
+      'PRINT ABS(v_circular_at_ap - v_at_ap). ' +
+    '} ELSE { PRINT "INVALID". }',
+    5000
+  );
+
+  const orbitOutput = dvOrbitResult.output;
+  let dvOrbit: number;
+  let landingCheaper: boolean | null;
+
+  if (orbitOutput.includes('INVALID')) {
+    // Suborbital trajectory - can't calculate orbit delta-v
+    dvOrbit = Number.NaN;
+    landingCheaper = null; // Can't compare
+  } else {
+    dvOrbit = Number.parseFloat(orbitOutput.match(/[\d.]+/)?.[0] || '0');
+    landingCheaper = dvLand < dvOrbit;
+  }
+
+  return { dvLand, dvOrbit, landingCheaper };
 }
 
 /**
@@ -83,19 +138,23 @@ export async function crashAvoidance(
     timeoutMs = DEFAULT_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_MS,
     alignmentThreshold = DEFAULT_ALIGN_THRESHOLD,
+    onProgress,
   } = options;
+
+  // Helper for this invocation
+  const log = (msg: string) => logProgress(msg, onProgress);
 
   // Get initial state
   const initialPe = await queryNumber(conn, 'PERIAPSIS');
   const initialDv = await queryNumber(conn, 'SHIP:DELTAV:CURRENT');
   let stagesUsed = 0;
 
-  console.error(`[CrashAvoidance] Initial Pe: ${initialPe.toFixed(0)}m, Target: ${targetPeriapsis}m`);
-  console.error(`[CrashAvoidance] Ship ΔV: ${initialDv.toFixed(0)} m/s`);
+  log(`[CrashAvoidance] Initial Pe: ${initialPe.toFixed(0)}m, Target: ${targetPeriapsis}m`);
+  log(`[CrashAvoidance] Ship ΔV: ${initialDv.toFixed(0)} m/s`);
 
   // Check if already safe
   if (initialPe > targetPeriapsis) {
-    console.error('[CrashAvoidance] Already safe, no burn needed');
+    log('[CrashAvoidance] Already safe, no burn needed');
     return {
       success: true,
       initialPeriapsis: initialPe,
@@ -118,13 +177,13 @@ export async function crashAvoidance(
   }
 
   // Step 1: Enable RCS and SAS with proper waits for initialization
-  console.error('[CrashAvoidance] Enabling RCS and SAS, setting RADIALOUT...');
+  log('[CrashAvoidance] Enabling RCS and SAS, setting RADIALOUT...');
   await conn.execute('RCS ON. SAS ON. WAIT 1. SET SASMODE TO "RADIALOUT". WAIT 0.5.', 4000);
 
   // Step 2: Query NAVMODE to determine reference frame for angle calculation
   const navmodeResult = await conn.execute('PRINT NAVMODE.', 2000);
   const isSurfaceMode = navmodeResult.output.includes('SURFACE');
-  console.error(`[CrashAvoidance] NavMode: ${isSurfaceMode ? 'SURFACE' : 'ORBIT'}`);
+  log(`[CrashAvoidance] NavMode: ${isSurfaceMode ? 'SURFACE' : 'ORBIT'}`);
 
   // Choose angle calculation based on navmode:
   // - SURFACE mode: Use SHIP:UP (away from planet center) - robust at low altitude/velocity
@@ -133,9 +192,23 @@ export async function crashAvoidance(
     ? 'PRINT VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR).'
     : 'PRINT VANG(SHIP:FACING:FOREVECTOR, VCRS(SHIP:VELOCITY:ORBIT, VCRS(-SHIP:BODY:POSITION, SHIP:VELOCITY:ORBIT)):NORMALIZED).';
 
+  // Check landing vs orbit delta-v when near surface
+  const altitude = await queryNumber(conn, 'ALTITUDE');
+  if (isSurfaceMode || altitude < LOW_ALTITUDE_THRESHOLD) {
+    const { dvLand, dvOrbit, landingCheaper } = await checkLandingDeltaV(conn);
+    if (landingCheaper === null) {
+      // Suborbital trajectory - orbit params invalid, can't compare
+      log(`[CrashAvoidance] Delta-v to land: ${dvLand.toFixed(1)} m/s (orbit delta-v unavailable - suborbital trajectory)`);
+    } else if (landingCheaper) {
+      log(`[CrashAvoidance] WARNING: LANDING would have been less delta-v at ${dvLand.toFixed(1)} m/s (orbit: ${dvOrbit.toFixed(1)} m/s)`);
+    } else {
+      log(`[CrashAvoidance] Delta-v comparison: Land=${dvLand.toFixed(1)} m/s, Orbit=${dvOrbit.toFixed(1)} m/s - orbiting is cheaper`);
+    }
+  }
+
   // Step 3: Combined alignment and burn loop
   // Throttle ramps up as alignment improves (0% at 45°, 100% at 10°)
-  console.error(`[CrashAvoidance] Starting alignment and burn (throttle ramps from ${THROTTLE_START_ANGLE}° to ${alignmentThreshold}°)...`);
+  log(`[CrashAvoidance] Starting alignment and burn (throttle ramps from ${THROTTLE_START_ANGLE}° to ${alignmentThreshold}°)...`);
   const burnStart = Date.now();
   let currentPe = initialPe;
   let burnSuccess = false;
@@ -185,8 +258,8 @@ export async function crashAvoidance(
 
     // Check if safe - if so, transition to circularization
     if (isSafe) {
-      console.error(`[CrashAvoidance] Safe! ${safetyLabel} > ${(targetPeriapsis / 1000).toFixed(1)}km target`);
-      console.error('[CrashAvoidance] Transitioning to circularization...');
+      log(`[CrashAvoidance] Safe! ${safetyLabel} > ${(targetPeriapsis / 1000).toFixed(1)}km target`);
+      log('[CrashAvoidance] Transitioning to circularization...');
 
       // Stop throttle
       await conn.execute('SET MCP_THR TO 0.', 2000);
@@ -199,18 +272,18 @@ export async function crashAvoidance(
       );
 
       if (circResult.output.includes('True')) {
-        console.error('[CrashAvoidance] Circularization node created, executing...');
-        const execResult = await executeNode(conn);
+        log('[CrashAvoidance] Circularization node created, executing...');
+        const execResult = await executeNode(conn, { onProgress });
         if (execResult.success) {
-          console.error('[CrashAvoidance] Circularization complete!');
+          log('[CrashAvoidance] Circularization complete!');
           burnSuccess = true;
           circularized = true;
         } else {
-          console.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
+          log(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
           burnSuccess = true; // Still safe, just didn't circularize
         }
       } else {
-        console.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
+        log(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
         burnSuccess = true; // Still safe, just didn't circularize
       }
       break;
@@ -220,13 +293,13 @@ export async function crashAvoidance(
     // This happens when navmode switches and SAS RADIALOUT changes direction
     const upAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR)');
     if (upAngle > HORIZONTAL_ANGLE_THRESHOLD) {
-      console.error(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), transitioning to circularization...`);
+      log(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), transitioning to circularization...`);
 
       // Stop throttle
       await conn.execute('SET MCP_THR TO 0.', 2000);
       await unlockControls(conn);
 
-      console.error(`[CrashAvoidance] Current apoapsis: ${(currentAp / 1000).toFixed(1)} km`);
+      log(`[CrashAvoidance] Current apoapsis: ${(currentAp / 1000).toFixed(1)} km`);
 
       // Create circularization node at apoapsis
       const circResult = await conn.execute(
@@ -235,19 +308,19 @@ export async function crashAvoidance(
       );
 
       if (circResult.output.includes('True')) {
-        console.error('[CrashAvoidance] Circularization node created, executing...');
+        log('[CrashAvoidance] Circularization node created, executing...');
 
         // Execute the circularization burn
-        const execResult = await executeNode(conn);
+        const execResult = await executeNode(conn, { onProgress });
         if (execResult.success) {
-          console.error('[CrashAvoidance] Circularization complete!');
+          log('[CrashAvoidance] Circularization complete!');
           burnSuccess = true;
           circularized = true;
         } else {
-          console.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
+          log(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
         }
       } else {
-        console.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
+        log(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
       }
       break;
     }
@@ -256,7 +329,7 @@ export async function crashAvoidance(
     if (throttle > 0) {
       const stageDv = await queryNumber(conn, 'STAGE:DELTAV:CURRENT');
       if (stageDv < DV_STAGE_THRESHOLD) {
-        console.error('[CrashAvoidance] Stage depleted, staging...');
+        log('[CrashAvoidance] Stage depleted, staging...');
         await conn.execute('STAGE.', 2000);
         stagesUsed++;
         await delay(500);
@@ -266,13 +339,13 @@ export async function crashAvoidance(
 
     // Log progress
     const throttlePct = (throttle * 100).toFixed(0);
-    console.error(`[CrashAvoidance] Angle: ${angle.toFixed(1)}°, Throttle: ${throttlePct}%, Pe: ${currentPe.toFixed(0)}m`);
+    log(`[CrashAvoidance] Angle: ${angle.toFixed(1)}°, Throttle: ${throttlePct}%, Pe: ${currentPe.toFixed(0)}m`);
 
     await delay(pollIntervalMs);
   }
 
   // Step 4: Stop throttle and unlock controls
-  console.error('[CrashAvoidance] Stopping throttle...');
+  log('[CrashAvoidance] Stopping throttle...');
   await conn.execute('SET MCP_THR TO 0.', 2000);
   await unlockControls(conn);
 
@@ -282,7 +355,7 @@ export async function crashAvoidance(
   const finalPe = await queryNumber(conn, 'PERIAPSIS');
   const finalAp = await queryNumber(conn, 'APOAPSIS');
 
-  console.error(`[CrashAvoidance] Complete. Pe: ${initialPe.toFixed(0)}m → ${finalPe.toFixed(0)}m, Ap: ${(finalAp / 1000).toFixed(1)}km, ΔV used: ${deltaVUsed.toFixed(1)} m/s${circularized ? ' (circularized)' : ''}`);
+  log(`[CrashAvoidance] Complete. Pe: ${initialPe.toFixed(0)}m → ${finalPe.toFixed(0)}m, Ap: ${(finalAp / 1000).toFixed(1)}km, ΔV used: ${deltaVUsed.toFixed(1)} m/s${circularized ? ' (circularized)' : ''}`);
 
   return {
     success: burnSuccess,
