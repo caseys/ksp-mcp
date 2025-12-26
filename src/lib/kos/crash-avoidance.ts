@@ -12,14 +12,17 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { delay, queryNumber, unlockControls } from '../mechjeb/shared.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
+import { executeNode } from '../mechjeb/execute-node.js';
 
 export interface CrashAvoidanceResult {
   success: boolean;
   error?: string;
   initialPeriapsis?: number;
   finalPeriapsis?: number;
+  finalApoapsis?: number;
   deltaVUsed?: number;
   stagesUsed?: number;
+  circularized?: boolean;
 }
 
 export interface CrashAvoidanceOptions {
@@ -31,11 +34,13 @@ export interface CrashAvoidanceOptions {
 
 // Defaults
 const DEFAULT_TARGET_PE = 10_000;       // 10km
-const DEFAULT_TIMEOUT_MS = 300_000;     // 5 minutes
+const DEFAULT_TIMEOUT_MS = 300_000;        // 5 minutes
 const DEFAULT_POLL_MS = 1000;          // 1 second
 const DEFAULT_ALIGN_THRESHOLD = 10;    // degrees - full throttle below this
 const THROTTLE_START_ANGLE = 45;       // degrees - start throttling above this angle
 const DV_STAGE_THRESHOLD = 1;          // m/s - stage when below this
+const HORIZONTAL_ANGLE_THRESHOLD = 80; // degrees - transition to circularize when angle to UP exceeds this (ship tilting toward horizontal)
+const MIN_VERTICAL_SPEED = 20; // m/s - minimum vertical speed before checking apoapsis target
 
 /**
  * Calculate throttle based on alignment angle.
@@ -112,13 +117,21 @@ export async function crashAvoidance(
     };
   }
 
-  // Step 1: Enable RCS and SAS
-  console.error('[CrashAvoidance] Enabling RCS and SAS...');
-  await conn.execute('RCS ON. SAS ON.', 2000);
+  // Step 1: Enable RCS and SAS with proper waits for initialization
+  console.error('[CrashAvoidance] Enabling RCS and SAS, setting RADIALOUT...');
+  await conn.execute('RCS ON. SAS ON. WAIT 1. SET SASMODE TO "RADIALOUT". WAIT 0.5.', 4000);
 
-  // Step 2: Set SAS to radial-out
-  console.error('[CrashAvoidance] Setting SAS to RADIALOUT...');
-  await conn.execute('SET SASMODE TO "RADIALOUT".', 2000);
+  // Step 2: Query NAVMODE to determine reference frame for angle calculation
+  const navmodeResult = await conn.execute('PRINT NAVMODE.', 2000);
+  const isSurfaceMode = navmodeResult.output.includes('SURFACE');
+  console.error(`[CrashAvoidance] NavMode: ${isSurfaceMode ? 'SURFACE' : 'ORBIT'}`);
+
+  // Choose angle calculation based on navmode:
+  // - SURFACE mode: Use SHIP:UP (away from planet center) - robust at low altitude/velocity
+  // - ORBIT mode: Use orbital radial-out calculation (perpendicular to velocity in orbital plane)
+  const angleCmd = isSurfaceMode
+    ? 'PRINT VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR).'
+    : 'PRINT VANG(SHIP:FACING:FOREVECTOR, VCRS(SHIP:VELOCITY:ORBIT, VCRS(-SHIP:BODY:POSITION, SHIP:VELOCITY:ORBIT)):NORMALIZED).';
 
   // Step 3: Combined alignment and burn loop
   // Throttle ramps up as alignment improves (0% at 45°, 100% at 10°)
@@ -127,18 +140,15 @@ export async function crashAvoidance(
   let currentPe = initialPe;
   let burnSuccess = false;
   let lastThrottle = -1;
+  let circularized = false;
 
   // Set up throttle control variable in kOS
   await conn.execute('SET MCP_THR TO 0.', 2000);
   await conn.execute('LOCK THROTTLE TO MCP_THR.', 2000);
 
   while (Date.now() - burnStart < timeoutMs) {
-    // Query alignment angle to radial-out
-    // Radial-out = cross(velocity, angular_momentum) where angular_momentum = cross(position, velocity)
-    const angleResult = await conn.execute(
-      'PRINT VANG(SHIP:FACING:FOREVECTOR, VCRS(SHIP:VELOCITY:ORBIT, VCRS(-SHIP:BODY:POSITION, SHIP:VELOCITY:ORBIT)):NORMALIZED).',
-      2000
-    );
+    // Query alignment angle using the appropriate reference frame
+    const angleResult = await conn.execute(angleCmd, 2000);
     const angle = Number.parseFloat(angleResult.output.match(/[\d.]+/)?.[0] || '180');
 
     // Calculate and set throttle based on alignment
@@ -150,13 +160,95 @@ export async function crashAvoidance(
       lastThrottle = throttle;
     }
 
-    // Check periapsis
+    // Check orbit parameters
     currentPe = await queryNumber(conn, 'PERIAPSIS');
+    const currentAp = await queryNumber(conn, 'APOAPSIS');
 
-    // Check if safe
-    if (currentPe > targetPeriapsis) {
-      console.error(`[CrashAvoidance] Safe! Pe: ${currentPe.toFixed(0)}m`);
-      burnSuccess = true;
+    // Safety check depends on navmode:
+    // - SURFACE mode: first need vertical speed >= 20 m/s, then apoapsis > target
+    // - ORBIT mode: monitor periapsis (raising the crash point)
+    let isSafe = false;
+    let safetyLabel = '';
+
+    if (isSurfaceMode) {
+      const vertSpeed = await queryNumber(conn, 'SHIP:VERTICALSPEED');
+      if (vertSpeed >= MIN_VERTICAL_SPEED && currentAp > targetPeriapsis) {
+        isSafe = true;
+        safetyLabel = `Vspd: ${vertSpeed.toFixed(0)}m/s, Ap: ${(currentAp / 1000).toFixed(1)}km`;
+      }
+    } else {
+      if (currentPe > targetPeriapsis) {
+        isSafe = true;
+        safetyLabel = `Pe: ${(currentPe / 1000).toFixed(1)}km`;
+      }
+    }
+
+    // Check if safe - if so, transition to circularization
+    if (isSafe) {
+      console.error(`[CrashAvoidance] Safe! ${safetyLabel} > ${(targetPeriapsis / 1000).toFixed(1)}km target`);
+      console.error('[CrashAvoidance] Transitioning to circularization...');
+
+      // Stop throttle
+      await conn.execute('SET MCP_THR TO 0.', 2000);
+      await unlockControls(conn);
+
+      // Create circularization node at apoapsis
+      const circResult = await conn.execute(
+        'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("APOAPSIS").',
+        10_000
+      );
+
+      if (circResult.output.includes('True')) {
+        console.error('[CrashAvoidance] Circularization node created, executing...');
+        const execResult = await executeNode(conn);
+        if (execResult.success) {
+          console.error('[CrashAvoidance] Circularization complete!');
+          burnSuccess = true;
+          circularized = true;
+        } else {
+          console.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
+          burnSuccess = true; // Still safe, just didn't circularize
+        }
+      } else {
+        console.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
+        burnSuccess = true; // Still safe, just didn't circularize
+      }
+      break;
+    }
+
+    // Monitor angle to UP to detect when ship is tilting toward horizontal
+    // This happens when navmode switches and SAS RADIALOUT changes direction
+    const upAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR)');
+    if (upAngle > HORIZONTAL_ANGLE_THRESHOLD) {
+      console.error(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), transitioning to circularization...`);
+
+      // Stop throttle
+      await conn.execute('SET MCP_THR TO 0.', 2000);
+      await unlockControls(conn);
+
+      console.error(`[CrashAvoidance] Current apoapsis: ${(currentAp / 1000).toFixed(1)} km`);
+
+      // Create circularization node at apoapsis
+      const circResult = await conn.execute(
+        'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("APOAPSIS").',
+        10_000
+      );
+
+      if (circResult.output.includes('True')) {
+        console.error('[CrashAvoidance] Circularization node created, executing...');
+
+        // Execute the circularization burn
+        const execResult = await executeNode(conn);
+        if (execResult.success) {
+          console.error('[CrashAvoidance] Circularization complete!');
+          burnSuccess = true;
+          circularized = true;
+        } else {
+          console.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
+        }
+      } else {
+        console.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
+      }
       break;
     }
 
@@ -188,15 +280,18 @@ export async function crashAvoidance(
   const finalDv = await queryNumber(conn, 'SHIP:DELTAV:CURRENT');
   const deltaVUsed = initialDv - finalDv;
   const finalPe = await queryNumber(conn, 'PERIAPSIS');
+  const finalAp = await queryNumber(conn, 'APOAPSIS');
 
-  console.error(`[CrashAvoidance] Complete. Pe: ${initialPe.toFixed(0)}m → ${finalPe.toFixed(0)}m, ΔV used: ${deltaVUsed.toFixed(1)} m/s`);
+  console.error(`[CrashAvoidance] Complete. Pe: ${initialPe.toFixed(0)}m → ${finalPe.toFixed(0)}m, Ap: ${(finalAp / 1000).toFixed(1)}km, ΔV used: ${deltaVUsed.toFixed(1)} m/s${circularized ? ' (circularized)' : ''}`);
 
   return {
     success: burnSuccess,
     error: burnSuccess ? undefined : `Timeout: periapsis at ${finalPe.toFixed(0)}m (target: ${targetPeriapsis}m)`,
     initialPeriapsis: initialPe,
     finalPeriapsis: finalPe,
+    finalApoapsis: finalAp,
     deltaVUsed,
     stagesUsed,
+    circularized,
   };
 }
