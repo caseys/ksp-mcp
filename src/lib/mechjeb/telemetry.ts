@@ -7,24 +7,12 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import type { VesselState, OrbitInfo, MechJebInfo } from '../types.js';
 import type { TargetEncounterInfo, BodyEncounterInfo, VesselEncounterInfo } from './shared.js';
+import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
+import { delay } from '../utils/progress.js';
 
 const TELEMETRY_DELAY_MS = 100;
-
-/**
- * Parse a numeric value from kOS output
- * Returns 0 if input is undefined, null, or doesn't contain a number
- */
-function parseNumber(output: string | undefined | null): number {
-  if (!output) return 0;
-  const match = output.match(/-?[\d.]+(?:E[+-]?\d+)?/i);
-  return match ? Number.parseFloat(match[0]) : 0;
-}
 
 /**
  * Safely check if a string contains 'true' (case-insensitive)
@@ -282,7 +270,8 @@ export interface TargetInfo {
  * Available targets for navigation
  */
 export interface AvailableTargets {
-  bodies: string[];
+  moons: string[];
+  planets: string[];
   vessels: string[];
 }
 
@@ -402,11 +391,12 @@ export async function getShipTelemetry(
 
   // Build formatted output
   lines.push('=== Ship Status ===');
-  lines.push(`Vessel: ${vesselName} (${vesselType}) - ${vesselStatus}`);
+  lines.push("")
   lines.push(`SOI: ${soi}`);
   lines.push(`Apoapsis: ${isEscapeTrajectory ? 'Escape' : `${(apo / 1000).toFixed(1)} km`}`);
   lines.push(`Periapsis: ${(per / 1000).toFixed(1)} km`);
   lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : `${period.toFixed(0)}s`} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
+  lines.push(`Vessel: ${vesselStatus} - (${vesselType}) - ${vesselName} (only used in load save command) `);
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
@@ -476,34 +466,29 @@ export async function getShipTelemetry(
     }
   }
 
-  // Query 4: Get available targets (bodies and vessels)
-  // Use __MARKER__ pattern consistent with other completion markers in the project
-  const availableTargets: AvailableTargets = { bodies: [], vessels: [] };
-  const targetsResult = await conn.execute(
-    'LIST BODIES IN bods. LIST TARGETS IN tgts. ' +
-    'FOR b IN bods { PRINT "__BODY__" + b:NAME + "__". } ' +
-    'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "__VESSEL__" + t:NAME + "__". } } ' +
-    'PRINT "__LIST_DONE__".',
-    timeoutMs
-  );
+  // Query 4: Get available targets using ManeuverProgram.listTargets()
+  const availableTargets: AvailableTargets = { moons: [], planets: [], vessels: [] };
+  try {
+    const { ManeuverProgram } = await import('./maneuver.js');
+    const maneuverProgram = new ManeuverProgram(conn);
+    const targets = await maneuverProgram.listTargets();
 
-  if (!targetsResult.error) {
-    // Parse body names - __BODY__name__ pattern (non-greedy match to handle names with underscores)
-    const bodyMatches = targetsResult.output.matchAll(/__BODY__(.+?)__(?=__|$|\s)/g);
-    for (const m of bodyMatches) {
-      availableTargets.bodies.push(m[1].trim());
-    }
-    // Parse vessel names - __VESSEL__name__ pattern
-    const vesselMatches = targetsResult.output.matchAll(/__VESSEL__(.+?)__(?=__|$|\s)/g);
-    for (const m of vesselMatches) {
-      availableTargets.vessels.push(m[1].trim());
-    }
+    availableTargets.moons = targets.moons.map(m => m.name);
+    availableTargets.planets = targets.planets.map(p => p.name);
+    availableTargets.vessels = targets.vessels.map(v => v.name);
 
     lines.push('', '=== Available Targets ===');
-    lines.push(`Bodies: ${availableTargets.bodies.join(', ')}`);
+    if (availableTargets.moons.length > 0) {
+      lines.push(`Moons: ${availableTargets.moons.join(', ')}`);
+    }
+    if (availableTargets.planets.length > 0) {
+      lines.push(`Planets: ${availableTargets.planets.join(', ')}`);
+    }
     if (availableTargets.vessels.length > 0) {
       lines.push(`Vessels: ${availableTargets.vessels.join(', ')}`);
     }
+  } catch {
+    // Silently skip if listTargets fails
   }
 
   return {
@@ -541,7 +526,7 @@ export async function getStatus(
     return {
       connected: false,
       reason,
-      availableTargets: { bodies: [], vessels: [] },
+      availableTargets: { moons: [], planets: [], vessels: [] },
       formatted: `=== kOS Not Accessible ===\n${reason}`,
     };
   }

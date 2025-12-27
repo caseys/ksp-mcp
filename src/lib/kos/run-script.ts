@@ -10,16 +10,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { config } from '../../config/index.js';
-import { delay } from '../mechjeb/shared.js';
 import { globalKosMonitor } from '../../utils/kos-monitor.js';
-
-/**
- * Helper to log and send progress notifications.
- */
-function logProgress(message: string, onProgress?: (msg: string) => void): void {
-  console.error(message);
-  onProgress?.(message);
-}
+import { delay, logProgress } from '../utils/progress.js';
 
 export interface RunScriptResult {
   success: boolean;

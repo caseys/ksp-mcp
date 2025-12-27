@@ -3,7 +3,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, requireTarget, type ManeuverResult } from '../shared.js';
 
 /**
  * Create a maneuver node to match orbital plane with the target.
@@ -16,14 +16,8 @@ export async function matchPlane(
   conn: KosConnection,
   timeRef = 'REL_NEAREST_AD'
 ): Promise<ManeuverResult> {
-  // Check if target is set
-  const hasTargetResult = await conn.execute('PRINT HASTARGET.', 2000);
-  if (!hasTargetResult.output.includes('True')) {
-    return {
-      success: false,
-      error: 'No target set. Use kos_set_target first.'
-    };
-  }
+  const targetError = await requireTarget(conn);
+  if (targetError) return targetError;
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:PLANE("${timeRef}").`;
   return executeManeuverCommand(conn, cmd);

@@ -3,15 +3,8 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
-
-/**
- * Helper to log and send progress notifications.
- */
-function logProgress(message: string, onProgress?: (msg: string) => void): void {
-  console.error(message);
-  onProgress?.(message);
-}
+import { executeManeuverCommand, requireTarget, getTargetName, type ManeuverResult } from '../shared.js';
+import { logProgress } from '../../utils/progress.js';
 
 export interface InterplanetaryOptions {
   waitForPhaseAngle?: boolean;
@@ -32,18 +25,10 @@ export async function interplanetaryTransfer(
   const { waitForPhaseAngle = true, onProgress } = options;
   const log = (msg: string) => logProgress(msg, onProgress);
 
-  // Check if target is set
-  const hasTargetResult = await conn.execute('PRINT HASTARGET.', 2000);
-  if (!hasTargetResult.output.includes('True')) {
-    return {
-      success: false,
-      error: 'No target set. Use kos_set_target first.'
-    };
-  }
+  const targetError = await requireTarget(conn);
+  if (targetError) return targetError;
 
-  // Get target name for logging
-  const targetResult = await conn.execute('PRINT TARGET:NAME.', 2000);
-  const targetName = targetResult.output.trim().replace(/[>\s]+$/, '');
+  const targetName = await getTargetName(conn);
 
   if (waitForPhaseAngle) {
     log(`[Transfer] Planning interplanetary transfer to ${targetName} (waiting for optimal phase angle)...`);

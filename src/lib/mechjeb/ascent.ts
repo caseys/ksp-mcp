@@ -13,26 +13,9 @@ import type {
   AscentResult
 } from '../types.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
-
-function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-/**
- * Helper to log and send progress notifications.
- */
-function logProgress(message: string, onProgress?: (msg: string) => void): void {
-  console.log(message);
-  onProgress?.(message);
-}
-
-/**
- * Parse a numeric value from kOS output
- */
-function parseNumber(output: string): number {
-  const match = output.match(/-?[\d.]+(?:E[+-]?\d+)?/i);
-  return match ? Number.parseFloat(match[0]) : 0;
-}
+import { delay, logProgress } from '../utils/progress.js';
+import { parseNumber } from './shared.js';
+import { clearNodes } from '../kos/nodes.js';
 
 /**
  * Detect kOS errors in output
@@ -205,11 +188,7 @@ export class AscentHandle {
         this.log(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${success ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
 
         // Clear any leftover maneuver nodes (circularization may leave tiny residual)
-        try {
-          await this.conn.execute('UNTIL NOT HASNODE { REMOVE NEXTNODE. }');
-        } catch {
-          // Ignore - non-critical cleanup
-        }
+        await clearNodes(this.conn);
 
         return {
           success,

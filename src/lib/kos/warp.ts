@@ -7,17 +7,10 @@
  */
 
 import { KosConnection } from '../../transport/kos-connection.js';
+import { logProgress } from '../utils/progress.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
-
-/**
- * Helper to log and send progress notifications.
- */
-function logProgress(message: string, onProgress?: (msg: string) => void): void {
-  console.error(message);
-  onProgress?.(message);
-}
 
 export type WarpTarget = 'node' | 'soi' | 'periapsis' | 'apoapsis';
 

@@ -16,6 +16,38 @@ export async function unlockControls(conn: KosConnection): Promise<void> {
   }
 }
 
+/**
+ * Check if a navigation target is currently set.
+ */
+export async function hasTarget(conn: KosConnection): Promise<boolean> {
+  const result = await conn.execute('PRINT HASTARGET.', 2000);
+  return result.output.toLowerCase().includes('true');
+}
+
+/**
+ * Require a target to be set, returning an error result if not.
+ * Use this at the start of functions that need a target.
+ */
+export async function requireTarget(conn: KosConnection): Promise<ManeuverResult | null> {
+  if (await hasTarget(conn)) {
+    return null; // Target exists, proceed
+  }
+  return {
+    success: false,
+    error: 'No target set. Use set_target first.'
+  };
+}
+
+/**
+ * Get the name of the current target.
+ * Returns empty string if no target is set.
+ */
+export async function getTargetName(conn: KosConnection): Promise<string> {
+  const result = await conn.execute('PRINT TARGET:NAME.', 2000);
+  // Clean up kOS prompt characters
+  return result.output.trim().replace(/[>\s]+$/, '');
+}
+
 export interface ManeuverResult {
   success: boolean;
   deltaV?: number;        // m/s
@@ -56,8 +88,11 @@ export type TargetEncounterInfo = BodyEncounterInfo | VesselEncounterInfo;
 /**
  * Parse a numeric value from kOS output
  * Looks for patterns like "23.80  m/s" or just bare numbers (including negative)
+ * Returns 0 if input is undefined, null, or doesn't contain a number
  */
-function parseNumber(output: string): number {
+export function parseNumber(output: string | undefined | null): number {
+  if (!output) return 0;
+
   // First try to find a number with units (e.g., "23.80  m/s" or "-23.80  m/s")
   const withUnits = output.match(/(-?\d+(?:\.\d+)?)\s*m\/s/i);
   if (withUnits) {
