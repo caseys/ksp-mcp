@@ -7,7 +7,7 @@
  */
 
 import { KosConnection } from '../../transport/kos-connection.js';
-import { logProgress } from '../utils/progress.js';
+import { type McpLogger, nullLogger } from '../tool-types.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -85,8 +85,8 @@ interface WarpOptions {
   leadTime?: number;
   /** Timeout for warp completion in ms (default: 300000 = 5 minutes) */
   timeout?: number;
-  /** Progress callback for MCP notifications */
-  onProgress?: (message: string) => void;
+  /** Logger for MCP notifications */
+  logger?: McpLogger;
 }
 
 export interface WarpResult {
@@ -117,20 +117,20 @@ export async function warpTo(
 ): Promise<WarpResult> {
   const leadTime = options.leadTime ?? 0;
   const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
-  const onProgress = options.onProgress;
+  const logger = options.logger;
 
   switch (target) {
     case 'node': {
-      return await warpToNode(conn, leadTime, timeout, onProgress);
+      return await warpToNode(conn, leadTime, timeout, logger);
     }
     case 'soi': {
-      return await warpToSOI(conn, leadTime, timeout, onProgress);
+      return await warpToSOI(conn, leadTime, timeout, logger);
     }
     case 'periapsis': {
-      return await warpToOrbitalPoint(conn, 'PERIAPSIS', leadTime, timeout, onProgress);
+      return await warpToOrbitalPoint(conn, 'PERIAPSIS', leadTime, timeout, logger);
     }
     case 'apoapsis': {
-      return await warpToOrbitalPoint(conn, 'APOAPSIS', leadTime, timeout, onProgress);
+      return await warpToOrbitalPoint(conn, 'APOAPSIS', leadTime, timeout, logger);
     }
   }
 }
@@ -142,9 +142,9 @@ async function warpToNode(
   conn: KosConnection,
   leadTime: number,
   timeout: number,
-  onProgress?: (msg: string) => void
+  logger?: McpLogger
 ): Promise<WarpResult> {
-  const log = (msg: string) => logProgress(msg, onProgress);
+  const log = logger ?? nullLogger;
 
   // Check if node exists
   const nodeCheck = await conn.execute('PRINT HASNODE.');
@@ -181,7 +181,7 @@ async function warpToNode(
     };
   }
 
-  log(`[Warp] Warping to node T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
+  log.progress(`[Warp] Warping to node T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
 
   // Start warp
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(NEXTNODE:TIME - ${leadTime}).`, 5000);
@@ -192,10 +192,10 @@ async function warpToNode(
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
     const currentEta = Number.parseFloat(await queryValue(conn, 'NEXTNODE:ETA'));
-    log(`[Warp] Node ETA: ${currentEta.toFixed(0)}s`);
+    log.progress(`[Warp] Node ETA: ${currentEta.toFixed(0)}s`);
 
     if (currentEta <= leadTime + 5) {
-      log('[Warp] Node warp complete');
+      log.progress('[Warp] Node warp complete');
       return await getBasicStatus(conn);
     }
   }
@@ -210,9 +210,9 @@ async function warpToSOI(
   conn: KosConnection,
   leadTime: number,
   timeout: number,
-  onProgress?: (msg: string) => void
+  logger?: McpLogger
 ): Promise<WarpResult> {
-  const log = (msg: string) => logProgress(msg, onProgress);
+  const log = logger ?? nullLogger;
 
   // Check for SOI transition
   const soiCheck = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.');
@@ -224,7 +224,7 @@ async function warpToSOI(
   const currentBody = await queryValue(conn, 'SHIP:BODY:NAME');
   const soiEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
 
-  log(`[Warp] Current body: ${currentBody}, SOI transition in ${soiEta.toFixed(0)}s`);
+  log.progress(`[Warp] Current body: ${currentBody}, SOI transition in ${soiEta.toFixed(0)}s`);
 
   // Start warp to SOI transition
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + SHIP:ORBIT:NEXTPATCHETA - ${leadTime}).`, 5000);
@@ -238,19 +238,19 @@ async function warpToSOI(
 
     // Check if body changed (we crossed SOI)
     if (newBody.toLowerCase() !== currentBody.toLowerCase()) {
-      log(`[Warp] Crossed into ${newBody} SOI`);
+      log.progress(`[Warp] Crossed into ${newBody} SOI`);
 
       // Wait for warp to fully stop and KSP to settle
       await new Promise(resolve => setTimeout(resolve, 2000));
 
       // Get SOI info including periapsis check
-      return await getSOIStatus(conn, newBody, onProgress);
+      return await getSOIStatus(conn, newBody, logger);
     }
 
     // Also check if we're getting close to transition (within leadTime)
     const remainingEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
     if (remainingEta < 100_000) { // Only log if ETA is reasonable
-      log(`[Warp] SOI ETA: ${remainingEta.toFixed(0)}s`);
+      log.progress(`[Warp] SOI ETA: ${remainingEta.toFixed(0)}s`);
     }
   }
 
@@ -265,9 +265,9 @@ async function warpToOrbitalPoint(
   point: 'PERIAPSIS' | 'APOAPSIS',
   leadTime: number,
   timeout: number,
-  onProgress?: (msg: string) => void
+  logger?: McpLogger
 ): Promise<WarpResult> {
-  const log = (msg: string) => logProgress(msg, onProgress);
+  const log = logger ?? nullLogger;
 
   // Periapsis warp - block if negative periapsis (would warp to impact point)
   if (point === 'PERIAPSIS') {
@@ -312,7 +312,7 @@ async function warpToOrbitalPoint(
     };
   }
 
-  log(`[Warp] Warping to ${point.toLowerCase()} T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
+  log.progress(`[Warp] Warping to ${point.toLowerCase()} T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
 
   // Start warp
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ETA:${point} - ${leadTime}).`, 5000);
@@ -323,10 +323,10 @@ async function warpToOrbitalPoint(
     await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
 
     const currentEta = Number.parseFloat(await queryValue(conn, `ETA:${point}`));
-    log(`[Warp] ${point} ETA: ${currentEta.toFixed(0)}s`);
+    log.progress(`[Warp] ${point} ETA: ${currentEta.toFixed(0)}s`);
 
     if (currentEta <= leadTime + 5) {
-      log(`[Warp] ${point.toLowerCase()} warp complete`);
+      log.progress(`[Warp] ${point.toLowerCase()} warp complete`);
       return await getBasicStatus(conn);
     }
   }
@@ -350,8 +350,8 @@ async function getBasicStatus(conn: KosConnection): Promise<WarpResult> {
 /**
  * Get SOI status with crash trajectory check
  */
-async function getSOIStatus(conn: KosConnection, body: string, onProgress?: (msg: string) => void): Promise<WarpResult> {
-  const log = (msg: string) => logProgress(msg, onProgress);
+async function getSOIStatus(conn: KosConnection, body: string, logger?: McpLogger): Promise<WarpResult> {
+  const log = logger ?? nullLogger;
 
   const soiInfo = await conn.execute(
     'PRINT "SOI:" + SHIP:BODY:NAME + "|" + ROUND(ALTITUDE) + "|" + ROUND(PERIAPSIS) + "|" + ROUND(SHIP:BODY:RADIUS).',
@@ -361,7 +361,7 @@ async function getSOIStatus(conn: KosConnection, body: string, onProgress?: (msg
   // Parse structured output
   const soiMatch = soiInfo.output.match(/SOI:([^|]+)\|(-?\d+)\|(-?\d+)\|(\d+)/);
   if (!soiMatch) {
-    log(`[Warp] SOI info parse failed: ${soiInfo.output}`);
+    log.warn(`[Warp] SOI info parse failed: ${soiInfo.output}`);
     return { success: true, body, altitude: 0 };
   }
 
@@ -370,7 +370,7 @@ async function getSOIStatus(conn: KosConnection, body: string, onProgress?: (msg
   const periapsis = Number.parseInt(soiMatch[3]);
   const bodyRadius = Number.parseInt(soiMatch[4]);
 
-  log(`[Warp] In ${newBody} SOI: alt=${altitude}m, pe=${periapsis}m`);
+  log.info(`[Warp] In ${newBody} SOI: alt=${altitude}m, pe=${periapsis}m`);
 
   // Warn about crash trajectory (periapsis below surface) but don't auto-trigger avoidance
   // User can call crash_avoidance tool manually if needed
@@ -401,9 +401,9 @@ export async function warpForward(
   conn: KosConnection,
   seconds: number,
   timeout: number = DEFAULT_TIMEOUT_MS,
-  onProgress?: (msg: string) => void
+  logger?: McpLogger
 ): Promise<WarpResult> {
-  const log = (msg: string) => logProgress(msg, onProgress);
+  const log = logger ?? nullLogger;
 
   // Check for crash trajectory before warping
   const crashCheck = await checkCrashTrajectory(conn, seconds);
@@ -427,7 +427,7 @@ export async function warpForward(
     };
   }
 
-  log(`[Warp] Warping forward ${seconds}s...`);
+  log.progress(`[Warp] Warping forward ${seconds}s...`);
 
   // Start warp
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
@@ -443,11 +443,11 @@ export async function warpForward(
     const warpLevel = warpMatch ? Number.parseInt(warpMatch[1], 10) : -1;
 
     if (warpLevel === 0) {
-      log('[Warp] Forward warp complete');
+      log.progress('[Warp] Forward warp complete');
       return await getBasicStatus(conn);
     }
 
-    log(`[Warp] Warp level: ${warpLevel}`);
+    log.progress(`[Warp] Warp level: ${warpLevel}`);
   }
 
   return { success: false, error: 'Warp timeout' };
@@ -483,7 +483,7 @@ export const warpTool: ToolDefinition = {
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
-      const onProgress = ctx.createProgressCallback(extra);
+      const logger = ctx.createLogger(extra);
 
       const target = args.target;
       const leadTime = args.leadTime as number;
@@ -491,9 +491,9 @@ export const warpTool: ToolDefinition = {
       let result: WarpResult;
 
       if (typeof target === 'number') {
-        result = await warpForward(conn, target, DEFAULT_TIMEOUT_MS, onProgress);
+        result = await warpForward(conn, target, DEFAULT_TIMEOUT_MS, logger);
       } else {
-        result = await warpTo(conn, target as WarpTarget, { leadTime, onProgress });
+        result = await warpTo(conn, target as WarpTarget, { leadTime, logger });
       }
 
       if (result.success) {

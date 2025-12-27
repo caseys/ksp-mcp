@@ -4,11 +4,11 @@
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, requireTarget, getTargetName, type ManeuverResult } from '../shared.js';
-import { logProgress } from '../../utils/progress.js';
+import { type McpLogger, nullLogger } from '../../tool-types.js';
 
 export interface InterplanetaryOptions {
   waitForPhaseAngle?: boolean;
-  onProgress?: (message: string) => void;
+  logger?: McpLogger;
 }
 
 /**
@@ -16,14 +16,14 @@ export interface InterplanetaryOptions {
  * Requires a target planet to be set first.
  *
  * @param conn kOS connection
- * @param options Transfer options including waitForPhaseAngle and onProgress callback
+ * @param options Transfer options including waitForPhaseAngle and logger
  */
 export async function interplanetaryTransfer(
   conn: KosConnection,
   options: InterplanetaryOptions = {}
 ): Promise<ManeuverResult> {
-  const { waitForPhaseAngle = true, onProgress } = options;
-  const log = (msg: string) => logProgress(msg, onProgress);
+  const { waitForPhaseAngle = true, logger } = options;
+  const log = logger ?? nullLogger;
 
   const targetError = await requireTarget(conn);
   if (targetError) return targetError;
@@ -31,16 +31,16 @@ export async function interplanetaryTransfer(
   const targetName = await getTargetName(conn);
 
   if (waitForPhaseAngle) {
-    log(`[Transfer] Planning interplanetary transfer to ${targetName} (waiting for optimal phase angle)...`);
+    log.progress(`[Transfer] Planning interplanetary transfer to ${targetName} (waiting for optimal phase angle)...`);
   } else {
-    log(`[Transfer] Planning immediate transfer to ${targetName}...`);
+    log.progress(`[Transfer] Planning immediate transfer to ${targetName}...`);
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:INTERPLANETARY(${waitForPhaseAngle ? 'TRUE' : 'FALSE'}).`;
   const result = await executeManeuverCommand(conn, cmd);
 
   if (result.success) {
-    log(`[Transfer] Transfer node created to ${targetName}`);
+    log.progress(`[Transfer] Transfer node created to ${targetName}`);
   }
 
   return result;

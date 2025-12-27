@@ -43,7 +43,7 @@ export interface ToolDefinition {
 export interface ToolContext {
   ensureConnected: () => Promise<KosConnection>;
   getConnection: () => KosConnection | null;
-  createProgressCallback: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => (msg: string) => void;
+  createLogger: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => McpLogger;
   successResponse: (prefix: string, text: string) => CallToolResult;
   errorResponse: (prefix: string, error: string) => CallToolResult;
   selectTarget: (orchestrator: ManeuverOrchestrator, mode: TargetSelectMode, checkExisting?: boolean) => Promise<string | null>;
@@ -68,6 +68,36 @@ export interface OrbitInfo {
   apoapsis: number;
   altitude: number;
 }
+
+// ============================================================================
+// MCP Logger
+// ============================================================================
+
+/**
+ * Structured logger for MCP notifications.
+ * Supports different log levels for proper message categorization.
+ */
+export interface McpLogger {
+  /** Informational messages */
+  info(message: string): void;
+  /** Warning messages */
+  warn(message: string): void;
+  /** Error messages */
+  error(message: string): void;
+  /** Progress updates (uses progressToken if available) */
+  progress(message: string): void;
+}
+
+/**
+ * Null logger that discards all messages.
+ * Use when no logger is provided to avoid null checks.
+ */
+export const nullLogger: McpLogger = {
+  info: () => {},
+  warn: () => {},
+  error: () => {},
+  progress: () => {},
+};
 
 // ============================================================================
 // Shared Schemas

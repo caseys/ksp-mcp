@@ -13,9 +13,10 @@ import type {
   AscentResult
 } from '../types.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
-import { delay, logProgress } from '../utils/progress.js';
+import { delay } from '../utils/progress.js';
 import { parseNumber } from './shared.js';
 import { clearNodes } from '../kos/nodes.js';
+import { type McpLogger, nullLogger } from '../tool-types.js';
 
 /**
  * Detect kOS errors in output
@@ -34,19 +35,15 @@ function hasKosError(output: string): boolean {
  */
 export class AscentHandle {
   private aborted = false;
-  private onProgress?: (msg: string) => void;
+  private logger: McpLogger;
 
   constructor(
     private conn: KosConnection,
     public readonly id: string,
     public readonly targetAltitude: number,
-    onProgress?: (msg: string) => void
+    logger?: McpLogger
   ) {
-    this.onProgress = onProgress;
-  }
-
-  private log(msg: string): void {
-    logProgress(msg, this.onProgress);
+    this.logger = logger ?? nullLogger;
   }
 
   /**
@@ -104,7 +101,7 @@ export class AscentHandle {
    * More reliable than blocking kOS UNTIL loop - handles connection recovery
    */
   async waitForCompletion(pollIntervalMs = 5000): Promise<AscentResult> {
-    this.log('[Ascent] Waiting for MechJeb to complete ascent...');
+    this.logger.progress('[Ascent] Waiting for MechJeb to complete ascent...');
 
     const MAX_WAIT_MS = 900_000; // 15 minutes max
     const startTime = Date.now();
@@ -119,7 +116,7 @@ export class AscentHandle {
       throw new Error(`Failed to query atmosphere height. kOS output: ${atmResult.output.slice(0, 100)}`);
     }
     const atmHeight = Number.parseInt(atmMatch[1]);
-    this.log(`[Ascent] Target: periapsis >= ${Math.round(atmHeight/1000)}km (atmosphere height)`);
+    this.logger.info(`[Ascent] Target: periapsis >= ${Math.round(atmHeight/1000)}km (atmosphere height)`);
 
     while (Date.now() - startTime < MAX_WAIT_MS) {
       // Query current status (use SET then PRINT for reliable MechJeb addon output)
@@ -137,17 +134,17 @@ export class AscentHandle {
       // Detect stale connection (empty/unparseable output)
       if (!statusMatch || statusResult.output.trim() === '') {
         consecutiveEmptyResponses++;
-        this.log(`[Ascent] Empty response (${consecutiveEmptyResponses}/${MAX_EMPTY_RESPONSES}), connection may be stale`);
+        this.logger.warn(`[Ascent] Empty response (${consecutiveEmptyResponses}/${MAX_EMPTY_RESPONSES}), connection may be stale`);
 
         if (consecutiveEmptyResponses >= MAX_EMPTY_RESPONSES) {
-          this.log('[Ascent] Too many empty responses, reconnecting...');
+          this.logger.warn('[Ascent] Too many empty responses, reconnecting...');
           try {
             // Force reconnect using ensureConnected
             this.conn = await ensureConnected();
             consecutiveEmptyResponses = 0;
-            this.log('[Ascent] Reconnected successfully');
+            this.logger.info('[Ascent] Reconnected successfully');
           } catch (error) {
-            this.log(`[Ascent] Reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
+            this.logger.error(`[Ascent] Reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
           }
         }
 
@@ -166,7 +163,7 @@ export class AscentHandle {
       // Log progress every 10 seconds
       const now = Date.now();
       if (now - lastLogTime >= 10_000) {
-        this.log(`[Ascent] APO:${Math.round(apoapsis/1000)}km PER:${Math.round(periapsis/1000)}km`);
+        this.logger.progress(`[Ascent] APO:${Math.round(apoapsis/1000)}km PER:${Math.round(periapsis/1000)}km`);
         lastLogTime = now;
       }
 
@@ -184,8 +181,8 @@ export class AscentHandle {
 
         // Success if we achieved orbit (periapsis above atmosphere)
         const success = inOrbit;
-        this.log(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
-        this.log(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${success ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
+        this.logger.progress(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
+        this.logger.progress(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${success ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
 
         // Clear any leftover maneuver nodes (circularization may leave tiny residual)
         await clearNodes(this.conn);
@@ -206,8 +203,8 @@ export class AscentHandle {
     const apoapsis = parseNumber(finalResult.output.split('\n')[0] || '0');
     const periapsis = parseNumber(finalResult.output.split('\n')[1] || '0');
 
-    this.log(`[Ascent] TIMEOUT after ${MAX_WAIT_MS/1000}s`);
-    this.log(`[Ascent] Final: APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km`);
+    this.logger.error(`[Ascent] TIMEOUT after ${MAX_WAIT_MS/1000}s`);
+    this.logger.progress(`[Ascent] Final: APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km`);
 
     return {
       success: false,
@@ -221,7 +218,7 @@ export class AscentHandle {
    * Returns as soon as altitude > 100m or phase is no longer 'prelaunch'
    */
   async waitForLiftoff(pollIntervalMs = 1000, timeoutMs = 60_000): Promise<AscentResult> {
-    this.log('[Ascent] Waiting for liftoff...');
+    this.logger.progress('[Ascent] Waiting for liftoff...');
     const startTime = Date.now();
 
     while (Date.now() - startTime < timeoutMs) {
@@ -231,7 +228,7 @@ export class AscentHandle {
       // - Phase changes from prelaunch, OR
       // - Altitude exceeds 100m
       if (progress.phase !== 'prelaunch' || progress.altitude > 100) {
-        this.log(`[Ascent] Liftoff confirmed! ALT: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
+        this.logger.progress(`[Ascent] Liftoff confirmed! ALT: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
         return {
           success: true,
           finalOrbit: { apoapsis: progress.apoapsis, periapsis: progress.periapsis },
@@ -243,7 +240,7 @@ export class AscentHandle {
     }
 
     // Timeout
-    this.log('[Ascent] Liftoff timeout - ship did not leave the pad');
+    this.logger.error('[Ascent] Liftoff timeout - ship did not leave the pad');
     return {
       success: false,
       finalOrbit: { apoapsis: 0, periapsis: 0 },
@@ -265,14 +262,10 @@ export class AscentHandle {
  */
 export class AscentProgram {
   private handleCounter = 0;
-  private onProgress?: (msg: string) => void;
+  private logger: McpLogger;
 
-  constructor(private conn: KosConnection, onProgress?: (msg: string) => void) {
-    this.onProgress = onProgress;
-  }
-
-  private log(msg: string): void {
-    logProgress(msg, this.onProgress);
+  constructor(private conn: KosConnection, logger?: McpLogger) {
+    this.logger = logger ?? nullLogger;
   }
 
   /**
@@ -286,7 +279,7 @@ export class AscentProgram {
       // Use SET then PRINT for reliable output (inline MechJeb addon access can be lost)
       const result = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
       if (!hasKosError(result.output) && result.output.trim() !== '') {
-        this.log('[Ascent] MechJeb ready');
+        this.logger.info('[Ascent] MechJeb ready');
         return;
       }
       await delay(500);  // Short retry delay
@@ -445,7 +438,7 @@ export class AscentProgram {
         const verifyResult = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
         if (verifyResult.output.toLowerCase().includes('true')) {
           autopilotEngaged = true;
-          this.log(`[Ascent] Autopilot engaged (attempt ${attempt})`);
+          this.logger.progress(`[Ascent] Autopilot engaged (attempt ${attempt})`);
           break;
         }
         if (verifyResult.output.toLowerCase().includes('false')) {
@@ -457,12 +450,12 @@ export class AscentProgram {
       }
 
       if (autopilotEngaged) break;
-      this.log(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
+      this.logger.progress(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
       await delay(300);
     }
 
     if (!autopilotEngaged) {
-      this.log('[Ascent] Warning: Autopilot may not have engaged after 10 attempts, proceeding anyway');
+      this.logger.warn('[Ascent] Autopilot may not have engaged after 10 attempts, proceeding anyway');
     }
 
     // Release controls and stage to begin launch
@@ -474,23 +467,23 @@ export class AscentProgram {
     // Stage to begin launch - this is the critical moment
     await this.conn.execute('STAGE.');
     await delay(500);  // Let the stage command process
-    this.log('[Ascent] LAUNCHED - MechJeb in control');
+    this.logger.progress('[Ascent] LAUNCHED - MechJeb in control');
 
     // Enable 2x warp after 15 seconds if autoWarp is enabled
     if (autoWarp) {
       setTimeout(async () => {
         try {
           await this.conn.execute('SET WARP TO 1.');
-          this.log('[Ascent] Enabled 2x warp');
+          this.logger.info('[Ascent] Enabled 2x warp');
         } catch {
           // Ignore warp errors - non-critical
         }
       }, 15_000);
     }
 
-    // Create handle for monitoring (pass onProgress for waitForCompletion)
+    // Create handle for monitoring (pass logger for waitForCompletion)
     const handleId = `ascent-${++this.handleCounter}-${Date.now()}`;
-    return new AscentHandle(this.conn, handleId, altitude, this.onProgress);
+    return new AscentHandle(this.conn, handleId, altitude, this.logger);
   }
 }
 
@@ -506,8 +499,8 @@ import { distanceSchema } from '../tool-types.js';
  * Launch ascent tool definition
  */
 export const launchAscentTool: ToolDefinition = {
-  name: 'launch_ascent',
-  description: 'Launch into orbit. Circularizes after ascent by default.',
+  name: 'launch_ascent_guidance',
+  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent by default.',
   inputSchema: {
     altitude: distanceSchema.optional().describe('Target orbit altitude in meters (default: atmosphere + 20km, or 20km if no atmosphere)'),
     inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees'),
@@ -523,7 +516,7 @@ export const launchAscentTool: ToolDefinition = {
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
-      const onProgress = ctx.createProgressCallback(extra);
+      const logger = ctx.createLogger(extra);
 
       // Get default altitude based on body's atmosphere
       let altitude = args.altitude as number | undefined;
@@ -532,7 +525,7 @@ export const launchAscentTool: ToolDefinition = {
       }
 
       // Create ascent program and launch
-      const program = new AscentProgram(conn, onProgress);
+      const program = new AscentProgram(conn, logger);
       const handle = await program.launchToOrbit({
         altitude,
         inclination: args.inclination as number,

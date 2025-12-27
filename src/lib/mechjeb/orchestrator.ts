@@ -14,6 +14,7 @@ import { changeEccentricity } from './orbital/eccentricity.js';
 import { matchPlane } from './rendezvous/match-plane.js';
 import { returnFromMoon } from './transfer/return-from-moon.js';
 import { interplanetaryTransfer } from './transfer/interplanetary.js';
+import type { McpLogger } from '../tool-types.js';
 
 /**
  * Options for maneuver orchestration.
@@ -25,8 +26,8 @@ export interface ManeuverOptions {
   targetType?: 'auto' | 'body' | 'vessel';
   /** Whether to execute the node after planning. Defaults to true. */
   execute?: boolean;
-  /** Progress callback for MCP notifications. */
-  onProgress?: (message: string) => void;
+  /** Structured logger for MCP notifications. */
+  logger?: McpLogger;
 }
 
 /**
@@ -117,7 +118,8 @@ interface CloseApproachResult {
  */
 async function checkPostBurnTrajectory(
   conn: KosConnection,
-  targetName: string
+  targetName: string,
+  logger?: McpLogger
 ): Promise<CloseApproachResult> {
   const CLOSE_APPROACH_THRESHOLD = 0.33; // 33% of target's orbit radius
 
@@ -146,7 +148,7 @@ async function checkPostBurnTrajectory(
         }
       } catch {
         // Periapsis query failed - continue without it
-        console.error('[checkPostBurnTrajectory] Failed to query encounter periapsis');
+        logger?.error('[checkPostBurnTrajectory] Failed to query encounter periapsis');
       }
 
       return {
@@ -179,7 +181,7 @@ async function checkPostBurnTrajectory(
     const apMatch = result.output.match(/AP:(-?\d+)/);
 
     if (!distMatch || !peMatch || !apMatch) {
-      console.error('[checkPostBurnTrajectory] Failed to parse kOS output:', result.output);
+      logger?.warn(`[checkPostBurnTrajectory] Failed to parse kOS output: ${result.output}`);
       return { hasEncounter: false, isCloseApproach: false, separation: 0, targetOrbitRadius: 0 };
     }
 
@@ -192,13 +194,13 @@ async function checkPostBurnTrajectory(
     const threshold = targetOrbitRadius * CLOSE_APPROACH_THRESHOLD;
     const isCloseApproach = separation < threshold;
 
-    console.error(`[checkPostBurnTrajectory] Target: ${targetName}, Separation: ${(separation / 1000).toFixed(0)} km, ` +
-                  `Orbit radius: ${(targetOrbitRadius / 1000).toFixed(0)} km, ` +
-                  `Threshold: ${(threshold / 1000).toFixed(0)} km, Close: ${isCloseApproach}`);
+    logger?.info(`[checkPostBurnTrajectory] Target: ${targetName}, Separation: ${(separation / 1000).toFixed(0)} km, ` +
+                 `Orbit radius: ${(targetOrbitRadius / 1000).toFixed(0)} km, ` +
+                 `Threshold: ${(threshold / 1000).toFixed(0)} km, Close: ${isCloseApproach}`);
 
     return { hasEncounter: false, isCloseApproach, separation, targetOrbitRadius };
   } catch (error) {
-    console.error('[checkPostBurnTrajectory] Error:', error);
+    logger?.error(`[checkPostBurnTrajectory] Error: ${error}`);
     return { hasEncounter: false, isCloseApproach: false, separation: 0, targetOrbitRadius: 0 };
   }
 }
@@ -275,7 +277,7 @@ export class ManeuverOrchestrator {
     capture: boolean = false,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
 
     // Get the target name for post-execution validation
     // We need this before execution since TARGET might change
@@ -297,7 +299,7 @@ export class ManeuverOrchestrator {
     }
 
     // Post-execution validation: check trajectory
-    const trajectoryCheck = await checkPostBurnTrajectory(this.conn, targetName);
+    const trajectoryCheck = await checkPostBurnTrajectory(this.conn, targetName, logger);
 
     if (trajectoryCheck.hasEncounter) {
       // We have an encounter
@@ -351,9 +353,9 @@ export class ManeuverOrchestrator {
     finalPeA: number,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      this.maneuver.courseCorrection(finalPeA)
+      this.maneuver.courseCorrection(finalPeA, logger)
     );
   }
 
@@ -506,7 +508,7 @@ export class ManeuverOrchestrator {
     waitForPhaseAngle: boolean = true,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, onProgress } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
 
     // Get the target name for post-execution validation
     let targetName = target;
@@ -517,7 +519,7 @@ export class ManeuverOrchestrator {
 
     // Plan and optionally execute via standard flow
     const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      interplanetaryTransfer(this.conn, { waitForPhaseAngle, onProgress })
+      interplanetaryTransfer(this.conn, { waitForPhaseAngle, logger })
     );
 
     // If planning failed or not executed, return as-is
@@ -526,7 +528,7 @@ export class ManeuverOrchestrator {
     }
 
     // Post-execution validation: check trajectory (same as Hohmann)
-    const trajectoryCheck = await checkPostBurnTrajectory(this.conn, targetName);
+    const trajectoryCheck = await checkPostBurnTrajectory(this.conn, targetName, logger);
 
     if (trajectoryCheck.hasEncounter) {
       if (trajectoryCheck.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
@@ -1127,10 +1129,11 @@ export const courseCorrectTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 1,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
+      const logger = ctx.createLogger(extra);
 
       // Auto-select 2nd closest body if no target provided
       let target = args.target as string | undefined;
@@ -1142,13 +1145,13 @@ export const courseCorrectTool: ToolDefinition = {
       }
 
       // Try course correction
-      let result = await orchestrator.courseCorrection(args.targetDistance as number, { target, execute: args.execute as boolean });
+      let result = await orchestrator.courseCorrection(args.targetDistance as number, { target, execute: args.execute as boolean, logger });
 
       // If no encounter, do hohmann transfer first
       if (!result.success && result.error?.toLowerCase().includes('no encounter')) {
-        const hohmannResult = await orchestrator.hohmannTransfer('COMPUTED', false, { target, execute: args.execute as boolean });
+        const hohmannResult = await orchestrator.hohmannTransfer('COMPUTED', false, { target, execute: args.execute as boolean, logger });
         if (hohmannResult.success) {
-          result = await orchestrator.courseCorrection(args.targetDistance as number, { execute: args.execute as boolean });
+          result = await orchestrator.courseCorrection(args.targetDistance as number, { execute: args.execute as boolean, logger });
         }
       }
 
@@ -1302,7 +1305,7 @@ export const interplanetaryTransferTool: ToolDefinition = {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
-      const onProgress = ctx.createProgressCallback(extra);
+      const logger = ctx.createLogger(extra);
 
       // Auto-select furthest body if not provided (interplanetary = distant planets)
       let target = args.target as string | undefined;
@@ -1313,7 +1316,7 @@ export const interplanetaryTransferTool: ToolDefinition = {
         }
       }
 
-      const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle as boolean, { target, execute: args.execute as boolean, onProgress });
+      const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle as boolean, { target, execute: args.execute as boolean, logger });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';

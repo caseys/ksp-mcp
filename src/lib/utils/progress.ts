@@ -1,14 +1,6 @@
 /**
- * Shared utilities for progress reporting and timing
+ * Shared utilities for timing
  */
-
-/**
- * Helper to send progress notifications.
- * Only sends MCP notification if callback is provided.
- */
-export function logProgress(message: string, onProgress?: (msg: string) => void): void {
-  onProgress?.(message);
-}
 
 /**
  * Promise-based delay utility.

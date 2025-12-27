@@ -13,6 +13,7 @@ import {
 } from './shared.js';
 import { bringKspToForeground } from '../../utils/bring-to-foreground.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
+import type { McpLogger } from '../tool-types.js';
 
 /**
  * Format distance for display: m for <10km, km for <10Mm, Mm for larger
@@ -633,8 +634,9 @@ export class ManeuverProgram {
    * Timing is calculated automatically by MechJeb (no timeRef parameter).
    *
    * @param finalPeA Target periapsis (bodies) or closest approach (vessels) in meters
+   * @param logger Optional logger for notifications
    */
-  async courseCorrection(finalPeA: number): Promise<ManeuverResult> {
+  async courseCorrection(finalPeA: number, logger?: McpLogger): Promise<ManeuverResult> {
     let adjustedPeA = finalPeA;
 
     if (areWorkaroundsEnabled()) {
@@ -643,7 +645,7 @@ export class ManeuverProgram {
       // (higher periapsis than requested, avoiding surface impact).
       // TODO: Investigate MechJeb algorithm or implement iterative refinement.
       adjustedPeA = finalPeA * 3;
-      console.error(`[CourseCorrection] WORKAROUND: Requested ${finalPeA}m, using ${adjustedPeA}m (3x safe margin)`);
+      logger?.warn(`[CourseCorrection] WORKAROUND: Requested ${finalPeA}m, using ${adjustedPeA}m (3x safe margin)`);
     }
 
     const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${adjustedPeA}).`;

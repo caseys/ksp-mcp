@@ -11,7 +11,8 @@ import * as path from 'node:path';
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { config } from '../../config/index.js';
 import { globalKosMonitor } from '../../utils/kos-monitor.js';
-import { delay, logProgress } from '../utils/progress.js';
+import { delay } from '../utils/progress.js';
+import { type McpLogger, nullLogger } from '../tool-types.js';
 
 export interface RunScriptResult {
   success: boolean;
@@ -25,7 +26,7 @@ interface RunScriptOptions {
   timeout?: number;        // Default: 60000 (60 seconds)
   pollInterval?: number;   // Default: 500ms
   cleanup?: boolean;       // Default: true - delete script after execution
-  onProgress?: (message: string) => void;  // Progress callback for MCP notifications
+  logger?: McpLogger;      // Structured logger for MCP notifications
 }
 
 // Defaults
@@ -139,14 +140,14 @@ export async function runScript(
     timeout = DEFAULT_TIMEOUT_MS,
     pollInterval = DEFAULT_POLL_MS,
     cleanup = true,
-    onProgress,
+    logger,
   } = options;
 
-  const log = (msg: string) => logProgress(msg, onProgress);
+  const log = logger ?? nullLogger;
   const scriptName = generateScriptName();
   const startTime = Date.now();
 
-  log(`[Script] Running ${path.basename(sourcePath)}...`);
+  log.progress(`[Script] Running ${path.basename(sourcePath)}...`);
 
   // Step 1: Copy script to Archive
   const copyResult = await copyScriptToArchive(sourcePath, scriptName);
@@ -196,7 +197,7 @@ export async function runScript(
       if (checkResult.output.includes('True')) {
         // Script completed successfully
         const executionTime = Date.now() - startTime;
-        log(`[Script] Completed in ${(executionTime / 1000).toFixed(1)}s`);
+        log.progress(`[Script] Completed in ${(executionTime / 1000).toFixed(1)}s`);
         return {
           success: true,
           output: globalKosMonitor.getRecentLines(100),
@@ -207,7 +208,7 @@ export async function runScript(
 
       // Log progress every 5 seconds
       if (elapsed - lastLogTime >= 5000) {
-        log(`[Script] Running... (${(elapsed / 1000).toFixed(0)}s elapsed)`);
+        log.progress(`[Script] Running... (${(elapsed / 1000).toFixed(0)}s elapsed)`);
         lastLogTime = elapsed;
       }
 
@@ -290,12 +291,12 @@ export const runScriptTool: ToolDefinition = {
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
-      const onProgress = ctx.createProgressCallback(extra);
+      const logger = ctx.createLogger(extra);
 
       const result = await runScript(conn, args.sourcePath as string, {
         timeout: args.timeout as number,
         cleanup: args.cleanup as boolean,
-        onProgress,
+        logger,
       });
 
       if (result.success) {

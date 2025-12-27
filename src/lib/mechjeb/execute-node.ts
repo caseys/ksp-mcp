@@ -8,6 +8,7 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { delay, queryNumber, unlockControls } from './shared.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
+import { type McpLogger, nullLogger } from '../tool-types.js';
 
 export interface ExecuteNodeResult {
   success: boolean;
@@ -44,11 +45,14 @@ const MAX_ALIGN_TIME = 60_000; // ms - maximum time to wait for alignment
  * Enables RCS if no angular progress is made after 3 seconds.
  *
  * @param conn kOS connection
+ * @param logger Optional MCP logger for progress updates
  */
-async function alignToNode(conn: KosConnection): Promise<boolean> {
+async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boolean> {
+  const log = logger ?? nullLogger;
+
   // Check initial angle
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-  console.error(`[AlignToNode] Initial angle: ${initialAngle.toFixed(1)}°`);
+  log.progress(`[AlignToNode] Initial angle: ${initialAngle.toFixed(1)}°`);
 
   // Save RCS state
   const rcsState = await conn.execute('PRINT RCS.');
@@ -57,7 +61,7 @@ async function alignToNode(conn: KosConnection): Promise<boolean> {
   // Use SAS MANEUVER mode - handles node removal gracefully (unlike LOCK STEERING)
   // Must wait for SAS to initialize before setting mode
   await conn.execute('SAS ON. WAIT 1. SET SASMODE TO "MANEUVER". WAIT 0.5.');
-  console.error('[AlignToNode] SAS set to MANEUVER mode, aligning...');
+  log.progress('[AlignToNode] SAS set to MANEUVER mode, aligning...');
 
   let lastAngle = 180;
   let noProgressSince = Date.now();
@@ -66,10 +70,10 @@ async function alignToNode(conn: KosConnection): Promise<boolean> {
 
   while (Date.now() - startTime < MAX_ALIGN_TIME) {
     const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-    console.error(`[AlignToNode] Angle: ${angle.toFixed(1)}°`);
+    log.progress(`[AlignToNode] Angle: ${angle.toFixed(1)}°`);
 
     if (angle < ALIGN_THRESHOLD) {
-      console.error(`[AlignToNode] Aligned! (${angle.toFixed(2)}°)`);
+      log.progress(`[AlignToNode] Aligned! (${angle.toFixed(2)}°)`);
       aligned = true;
       break;
     }
@@ -81,7 +85,7 @@ async function alignToNode(conn: KosConnection): Promise<boolean> {
     } else if (Date.now() - noProgressSince > RCS_TRIGGER_TIME) {
       // No progress for 3s - enable RCS to help rotation
       await conn.execute('RCS ON.');
-      console.error(`[AlignToNode] No progress, enabled RCS (${angle.toFixed(1)}°)`);
+      log.progress(`[AlignToNode] No progress, enabled RCS (${angle.toFixed(1)}°)`);
       noProgressSince = Date.now(); // Reset timer after enabling RCS
     }
 
@@ -96,7 +100,7 @@ async function alignToNode(conn: KosConnection): Promise<boolean> {
 
   // Final verification
   const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-  console.error(`[AlignToNode] Final angle: ${finalAngle.toFixed(1)}°, aligned: ${aligned}`);
+  log.progress(`[AlignToNode] Final angle: ${finalAngle.toFixed(1)}°, aligned: ${aligned}`);
 
   return finalAngle < ALIGN_THRESHOLD;
 }
@@ -105,15 +109,7 @@ export interface ExecuteNodeOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
   async?: boolean; // If true, return immediately after starting executor
-  onProgress?: (message: string) => void; // Progress callback for MCP notifications
-}
-
-/**
- * Helper to log and send progress notifications.
- */
-function logProgress(message: string, onProgress?: (msg: string) => void): void {
-  console.error(message);
-  onProgress?.(message);
+  logger?: McpLogger; // Logger for MCP notifications
 }
 
 /**
@@ -137,11 +133,10 @@ export async function executeNode(
     timeoutMs = DEFAULT_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     async: asyncMode = false,
-    onProgress,
+    logger,
   } = options;
 
-  // Helper for this invocation
-  const log = (msg: string) => logProgress(msg, onProgress);
+  const log = logger ?? nullLogger;
   // Check if a node exists
   const nodeCheck = await conn.execute('PRINT HASNODE.', 2000);
   if (!nodeCheck.output.includes('True')) {
@@ -161,9 +156,9 @@ export async function executeNode(
   const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
 
   if (needsStaging) {
-    log(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s (will stage)`);
+    log.progress(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s (will stage)`);
   } else {
-    log(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s`);
+    log.progress(`[ExecuteNode] Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s`);
   }
 
   if (dvShipTotal < dvRequired) {
@@ -179,16 +174,16 @@ export async function executeNode(
   // Get estimated burn duration from MechJeb INFO wrapper
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
-  log(`[ExecuteNode] Estimated burn: ${burnDuration.toFixed(1)}s, will shift node by ${halfBurn.toFixed(1)}s`);
+  log.progress(`[ExecuteNode] Estimated burn: ${burnDuration.toFixed(1)}s, will shift node by ${halfBurn.toFixed(1)}s`);
 
   // Set up auto-staging if burn will require staging
   if (needsStaging) {
-    log('[ExecuteNode] Setting up auto-staging trigger');
+    log.progress('[ExecuteNode] Setting up auto-staging trigger');
     await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
   }
 
   // Align ship to maneuver node BEFORE warping
-  const isAligned = await alignToNode(conn);
+  const isAligned = await alignToNode(conn, logger);
   if (!isAligned) {
     await conn.execute('SAS OFF.');
     const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
@@ -204,7 +199,7 @@ export async function executeNode(
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
   if (nodeEta > 60) {
     const warpLeadTime = 30; // Stop warping 30s before node
-    log(`[ExecuteNode] Node is ${nodeEta.toFixed(0)}s away, warping to T-${warpLeadTime}s`);
+    log.progress(`[ExecuteNode] Node is ${nodeEta.toFixed(0)}s away, warping to T-${warpLeadTime}s`);
 
     // Use KUNIVERSE:TIMEWARP:WARPTO which doesn't block
     await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${nodeEta - warpLeadTime}).`, 5000);
@@ -216,12 +211,12 @@ export async function executeNode(
       await delay(1000);
       const currentEta = await queryNumber(conn, 'NEXTNODE:ETA');
       if (currentEta <= warpLeadTime + 5) {
-        log(`[ExecuteNode] Warp complete, ETA: ${currentEta.toFixed(0)}s`);
+        log.progress(`[ExecuteNode] Warp complete, ETA: ${currentEta.toFixed(0)}s`);
         break;
       }
       warpAttempts++;
       if (warpAttempts % 30 === 0) {
-        log(`[ExecuteNode] Still warping, ETA: ${currentEta.toFixed(0)}s`);
+        log.progress(`[ExecuteNode] Still warping, ETA: ${currentEta.toFixed(0)}s`);
       }
     }
   }
@@ -231,7 +226,7 @@ export async function executeNode(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     lastAttempt = attempt;
-    log(`[ExecuteNode] Attempt ${attempt}/${MAX_RETRIES}`);
+    log.progress(`[ExecuteNode] Attempt ${attempt}/${MAX_RETRIES}`);
 
     // Workaround: Shift node time earlier by half burn duration
     // MechJeb fires at node time instead of centering the burn
@@ -252,7 +247,7 @@ export async function executeNode(
     if (nodeEtaForWarp > 30) {
       await delay(3000);
       await conn.execute('SET WARP TO 1.');
-      log('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
+      log.progress('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
 
       // Brief delay then cancel - only runs if we set warp
       await delay(500);
@@ -308,11 +303,11 @@ export async function executeNode(
         lastDvRemaining = dvRemaining;
 
         // Log progress every poll (every 10s)
-        log(`[ExecuteNode] Progress: ${dvRemaining.toFixed(1)} m/s remaining, executor: ${executorEnabled ? 'ON' : 'OFF'}`);
+        log.progress(`[ExecuteNode] Progress: ${dvRemaining.toFixed(1)} m/s remaining, executor: ${executorEnabled ? 'ON' : 'OFF'}`);
 
         // If dV is below threshold, burn is complete - clear node and return success
         if (dvRemaining < DV_THRESHOLD) {
-          log(`[ExecuteNode] Burn complete! (${dvRemaining.toFixed(2)} m/s remaining < ${DV_THRESHOLD} m/s threshold)`);
+          log.progress(`[ExecuteNode] Burn complete! (${dvRemaining.toFixed(2)} m/s remaining < ${DV_THRESHOLD} m/s threshold)`);
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
           return {
@@ -325,10 +320,10 @@ export async function executeNode(
 
         // If executor stopped but burn incomplete, check if we should retry
         if (!executorEnabled && dvRemaining > DV_THRESHOLD) {
-          log(`[ExecuteNode] Executor stopped with ${dvRemaining.toFixed(1)} m/s remaining`);
+          log.progress(`[ExecuteNode] Executor stopped with ${dvRemaining.toFixed(1)} m/s remaining`);
 
           if (attempt < MAX_RETRIES) {
-            log(`[ExecuteNode] Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
+            log.progress(`[ExecuteNode] Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
             await delay(2000);
             break; // Break inner loop to retry
           } else {
@@ -464,12 +459,12 @@ export const executeNodeTool: ToolDefinition = {
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
-      const onProgress = ctx.createProgressCallback(extra);
+      const logger = ctx.createLogger(extra);
 
       const result = await executeNode(conn, {
         async: args.async as boolean,
         timeoutMs: (args.timeoutSeconds as number) * 1000,
-        onProgress,
+        logger,
       });
 
       if (result.success) {

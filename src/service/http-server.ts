@@ -16,7 +16,7 @@ import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
 import { listQuicksaves } from '../lib/kos/kuniverse.js';
 import { registerAllTools } from '../lib/tool-registry.js';
-import type { ToolContext, TargetSelectMode, OrbitInfo } from '../lib/tool-types.js';
+import type { ToolContext, TargetSelectMode, OrbitInfo, McpLogger } from '../lib/tool-types.js';
 
 const FULL_TELEMETRY_OPTIONS: ShipTelemetryOptions = {
   timeoutMs: 3000,  // Per-query timeout for standalone telemetry (max 2 queries = 6s max)
@@ -46,45 +46,42 @@ function errorResponse(action: string, error: string) {
 }
 
 /**
- * Create a progress callback from the MCP request handler extra context.
- * Sends MCP progress notifications to keep the connection alive during long operations.
- * Falls back to logging notifications if client doesn't provide a progressToken.
+ * Create a structured logger from the MCP request handler extra context.
+ * Sends MCP notifications with appropriate log levels.
  *
  * @param extra The RequestHandlerExtra from the tool callback
- * @returns A callback function that sends progress or logging notifications
+ * @returns An McpLogger with info, warn, error, and progress methods
  */
-function createProgressCallback(
-  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
-): (message: string) => void {
-  const progressToken = extra._meta?.progressToken as ProgressToken | undefined;
+type LogLevel = 'info' | 'warning' | 'error' | 'debug' | 'notice' | 'critical' | 'alert' | 'emergency';
 
-  if (progressToken) {
-    // Client requested progress updates - use progress notifications
-    let progressCount = 0;
-    return (message: string) => {
-      progressCount++;
-      extra.sendNotification({
-        method: 'notifications/progress',
-        params: {
-          progressToken,
-          progress: progressCount,
-          message,
-        },
-      }).catch(() => {}); // Fire and forget
-    };
-  } else {
-    // No progressToken - fall back to logging notifications
-    return (message: string) => {
-      extra.sendNotification({
-        method: 'notifications/message',
-        params: {
-          level: 'info',
-          logger: 'ksp-mcp',
-          data: message,
-        },
-      }).catch(() => {}); // Fire and forget
-    };
-  }
+function createLogger(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+): McpLogger {
+  const send = (level: LogLevel, message: string) => {
+    extra.sendNotification({
+      method: 'notifications/message',
+      params: { level, logger: 'ksp-mcp', data: message },
+    }).catch(() => {}); // Fire and forget
+  };
+
+  // For progress, use progressToken if available
+  const progressToken = extra._meta?.progressToken as ProgressToken | undefined;
+  let progressCount = 0;
+
+  return {
+    info: (msg) => send('info', msg),
+    warn: (msg) => send('warning', msg),
+    error: (msg) => send('error', msg),
+    progress: progressToken
+      ? (msg) => {
+          progressCount++;
+          extra.sendNotification({
+            method: 'notifications/progress',
+            params: { progressToken, progress: progressCount, message: msg },
+          }).catch(() => {}); // Fire and forget
+        }
+      : (msg) => send('info', msg),
+  };
 }
 
 /**
@@ -181,7 +178,7 @@ export function createServer(): McpServer {
   const context: ToolContext = {
     ensureConnected,
     getConnection,
-    createProgressCallback,
+    createLogger,
     successResponse,
     errorResponse,
     selectTarget,
