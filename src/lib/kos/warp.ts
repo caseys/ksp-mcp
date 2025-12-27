@@ -452,3 +452,61 @@ export async function warpForward(
 
   return { success: false, error: 'Warp timeout' };
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import { z } from 'zod';
+import type { ToolDefinition } from '../tool-types.js';
+
+/**
+ * Warp tool definition
+ */
+export const warpTool: ToolDefinition = {
+  name: 'warp',
+  description: 'Fast-forward time to maneuver, SOI change, or specific point.',
+  inputSchema: {
+    target: z.union([
+      z.enum(['node', 'soi', 'periapsis', 'apoapsis']),
+      z.number(),
+    ]).describe('Warp target: "node", "soi", "periapsis", "apoapsis", or a number of seconds to warp forward'),
+    leadTime: z.number().optional().default(60).describe('Seconds before target to stop warping (default: 60)'),
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  tier: 2,
+  handler: async (args, ctx, extra) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const onProgress = ctx.createProgressCallback(extra);
+
+      const target = args.target;
+      const leadTime = args.leadTime as number;
+
+      let result: WarpResult;
+
+      if (typeof target === 'number') {
+        result = await warpForward(conn, target, DEFAULT_TIMEOUT_MS, onProgress);
+      } else {
+        result = await warpTo(conn, target as WarpTarget, { leadTime, onProgress });
+      }
+
+      if (result.success) {
+        let text = `Warp complete. Body: ${result.body}, Altitude: ${result.altitude}m`;
+        if (result.warning) {
+          text += '\n\n' + result.warning;
+        }
+        return ctx.successResponse('warp', text);
+      } else {
+        return ctx.errorResponse('warp', result.error ?? 'Failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('warp', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

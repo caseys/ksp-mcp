@@ -261,3 +261,52 @@ export async function runScript(
     }
   }
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import { z } from 'zod';
+import type { ToolDefinition } from '../tool-types.js';
+
+/**
+ * Run script tool definition
+ */
+export const runScriptTool: ToolDefinition = {
+  name: 'run_script',
+  description: 'Run kOS script file. Advanced.',
+  inputSchema: {
+    sourcePath: z.string().describe('Absolute path to the .ks script file to run'),
+    timeout: z.number().optional().default(60_000).describe('Maximum execution time in milliseconds (default: 60000 = 1 minute)'),
+    cleanup: z.boolean().optional().default(true).describe('Delete script from Archive after execution (default: true)'),
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  tier: 3,
+  handler: async (args, ctx, extra) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const onProgress = ctx.createProgressCallback(extra);
+
+      const result = await runScript(conn, args.sourcePath as string, {
+        timeout: args.timeout as number,
+        cleanup: args.cleanup as boolean,
+        onProgress,
+      });
+
+      if (result.success) {
+        const output = result.output.length > 0 ? result.output.join('\n') : 'No output';
+        return ctx.successResponse('run_script',
+          `Script completed in ${(result.executionTime ?? 0) / 1000}s\n\n${output}`);
+      } else {
+        return ctx.errorResponse('run_script', result.error ?? 'Failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('run_script', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

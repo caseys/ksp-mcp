@@ -426,3 +426,70 @@ export async function isNodeExecutorEnabled(conn: KosConnection): Promise<boolea
 export async function disableNodeExecutor(conn: KosConnection): Promise<void> {
   await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import { z } from 'zod';
+import type { ToolDefinition } from '../tool-types.js';
+
+/**
+ * Execute node tool definition
+ */
+export const executeNodeTool: ToolDefinition = {
+  name: 'execute_node',
+  description: 'Execute next maneuver. Prefer execute param on maneuver tools.',
+  inputSchema: {
+    async: z.boolean()
+      .optional()
+      .default(false)
+      .describe('If true, return immediately after starting executor instead of waiting for completion'),
+    includeTelemetry: z.boolean()
+      .optional()
+      .default(false)
+      .describe('Include ship telemetry in response (slower but more info)'),
+    timeoutSeconds: z.number()
+      .optional()
+      .default(240)
+      .describe('Maximum time to wait for node execution in seconds (default: 240 = 4 minutes)'),
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  tier: 1,
+  handler: async (args, ctx, extra) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const onProgress = ctx.createProgressCallback(extra);
+
+      const result = await executeNode(conn, {
+        async: args.async as boolean,
+        timeoutMs: (args.timeoutSeconds as number) * 1000,
+        onProgress,
+      });
+
+      if (result.success) {
+        let text = `Executed ${result.nodesExecuted} node(s)`;
+        if (result.deltaV) {
+          text += `, ${result.deltaV.remaining?.toFixed(1) ?? '0'} m/s remaining`;
+        }
+
+        if (args.includeTelemetry) {
+          const { getShipTelemetry } = await import('./telemetry.js');
+          const telemetry = await getShipTelemetry(conn, { timeoutMs: 2500 });
+          text += '\n\n' + telemetry.formatted;
+        }
+
+        return ctx.successResponse('execute_node', text);
+      } else {
+        return ctx.errorResponse('execute_node', result.error ?? 'Failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('execute_node', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

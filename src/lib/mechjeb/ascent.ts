@@ -493,3 +493,66 @@ export class AscentProgram {
     return new AscentHandle(this.conn, handleId, altitude, this.onProgress);
   }
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import { z } from 'zod';
+import type { ToolDefinition } from '../tool-types.js';
+import { distanceSchema } from '../tool-types.js';
+
+/**
+ * Launch ascent tool definition
+ */
+export const launchAscentTool: ToolDefinition = {
+  name: 'launch_ascent',
+  description: 'Launch into orbit. Circularizes after ascent by default.',
+  inputSchema: {
+    altitude: distanceSchema.optional().describe('Target orbit altitude in meters (default: atmosphere + 20km, or 20km if no atmosphere)'),
+    inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees'),
+    circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  tier: 1,
+  handler: async (args, ctx, extra) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const onProgress = ctx.createProgressCallback(extra);
+
+      // Get default altitude based on body's atmosphere
+      let altitude = args.altitude as number | undefined;
+      if (altitude === undefined) {
+        altitude = await ctx.getDefaultLaunchAltitude(conn);
+      }
+
+      // Create ascent program and launch
+      const program = new AscentProgram(conn, onProgress);
+      const handle = await program.launchToOrbit({
+        altitude,
+        inclination: args.inclination as number,
+        autoStage: true,
+        circularize: args.circularize as boolean,
+        autoWarp: true,
+      });
+
+      // Wait for completion (blocking call that monitors ascent)
+      const result = await handle.waitForCompletion();
+
+      if (result.success) {
+        const orbit = result.finalOrbit;
+        return ctx.successResponse('launch',
+          `Orbit achieved! APO: ${(orbit.apoapsis / 1000).toFixed(1)} km, PER: ${(orbit.periapsis / 1000).toFixed(1)} km`);
+      } else {
+        return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('launch', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

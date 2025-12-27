@@ -396,7 +396,7 @@ export async function getShipTelemetry(
   lines.push(`Apoapsis: ${isEscapeTrajectory ? 'Escape' : `${(apo / 1000).toFixed(1)} km`}`);
   lines.push(`Periapsis: ${(per / 1000).toFixed(1)} km`);
   lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : `${period.toFixed(0)}s`} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
-  lines.push(`Vessel: ${vesselStatus} - (${vesselType}) - ${vesselName} (only used in load save command) `);
+  lines.push(`Vessel: ${vesselName} (${vesselType}) - ${vesselStatus}`);
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
@@ -612,3 +612,39 @@ export function formatTargetEncounterInfo(info: TargetEncounterInfo): string {
 
   return lines.join('\n');
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import type { ToolDefinition } from '../tool-types.js';
+
+/**
+ * Status tool definition
+ */
+export const statusTool: ToolDefinition = {
+  name: 'status',
+  description: 'Get ship info: orbit, fuel, position, encounters.',
+  inputSchema: {},
+  annotations: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  tier: 1,
+  handler: async (_args, ctx) => {
+    try {
+      const conn = ctx.getConnection();
+      const telemetry = await getStatus(conn ?? undefined);
+
+      if (telemetry.connected) {
+        return ctx.successResponse('status', telemetry.formatted);
+      } else {
+        return ctx.errorResponse('status', telemetry.reason ?? 'Not connected');
+      }
+    } catch (error) {
+      return ctx.errorResponse('status', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

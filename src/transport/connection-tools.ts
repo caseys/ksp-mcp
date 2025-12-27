@@ -29,13 +29,6 @@ export function setCpuPreference(pref: CpuPreference | null): void {
   cpuPreference = pref;
 }
 
-/**
- * Get current runtime CPU preference.
- */
-export function getCpuPreference(): CpuPreference | null {
-  return cpuPreference;
-}
-
 export function getConnection(): KosConnection {
   if (!connection) {
     connection = new KosConnection();
@@ -380,4 +373,117 @@ export async function handleExecute(
   // Output is automatically tracked in KosConnection.execute()
   return await conn.execute(input.command, input.timeout);
 }
+
+// ============================================================================
+// Tool Definitions
+// ============================================================================
+
+import type { ToolDefinition } from '../lib/tool-types.js';
+
+/**
+ * Command tool definition
+ */
+export const commandTool: ToolDefinition = {
+  name: 'command',
+  description: 'Run raw kOS command. Advanced.',
+  inputSchema: {
+    command: z.string().describe('kOS script command to send'),
+    timeout: z.number().optional().default(5000).describe('Command timeout in milliseconds'),
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: true,
+  },
+  tier: 3,
+  handler: async (args, ctx) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const result = await conn.execute(args.command as string, args.timeout as number);
+
+      if (result.success) {
+        return ctx.successResponse('command', result.output || '(no output)');
+      } else {
+        return ctx.errorResponse('command', result.error ?? 'Command failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('command', error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
+/**
+ * Disconnect tool definition
+ */
+export const disconnectTool: ToolDefinition = {
+  name: 'disconnect',
+  description: 'Disconnect from kOS.',
+  inputSchema: {},
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  tier: 3,
+  handler: async (_args, ctx) => {
+    try {
+      await handleDisconnect();
+      return ctx.successResponse('disconnect', 'Disconnected from kOS.');
+    } catch (error) {
+      return ctx.errorResponse('disconnect', error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
+/**
+ * Switch CPU tool definition
+ */
+export const switchCpuTool: ToolDefinition = {
+  name: 'switch_cpu',
+  description: 'Switch kOS CPU.',
+  inputSchema: {
+    cpuId: z.number().optional().describe('CPU ID (1-based) to switch to'),
+    cpuLabel: z.string().optional().describe('CPU label/tag. Use list_cpus to see available CPUs.'),
+    clear: z.boolean().optional().describe('Clear preference and revert to auto-select'),
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  tier: 3,
+  handler: async (args, ctx) => {
+    try {
+      if (args.clear) {
+        // Clear preference and force reconnect with auto-selection
+        setCpuPreference(null);
+        await forceDisconnect();
+        return ctx.successResponse('switch_cpu', 'CPU preference cleared. Next connection will auto-select.');
+      }
+
+      if (args.cpuId !== undefined || args.cpuLabel !== undefined) {
+        // Set preference and trigger reconnect
+        setCpuPreference({
+          cpuId: args.cpuId as number | undefined,
+          cpuLabel: args.cpuLabel as string | undefined,
+        });
+
+        // Force reconnect with new preference
+        await forceDisconnect();
+        const conn = await ensureConnected();
+        const state = conn.getState();
+
+        return ctx.successResponse('switch_cpu',
+          `Switched to CPU ${state.cpuId ?? '?'}: ${state.vesselName ?? 'unknown'} (${state.cpuTag ?? 'unnamed'})`);
+      }
+
+      return ctx.errorResponse('switch_cpu', 'Specify cpuId, cpuLabel, or clear=true');
+    } catch (error) {
+      return ctx.errorResponse('switch_cpu', error instanceof Error ? error.message : String(error));
+    }
+  },
+};
 

@@ -37,3 +37,39 @@ export async function clearNodes(conn: KosConnection): Promise<ClearNodesResult>
     };
   }
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import type { ToolDefinition } from '../tool-types.js';
+
+/**
+ * Clear nodes tool definition
+ */
+export const clearNodesTool: ToolDefinition = {
+  name: 'clear_nodes',
+  description: 'Delete all planned maneuvers.',
+  inputSchema: {},
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  tier: 3,
+  handler: async (_args, ctx) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const result = await clearNodes(conn);
+
+      if (result.success) {
+        return ctx.successResponse('clear_nodes', `Cleared ${result.nodesCleared} node(s)`);
+      } else {
+        return ctx.errorResponse('clear_nodes', result.error ?? 'Failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('clear_nodes', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

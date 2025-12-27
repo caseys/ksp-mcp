@@ -368,3 +368,57 @@ export async function crashAvoidance(
     circularized,
   };
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import { z } from 'zod';
+import type { ToolDefinition } from '../tool-types.js';
+import { distanceSchema } from '../tool-types.js';
+
+/**
+ * Crash avoidance tool definition
+ */
+export const crashAvoidanceTool: ToolDefinition = {
+  name: 'crash_avoidance',
+  description: 'Emergency burn to prevent crash. Raises periapsis to safe altitude.',
+  inputSchema: {
+    targetPeriapsis: distanceSchema.optional().default(10_000).describe('Target periapsis in meters (default: 10000 = 10km)'),
+    timeoutMs: z.number().optional().default(300_000).describe('Maximum burn time in milliseconds (default: 300000 = 5 min)'),
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  tier: 1,
+  handler: async (args, ctx, extra) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const onProgress = ctx.createProgressCallback(extra);
+
+      const result = await crashAvoidance(conn, {
+        targetPeriapsis: args.targetPeriapsis as number,
+        timeoutMs: args.timeoutMs as number,
+        onProgress,
+      });
+
+      if (result.success) {
+        let text = `Safe! Pe: ${result.initialPeriapsis?.toFixed(0)}m → ${result.finalPeriapsis?.toFixed(0)}m`;
+        if (result.deltaVUsed) {
+          text += `, ΔV: ${result.deltaVUsed.toFixed(1)} m/s`;
+        }
+        if (result.circularized) {
+          text += ' (circularized)';
+        }
+        return ctx.successResponse('crash_avoidance', text);
+      } else {
+        return ctx.errorResponse('crash_avoidance', result.error ?? 'Failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('crash_avoidance', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

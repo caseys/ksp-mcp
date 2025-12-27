@@ -99,3 +99,50 @@ export const listCpusInputSchema = z.object({
   transportType: z.enum(['socket', 'tmux']).optional().describe(`Transport type (default: ${config.transport.type})`),
 });
 
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+import type { ToolDefinition } from '../lib/tool-types.js';
+
+/**
+ * List CPUs tool definition
+ */
+export const listCpusTool: ToolDefinition = {
+  name: 'list_cpus',
+  description: 'List kOS CPUs.',
+  inputSchema: {
+    host: z.string().optional().default(config.kos.host).describe('kOS server host'),
+    port: z.number().optional().default(config.kos.port).describe('kOS server port'),
+    transportType: z.enum(['socket', 'tmux']).optional().describe('Transport type (default: socket)'),
+  },
+  annotations: {
+    readOnlyHint: true,
+    destructiveHint: false,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  tier: 2,
+  handler: async (args, ctx) => {
+    try {
+      const cpus = await handleListCpus({
+        host: args.host as string,
+        port: args.port as number,
+        transportType: args.transportType as 'socket' | 'tmux' | undefined,
+      });
+
+      if (cpus.length === 0) {
+        return ctx.successResponse('list_cpus', 'No kOS CPUs found.');
+      }
+
+      const lines = cpus.map(cpu =>
+        `[${cpu.id}] ${cpu.vessel} - ${cpu.partName} (${cpu.tag}) ${cpu.guiOpen ? '[GUI]' : ''}`
+      );
+
+      return ctx.successResponse('list_cpus', `kOS CPUs:\n${lines.join('\n')}`);
+    } catch (error) {
+      return ctx.errorResponse('list_cpus', error instanceof Error ? error.message : String(error));
+    }
+  },
+};
+
