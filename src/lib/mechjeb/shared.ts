@@ -3,7 +3,6 @@
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
-import { hasTarget } from '../kos/target/shared.js';
 
 /**
  * Unlock steering and throttle controls.
@@ -15,30 +14,6 @@ export async function unlockControls(conn: KosConnection): Promise<void> {
   } catch {
     // Ignore errors - best effort cleanup
   }
-}
-
-/**
- * Require a target to be set, returning an error result if not.
- * Use this at the start of functions that need a target.
- */
-export async function requireTarget(conn: KosConnection): Promise<ManeuverResult | null> {
-  if (await hasTarget(conn)) {
-    return null; // Target exists, proceed
-  }
-  return {
-    success: false,
-    error: 'No target set. Use set_target first.'
-  };
-}
-
-/**
- * Get the name of the current target.
- * Returns empty string if no target is set.
- */
-export async function getTargetName(conn: KosConnection): Promise<string> {
-  const result = await conn.execute('PRINT TARGET:NAME.', 2000);
-  // Clean up kOS prompt characters
-  return result.output.trim().replace(/[>\s]+$/, '');
 }
 
 export interface ManeuverResult {

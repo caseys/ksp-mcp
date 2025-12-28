@@ -75,7 +75,8 @@
     "test:mechjeb": "tsx src/tests/test-mechjeb.ts",
     "test:mj-client": "tsx src/tests/test-mechjeb-client.ts",
     "test:targeting": "tsx src/tests/test-targeting.ts",
-    "repl": "tsx src/repl.ts"
+    "repl": "tsx src/repl.ts",
+    "tool-catalog": "node dist/utils/tool-catalog.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.23.0",

@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { validateTarget } from '../../kos/target/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
@@ -27,22 +28,17 @@ export async function hohmannTransfer(
   timeRef = 'COMPUTED',
   capture = false
 ): Promise<ManeuverResult> {
-  // Check target exists
-  const targetCheck = await conn.execute(
-    'IF HASTARGET { PRINT "TGT|" + TARGET:NAME. } ELSE { PRINT "NOTGT". }',
-    3000
-  );
+  // Pre-validate target: must be moon or vessel in same SOI
+  const validation = await validateTarget(conn, {
+    allowedClasses: ['moon', 'vessel'],
+    requireSameSOI: true,
+  }, 'hohmann_transfer');
 
-  if (targetCheck.output.includes('NOTGT')) {
-    return {
-      success: false,
-      error: 'No target set. Use setTarget() first.'
-    };
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
   }
 
-  // Extract target name for validation
-  const targetMatch = targetCheck.output.match(/TGT\|(.+?)(?:\s*>|$)/);
-  const targetName = targetMatch ? targetMatch[1].trim() : '';
+  const targetName = validation.targetInfo?.name ?? '';
 
   // Create the maneuver node
   const captureStr = capture ? 'TRUE' : 'FALSE';
@@ -102,7 +98,7 @@ export async function hohmannTransfer(
 
 export const hohmannTransferTool: ToolDefinition = {
   name: 'hohmann_transfer',
-  description: 'Transfer moon or vessel in same SOI. Follow with course correcton, warp, and circularization.',
+  description: 'Go to a moon or vessel. Use for: fly to Mun, navigate to Minmus, transfer to vessel. NOT for planets - use interplanetary_transfer instead.',
   inputSchema: {
     target: autoTargetSchema,
     // Note: MechJeb does not have working capture logic - timeReference and capture temporarily disabled

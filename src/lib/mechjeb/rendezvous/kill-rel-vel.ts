@@ -4,7 +4,8 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, sanitizeError, requireTarget, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { validateTarget } from '../../kos/target/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
@@ -21,8 +22,14 @@ export async function killRelativeVelocity(
   conn: KosConnection,
   timeRef = 'CLOSEST_APPROACH'
 ): Promise<ManeuverResult> {
-  const targetError = await requireTarget(conn);
-  if (targetError) return targetError;
+  // Pre-validate target: must be in same SOI (typically used for vessel rendezvous)
+  const validation = await validateTarget(conn, {
+    requireSameSOI: true,
+  }, 'match_velocities');
+
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:KILLRELVEL("${timeRef}").`;
   const result = await conn.execute(cmd, 10_000);
@@ -42,7 +49,7 @@ export async function killRelativeVelocity(
 
 export const matchVelocitiesTool: ToolDefinition = {
   name: 'match_velocities',
-  description: 'Match speed with target for docking. Use at closest approach.',
+  description: 'Match speed with target for docking. Target must be in same SOI as ship.',
   inputSchema: {
     target: autoTargetSchema,
     timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])

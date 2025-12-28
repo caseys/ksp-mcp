@@ -4,7 +4,8 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, requireTarget, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { validateTarget } from '../../kos/target/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
@@ -20,8 +21,14 @@ export async function matchPlane(
   conn: KosConnection,
   timeRef = 'REL_NEAREST_AD'
 ): Promise<ManeuverResult> {
-  const targetError = await requireTarget(conn);
-  if (targetError) return targetError;
+  // Pre-validate target: must be in same SOI (can be moon, vessel, or even planet if orbiting it)
+  const validation = await validateTarget(conn, {
+    requireSameSOI: true,
+  }, 'match_planes');
+
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:PLANE("${timeRef}").`;
   return executeManeuverCommand(conn, cmd);
@@ -33,7 +40,7 @@ export async function matchPlane(
 
 export const matchPlanesTool: ToolDefinition = {
   name: 'match_planes',
-  description: 'Align orbit with target for rendezvous or docking.',
+  description: 'Align orbit with target for rendezvous or docking. Target must be in same SOI as ship.',
   inputSchema: {
     target: autoTargetSchema,
     timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])

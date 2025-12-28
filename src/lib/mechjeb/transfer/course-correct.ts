@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { getTargetValidationInfo } from '../../kos/target/validate.js';
 import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
@@ -25,6 +26,22 @@ export async function courseCorrection(
   targetPeriapsis: number,
   logger?: McpLogger
 ): Promise<ManeuverResult> {
+  // Check target exists and has encounter
+  const targetInfo = await getTargetValidationInfo(conn);
+  if (!targetInfo) {
+    return {
+      success: false,
+      error: 'No target set. Use set_target first, then hohmann_transfer to establish an encounter.',
+    };
+  }
+
+  if (!targetInfo.hasEncounter) {
+    return {
+      success: false,
+      error: `No encounter with ${targetInfo.name}.\ncourse_correct requires an existing encounter (trajectory through target's SOI).\n\nUse hohmann_transfer first to establish an encounter.`,
+    };
+  }
+
   let adjustedPeA = targetPeriapsis;
 
   if (areWorkaroundsEnabled()) {
@@ -53,7 +70,7 @@ export async function courseCorrection(
 
 export const courseCorrectTool: ToolDefinition = {
   name: 'course_correct',
-  description: 'Fine-tune approach after transfer. Adjusts periapsis at destination.',
+  description: 'Fine-tune approach after transfer. Requires existing encounter - use hohmann_transfer first if none.',
   inputSchema: {
     target: targetSchema,
     targetDistance: distanceSchema.optional().default(50_000).describe('Target periapsis (bodies) or closest approach (vessels) in meters (default: 50km)'),

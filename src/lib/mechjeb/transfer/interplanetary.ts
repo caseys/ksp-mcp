@@ -4,7 +4,8 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, requireTarget, getTargetName, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { validateTarget } from '../../kos/target/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema, type McpLogger, nullLogger } from '../../tool-types.js';
@@ -28,10 +29,17 @@ export async function interplanetaryTransfer(
   const { waitForPhaseAngle = true, logger } = options;
   const log = logger ?? nullLogger;
 
-  const targetError = await requireTarget(conn);
-  if (targetError) return targetError;
+  // Pre-validate target: must be a planet, and not the current SOI body
+  const validation = await validateTarget(conn, {
+    allowedClasses: ['planet'],
+    forbidCurrentSOI: true,
+  }, 'interplanetary_transfer');
 
-  const targetName = await getTargetName(conn);
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
+
+  const targetName = validation.targetInfo?.name ?? '';
 
   if (waitForPhaseAngle) {
     log.progress(`[Transfer] Planning interplanetary transfer to ${targetName} (waiting for optimal phase angle)...`);
@@ -55,7 +63,7 @@ export async function interplanetaryTransfer(
 
 export const interplanetaryTransferTool: ToolDefinition = {
   name: 'interplanetary_transfer',
-  description: 'Go to another planet: Duna, Eve, Jool. Waits for transfer window.',
+  description: 'Go to another planet: Duna, Eve, Jool. Waits for transfer window. NOT for moons - use hohmann_transfer instead.',
   inputSchema: {
     target: autoTargetSchema,
     waitForPhaseAngle: z.boolean()

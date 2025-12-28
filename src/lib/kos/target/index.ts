@@ -11,6 +11,16 @@ export { clearTargetTool, clearTarget } from './clear-target.js';
 // Shared utilities
 export { hasTarget, getSOIBody, formatDistance } from './shared.js';
 
+// Validation
+export {
+  validateTarget,
+  getTargetValidationInfo,
+  type TargetClass,
+  type TargetInfo,
+  type TargetRequirements,
+  type ValidationResult,
+} from './validate.js';
+
 // Types
 export type {
   SetTargetResult,
