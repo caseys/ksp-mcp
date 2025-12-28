@@ -13,8 +13,10 @@ export { MechJebClient } from './mechjeb/index.js';
 
 // Programs
 export { AscentProgram, AscentHandle } from './mechjeb/ascent.js';
-export { ManeuverProgram } from './mechjeb/maneuver.js';
-export type { ManeuverResult, SetTargetResult, GetTargetInfo, ClearTargetResult } from './mechjeb/maneuver.js';
+
+// Target management types
+export type { SetTargetResult, GetTargetInfo, ClearTargetResult, ListTargetsResult } from './kos/target/types.js';
+export type { ManeuverResult } from './mechjeb/shared.js';
 
 // Orchestrator - high-level API with target/execute handling
 export { ManeuverOrchestrator, withTargetAndExecute } from './mechjeb/orchestrator.js';
@@ -55,7 +57,6 @@ export {
   getVesselState,
   getOrbitInfo,
   getMechJebInfo,
-  getQuickStatus,
   getShipTelemetry,
   getStatus
 } from './mechjeb/telemetry.js';

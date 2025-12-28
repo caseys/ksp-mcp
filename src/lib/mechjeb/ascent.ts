@@ -499,12 +499,13 @@ import { distanceSchema } from '../tool-types.js';
  * Launch ascent tool definition
  */
 export const launchAscentTool: ToolDefinition = {
-  name: 'launch_ascent_guidance',
-  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent by default.',
+  name: 'launch_and_circularize',
+  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent.',
   inputSchema: {
-    altitude: distanceSchema.optional().describe('Target orbit altitude in meters (default: atmosphere + 20km, or 20km if no atmosphere)'),
-    inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees'),
-    circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
+    altitude: distanceSchema.optional().describe('Target orbit altitude in meters, not required'),
+    inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees, not required'),
+    // Note: Circularization is always enabled to make things simpler for LLMs
+    // circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
   },
   annotations: {
     readOnlyHint: false,
@@ -530,7 +531,8 @@ export const launchAscentTool: ToolDefinition = {
         altitude,
         inclination: args.inclination as number,
         autoStage: true,
-        circularize: args.circularize as boolean,
+        // Note: Circularization is always enabled - disabling causes MechJeb issues
+        circularize: true,
         autoWarp: true,
       });
 

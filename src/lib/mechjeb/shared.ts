@@ -3,6 +3,7 @@
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
+import { hasTarget } from '../kos/target/shared.js';
 
 /**
  * Unlock steering and throttle controls.
@@ -14,14 +15,6 @@ export async function unlockControls(conn: KosConnection): Promise<void> {
   } catch {
     // Ignore errors - best effort cleanup
   }
-}
-
-/**
- * Check if a navigation target is currently set.
- */
-export async function hasTarget(conn: KosConnection): Promise<boolean> {
-  const result = await conn.execute('PRINT HASTARGET.', 2000);
-  return result.output.toLowerCase().includes('true');
 }
 
 /**
@@ -136,11 +129,6 @@ function parseTimeString(output: string): number {
   return seconds;
 }
 
-export function delay(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms));
-}
-
-
 /**
  * Query a numeric value from MechJeb (e.g., "23.80  m/s")
  */
@@ -179,29 +167,23 @@ export async function queryNodeInfo(conn: KosConnection): Promise<{ deltaV: numb
 }
 
 /**
- * Query a time value from MechJeb (e.g., "31m 10s")
- */
-export async function queryTime(conn: KosConnection, suffix: string): Promise<number> {
-  const result = await conn.execute(`PRINT ${suffix}.`, 2000);
-  return parseTimeString(result.output);
-}
-
-/**
  * Sanitize kOS output for error messages.
  * Removes command echoes and extracts meaningful failure reasons.
  */
-function sanitizeError(rawOutput: string): string {
+export function sanitizeError(rawOutput: string, operation?: string): string {
+  const opPrefix = operation ? `${operation} failed - ` : '';
+
   // If output contains command echo, give generic message
   // Check this FIRST because command echo may contain FALSE as parameter
   if (rawOutput.includes('SET ') || rawOutput.includes('PRINT ')) {
-    return 'Planner did not return success';
+    return `${opPrefix}planner did not return success`;
   }
 
   const errorPatterns = [
     { pattern: /No target/i, message: 'No target set' },
     { pattern: /Cannot find/i, message: 'Command not found - MechJeb may not be available' },
     { pattern: /Syntax error/i, message: 'kOS syntax error' },
-    { pattern: /^False$/i, message: 'Planner returned False' },  // Exact match only
+    { pattern: /^False$/i, message: `${opPrefix}planner returned False` },  // Exact match only
   ];
 
   for (const { pattern, message } of errorPatterns) {
@@ -212,7 +194,7 @@ function sanitizeError(rawOutput: string): string {
 
   // Return cleaned output (limit length)
   const cleaned = rawOutput.trim().slice(0, 100);
-  return cleaned || 'Unknown error';
+  return cleaned || `${opPrefix}unknown error`;
 }
 
 /**

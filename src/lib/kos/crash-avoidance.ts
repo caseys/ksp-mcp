@@ -10,7 +10,8 @@
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
-import { delay, queryNumber, unlockControls } from '../mechjeb/shared.js';
+import { queryNumber, unlockControls } from '../mechjeb/shared.js';
+import { delay } from '../utils/progress.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { executeNode } from '../mechjeb/execute-node.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';

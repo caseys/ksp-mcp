@@ -9,29 +9,45 @@ import type { ToolDefinition, ToolContext } from './tool-types.js';
 
 // Import tool definitions from lib files
 
-// MechJeb orchestrator tools (maneuver planning)
+// MechJeb basic maneuver tools
 import {
   circularizeTool,
   adjustApoapsisTool,
   adjustPeriapsisTool,
   ellipticizeTool,
+  changeSemiMajorAxisTool,
+} from './mechjeb/basic/index.js';
+
+// MechJeb orbital orientation tools
+import {
   changeInclinationTool,
+  changeEccentricityTool,
   changeAscendingNodeTool,
   changePeriapsisLongitudeTool,
-  changeSemiMajorAxisTool,
-  changeEccentricityTool,
-  hohmannTransferTool,
-  courseCorrectTool,
+} from './mechjeb/orbital/index.js';
+
+// MechJeb rendezvous tools
+import {
   matchPlanesTool,
   matchVelocitiesTool,
-  interplanetaryTransferTool,
-  returnFromMoonTool,
+} from './mechjeb/rendezvous/index.js';
+
+// MechJeb transfer tools
+import {
+  hohmannTransferTool,
+  courseCorrectTool,
   resonantOrbitTool,
+  returnFromMoonTool,
+  interplanetaryTransferTool,
+} from './mechjeb/transfer/index.js';
+
+// kOS target tools (pure kOS, no MechJeb)
+import {
   setTargetTool,
   getTargetTool,
   getTargetsTool,
   clearTargetTool,
-} from './mechjeb/orchestrator.js';
+} from './kos/target/index.js';
 
 // MechJeb ascent tools
 import { launchAscentTool } from './mechjeb/ascent.js';

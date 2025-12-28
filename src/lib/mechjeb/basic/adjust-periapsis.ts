@@ -1,5 +1,5 @@
 /**
- * Semi-Major Axis - Change orbital semi-major axis
+ * Adjust Periapsis - Change orbit low point
  */
 
 import { z } from 'zod';
@@ -10,19 +10,18 @@ import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
 
 /**
- * Create a maneuver node to change the orbital semi-major axis.
- * The semi-major axis determines the orbital period.
+ * Create a maneuver node to adjust periapsis.
  *
  * @param conn kOS connection
- * @param newSma Target semi-major axis in meters
+ * @param altitude Target periapsis altitude in meters
  * @param timeRef When to execute: 'APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'
  */
-export async function changeSemiMajorAxis(
+export async function adjustPeriapsis(
   conn: KosConnection,
-  newSma: number,
+  altitude: number,
   timeRef = 'APOAPSIS'
 ): Promise<ManeuverResult> {
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:SEMIMAJOR(${newSma}, "${timeRef}").`;
+  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEPE(${altitude}, "${timeRef}").`;
   return executeManeuverCommand(conn, cmd);
 }
 
@@ -30,11 +29,11 @@ export async function changeSemiMajorAxis(
 // Tool Definition
 // ============================================================================
 
-export const changeSemiMajorAxisTool: ToolDefinition = {
-  name: 'change_semi_major_axis',
-  description: 'Change orbital period. Advanced.',
+export const adjustPeriapsisTool: ToolDefinition = {
+  name: 'adjust_periapsis',
+  description: 'Change orbit low point. Use for deorbit or orbit adjustments.',
   inputSchema: {
-    semiMajorAxis: distanceSchema.optional().default(1_000_000).describe('Target semi-major axis in meters (default: 1000km)'),
+    altitude: distanceSchema.optional().describe('Target periapsis altitude in meters (default: current - 10km)'),
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
       .optional()
       .default('APOAPSIS')
@@ -47,22 +46,30 @@ export const changeSemiMajorAxisTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 2,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
-      const result = await orchestrator.changeSemiMajorAxis(args.semiMajorAxis as number, args.timeRef as string, { execute: args.execute as boolean });
+
+      // Default altitude: current periapsis - 10km (minimum 0)
+      let altitude = args.altitude as number | undefined;
+      if (altitude === undefined) {
+        const orbitInfo = await ctx.getBasicOrbitInfo(conn);
+        altitude = orbitInfo ? Math.max(0, orbitInfo.periapsis - 10_000) : 50_000;
+      }
+
+      const result = await orchestrator.adjustPeriapsis(altitude, args.timeRef as string, { execute: args.execute as boolean });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('change_semi_major_axis',
+        return ctx.successResponse('adjust_periapsis',
           `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
       } else {
-        return ctx.errorResponse('change_semi_major_axis', result.error ?? 'Failed');
+        return ctx.errorResponse('adjust_periapsis', result.error ?? 'Failed');
       }
     } catch (error) {
-      return ctx.errorResponse('change_semi_major_axis', error instanceof Error ? error.message : String(error));
+      return ctx.errorResponse('adjust_periapsis', error instanceof Error ? error.message : String(error));
     }
   },
 };

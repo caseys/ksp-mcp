@@ -95,15 +95,18 @@ export async function getVesselState(conn: KosConnection): Promise<VesselState> 
 
 /**
  * Get orbital parameters using native kOS (more reliable than MechJeb VESSEL suffixes)
+ * Includes altitude and speed for convenience (supersedes getQuickStatus)
  */
 export async function getOrbitInfo(conn: KosConnection): Promise<OrbitInfo> {
-  const [apo, per, period, inc, ecc, lan] = await queryNumbers(conn, [
+  const [apo, per, period, inc, ecc, lan, alt, spd] = await queryNumbers(conn, [
     'APOAPSIS',
     'PERIAPSIS',
     'ORBIT:PERIOD',
     'ORBIT:INCLINATION',
     'ORBIT:ECCENTRICITY',
-    'ORBIT:LAN'
+    'ORBIT:LAN',
+    'ALTITUDE',
+    'VELOCITY:SURFACE:MAG'
   ]);
 
   return {
@@ -112,7 +115,9 @@ export async function getOrbitInfo(conn: KosConnection): Promise<OrbitInfo> {
     period,
     inclination: inc,
     eccentricity: ecc,
-    lan
+    lan,
+    altitude: alt,
+    speed: spd
   };
 }
 
@@ -165,31 +170,6 @@ export async function getMechJebInfo(conn: KosConnection): Promise<MechJebInfo> 
     timeToManeuverNode: timeToNode === 0 ? undefined : timeToNode,
     timeToImpact: timeToImpact === 0 ? undefined : timeToImpact,
     escapeVelocity: escapeVel === 0 ? undefined : escapeVel
-  };
-}
-
-/**
- * Quick query for basic flight data (minimal latency)
- */
-export async function getQuickStatus(conn: KosConnection): Promise<{
-  altitude: number;
-  apoapsis: number;
-  periapsis: number;
-  speed: number;
-}> {
-  // Use native kOS for minimal latency
-  const [alt, apo, per, spd] = await queryNumbers(conn, [
-    'ALTITUDE',
-    'APOAPSIS',
-    'PERIAPSIS',
-    'VELOCITY:SURFACE:MAG'
-  ]);
-
-  return {
-    altitude: alt,
-    apoapsis: apo,
-    periapsis: per,
-    speed: spd
   };
 }
 
@@ -466,16 +446,15 @@ export async function getShipTelemetry(
     }
   }
 
-  // Query 4: Get available targets using ManeuverProgram.listTargets()
+  // Query 4: Get available targets using listTargets()
   const availableTargets: AvailableTargets = { moons: [], planets: [], vessels: [] };
   try {
-    const { ManeuverProgram } = await import('./maneuver.js');
-    const maneuverProgram = new ManeuverProgram(conn);
-    const targets = await maneuverProgram.listTargets();
+    const { listTargets } = await import('../kos/target/get-targets.js');
+    const targets = await listTargets(conn);
 
-    availableTargets.moons = targets.moons.map(m => m.name);
-    availableTargets.planets = targets.planets.map(p => p.name);
-    availableTargets.vessels = targets.vessels.map(v => v.name);
+    availableTargets.moons = targets.moons.map((m: { name: string }) => m.name);
+    availableTargets.planets = targets.planets.map((p: { name: string }) => p.name);
+    availableTargets.vessels = targets.vessels.map((v: { name: string }) => v.name);
 
     lines.push('', '=== Available Targets ===');
     if (availableTargets.moons.length > 0) {

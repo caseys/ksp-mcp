@@ -42,6 +42,8 @@ export interface OrbitInfo {
   inclination: number;
   eccentricity: number;
   lan: number;  // Longitude of ascending node
+  altitude?: number;  // Current altitude (meters)
+  speed?: number;     // Surface speed (m/s)
 }
 
 export interface MechJebInfo {

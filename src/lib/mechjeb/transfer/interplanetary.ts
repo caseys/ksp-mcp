@@ -2,9 +2,12 @@
  * Interplanetary Transfer - Plan transfer to another planet
  */
 
+import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, requireTarget, getTargetName, type ManeuverResult } from '../shared.js';
-import { type McpLogger, nullLogger } from '../../tool-types.js';
+import { ManeuverOrchestrator } from '../orchestrator.js';
+import type { ToolDefinition } from '../../tool-types.js';
+import { executeSchema, autoTargetSchema, type McpLogger, nullLogger } from '../../tool-types.js';
 
 export interface InterplanetaryOptions {
   waitForPhaseAngle?: boolean;
@@ -45,3 +48,61 @@ export async function interplanetaryTransfer(
 
   return result;
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+export const interplanetaryTransferTool: ToolDefinition = {
+  name: 'interplanetary_transfer',
+  description: 'Go to another planet: Duna, Eve, Jool. Waits for transfer window.',
+  inputSchema: {
+    target: autoTargetSchema,
+    waitForPhaseAngle: z.boolean()
+      .optional()
+      .default(true)
+      .describe('If true, waits for optimal phase angle. If false, transfers immediately.'),
+    execute: executeSchema,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  tier: 2,
+  handler: async (args, ctx, extra) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const orchestrator = new ManeuverOrchestrator(conn);
+      const logger = ctx.createLogger(extra);
+
+      // Auto-select furthest body if not provided (interplanetary = distant planets)
+      let target = args.target as string | undefined;
+      if (!target) {
+        const autoTarget = await ctx.selectTarget(orchestrator, 'furthest-body');
+        if (autoTarget) {
+          target = autoTarget;
+        }
+      }
+
+      const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle as boolean, { target, execute: args.execute as boolean, logger });
+
+      if (result.success) {
+        const execInfo = result.executed ? ' (executed)' : '';
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+
+        // Include warning if present (crash trajectory, close approach, etc.)
+        if (result.error) {
+          text += '\n\n' + result.error;
+        }
+
+        return ctx.successResponse('interplanetary', text);
+      } else {
+        return ctx.errorResponse('interplanetary', result.error ?? 'Failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('interplanetary', error instanceof Error ? error.message : String(error));
+    }
+  },
+};

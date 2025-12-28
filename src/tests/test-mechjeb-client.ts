@@ -57,12 +57,13 @@ async function main() {
     // Test telemetry
     console.log('\n--- Testing Telemetry ---');
 
-    console.log('\nQuick status:');
-    const quick = await mj.getQuickStatus();
-    console.log(`  Altitude: ${Math.round(quick.altitude)}m`);
-    console.log(`  Apoapsis: ${Math.round(quick.apoapsis)}m`);
-    console.log(`  Periapsis: ${Math.round(quick.periapsis)}m`);
-    console.log(`  Speed: ${Math.round(quick.speed)}m/s`);
+    console.log('\nOrbit info:');
+    const orbit = await mj.getOrbitInfo();
+    console.log(`  Altitude: ${Math.round(orbit.altitude ?? 0)}m`);
+    console.log(`  Apoapsis: ${Math.round(orbit.apoapsis)}m`);
+    console.log(`  Periapsis: ${Math.round(orbit.periapsis)}m`);
+    console.log(`  Speed: ${Math.round(orbit.speed ?? 0)}m/s`);
+    console.log(`  Inclination: ${orbit.inclination.toFixed(1)}°`);
 
     console.log('\nMechJeb info:');
     const info = await mj.getInfo();

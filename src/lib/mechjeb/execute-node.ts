@@ -6,7 +6,8 @@
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
-import { delay, queryNumber, unlockControls } from './shared.js';
+import { queryNumber, unlockControls } from './shared.js';
+import { delay } from '../utils/progress.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 

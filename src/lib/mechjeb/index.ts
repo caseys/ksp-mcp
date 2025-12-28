@@ -7,13 +7,11 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import type { MechJebModules, VesselState, OrbitInfo, MechJebInfo } from '../types.js';
 import { discoverModules, isMechJebAvailable, discoverAscentSuffixes } from './discovery.js';
-import { getVesselState, getOrbitInfo, getMechJebInfo, getQuickStatus } from './telemetry.js';
+import { getVesselState, getOrbitInfo, getMechJebInfo } from './telemetry.js';
 import { AscentProgram } from './ascent.js';
-import { ManeuverProgram } from './maneuver.js';
 
 export class MechJebClient {
   private _ascent: AscentProgram | null = null;
-  private _maneuver: ManeuverProgram | null = null;
   private _modules: MechJebModules | null = null;
 
   constructor(private conn: KosConnection) {}
@@ -50,16 +48,6 @@ export class MechJebClient {
     return this._ascent;
   }
 
-  /**
-   * Get Maneuver Program interface
-   */
-  get maneuver(): ManeuverProgram {
-    if (!this._maneuver) {
-      this._maneuver = new ManeuverProgram(this.conn);
-    }
-    return this._maneuver;
-  }
-
   get rendezvous(): null {
     // TODO: Implement when available in kOS.MechJeb2.Addon
     return null;
@@ -91,13 +79,6 @@ export class MechJebClient {
    */
   async getInfo(): Promise<MechJebInfo> {
     return getMechJebInfo(this.conn);
-  }
-
-  /**
-   * Quick status query (minimal latency)
-   */
-  async getQuickStatus() {
-    return getQuickStatus(this.conn);
   }
 
   /**

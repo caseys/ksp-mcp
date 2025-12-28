@@ -123,9 +123,10 @@ async function selectTarget(
 }
 
 /**
- * Get current orbit info (periapsis, apoapsis, altitude)
+ * Get basic orbit info for tool context (periapsis, apoapsis, altitude)
+ * Note: This is a simpler helper than the full getOrbitInfo from telemetry.ts
  */
-async function getOrbitInfo(conn: ReturnType<typeof getConnection> | null): Promise<OrbitInfo | null> {
+async function getBasicOrbitInfo(conn: ReturnType<typeof getConnection> | null): Promise<OrbitInfo | null> {
   if (!conn) return null;
   try {
     const result = await conn.execute(
@@ -183,7 +184,7 @@ export function createServer(): McpServer {
     errorResponse,
     selectTarget,
     getDefaultLaunchAltitude,
-    getOrbitInfo,
+    getBasicOrbitInfo,
   };
 
   // Register all tools from the tool registry

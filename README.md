@@ -94,7 +94,7 @@ import {
 } from 'ksp-mcp';
 
 // MechJeb telemetry
-import { getVesselState, getOrbitInfo, getMechJebInfo, getQuickStatus, getShipTelemetry } from 'ksp-mcp';
+import { getVesselState, getOrbitInfo, getMechJebInfo, getShipTelemetry } from 'ksp-mcp';
 import type { ShipTelemetry, VesselInfo, OrbitTelemetry, ManeuverInfo, EncounterInfo, TargetInfo } from 'ksp-mcp';
 
 // MechJeb discovery

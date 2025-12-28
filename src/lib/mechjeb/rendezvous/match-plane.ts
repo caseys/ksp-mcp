@@ -2,8 +2,12 @@
  * Match Plane - Match orbital plane with target
  */
 
+import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, requireTarget, type ManeuverResult } from '../shared.js';
+import { ManeuverOrchestrator } from '../orchestrator.js';
+import type { ToolDefinition } from '../../tool-types.js';
+import { executeSchema, autoTargetSchema } from '../../tool-types.js';
 
 /**
  * Create a maneuver node to match orbital plane with the target.
@@ -22,3 +26,54 @@ export async function matchPlane(
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:PLANE("${timeRef}").`;
   return executeManeuverCommand(conn, cmd);
 }
+
+// ============================================================================
+// Tool Definition
+// ============================================================================
+
+export const matchPlanesTool: ToolDefinition = {
+  name: 'match_planes',
+  description: 'Align orbit with target for rendezvous or docking.',
+  inputSchema: {
+    target: autoTargetSchema,
+    timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])
+      .optional()
+      .default('REL_NEAREST_AD')
+      .describe('When to execute: nearest AN/DN, highest AN/DN, ascending node, or descending node'),
+    execute: executeSchema,
+  },
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: false,
+    openWorldHint: false,
+  },
+  tier: 1,
+  handler: async (args, ctx) => {
+    try {
+      const conn = await ctx.ensureConnected();
+      const orchestrator = new ManeuverOrchestrator(conn);
+
+      // Auto-select closest vessel if not provided
+      let target = args.target as string | undefined;
+      if (!target) {
+        const autoTarget = await ctx.selectTarget(orchestrator, 'closest-vessel');
+        if (autoTarget) {
+          target = autoTarget;
+        }
+      }
+
+      const result = await orchestrator.matchPlane(args.timeRef as string, { target, execute: args.execute as boolean });
+
+      if (result.success) {
+        const execInfo = result.executed ? ' (executed)' : '';
+        return ctx.successResponse('match_planes',
+          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+      } else {
+        return ctx.errorResponse('match_planes', result.error ?? 'Failed');
+      }
+    } catch (error) {
+      return ctx.errorResponse('match_planes', error instanceof Error ? error.message : String(error));
+    }
+  },
+};
