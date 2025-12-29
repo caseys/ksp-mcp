@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { validateVesselState, CLEAN_ORBIT_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
@@ -22,6 +23,12 @@ export async function changeEccentricity(
   newEcc: number,
   timeRef = 'APOAPSIS'
 ): Promise<ManeuverResult> {
+  // Validate vessel state: must be in orbit with no encounters
+  const validation = await validateVesselState(conn, CLEAN_ORBIT_REQUIREMENTS, 'change_eccentricity');
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
+
   if (newEcc < 0 || newEcc >= 1) {
     return {
       success: false,
@@ -30,7 +37,7 @@ export async function changeEccentricity(
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ECCENTRICITY(${newEcc}, "${timeRef}").`;
-  return executeManeuverCommand(conn, cmd);
+  return executeManeuverCommand(conn, cmd, 10_000, 'change_eccentricity');
 }
 
 // ============================================================================

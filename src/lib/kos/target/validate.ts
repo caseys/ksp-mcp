@@ -57,67 +57,62 @@ export interface ValidationResult {
 
 /**
  * Query detailed target information from kOS.
- * Single atomic query to minimize round trips.
+ * Uses SET-then-PRINT pattern for reliability.
  *
  * @param conn kOS connection
  * @returns Target info or null if no target set
  */
 export async function getTargetValidationInfo(conn: KosConnection): Promise<TargetInfo | null> {
-  // Single atomic kOS command to get all target info
-  // Format: TYPE|name|parentBody|isInSOI|hasEncounter|encounterBody
-  const cmd = [
-    'IF HASTARGET {',
-    '  SET tgtType TO TARGET:TYPENAME.',
-    '  SET shipSOI TO SHIP:BODY:NAME.',
-    '  SET parentPlanet TO SHIP:BODY.',
-    '  IF parentPlanet:BODY:NAME <> "Sun" { SET parentPlanet TO parentPlanet:BODY. }',
-    '  IF tgtType = "Vessel" {',
-    '    SET tgtParent TO TARGET:BODY:NAME.',
-    '    SET inSOI TO (tgtParent = shipSOI).',
-    '    PRINT "VESSEL|" + TARGET:NAME + "|" + tgtParent + "|" + inSOI.',
-    '  } ELSE {',
-    '    SET tgtParent TO TARGET:BODY:NAME.',
-    '    SET isPlanet TO (tgtParent = "Sun").',
-    '    SET inSOI TO (TARGET:BODY = parentPlanet).',
-    '    IF isPlanet { PRINT "PLANET|" + TARGET:NAME + "|" + tgtParent + "|" + inSOI. }',
-    '    ELSE { PRINT "MOON|" + TARGET:NAME + "|" + tgtParent + "|" + inSOI. }',
-    '  }',
-    '  IF SHIP:ORBIT:HASNEXTPATCH {',
-    '    PRINT "ENC|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME.',
-    '  } ELSE { PRINT "NOENC". }',
-    '} ELSE { PRINT "NOTGT". }',
+  // Step 1: Check if target exists
+  const hasTargetResult = await conn.execute('PRINT HASTARGET.', 2000);
+  if (!hasTargetResult.output.toLowerCase().includes('true')) {
+    return null;
+  }
+
+  // Step 2: Get target info using SET-then-PRINT (more reliable than inline expressions)
+  const infoCmd = [
+    'SET _tgtType TO TARGET:TYPENAME.',
+    'SET _tgtName TO TARGET:NAME.',
+    'SET _shipSOI TO SHIP:BODY:NAME.',
+    'SET _tgtParent TO TARGET:BODY:NAME.',
+    'SET _inSOI TO (_tgtParent = _shipSOI).',
+    'PRINT "INFO|" + _tgtType + "|" + _tgtName + "|" + _tgtParent + "|" + _inSOI.',
   ].join(' ');
 
-  const result = await conn.execute(cmd, 5000);
-  const output = result.output;
+  const infoResult = await conn.execute(infoCmd, 3000);
+  const infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)/);
 
-  // Check for no target
-  if (output.includes('NOTGT')) {
-    return null;
+  if (!infoMatch) {
+    throw new Error(`[validateTarget] Failed to parse target info. Output: "${infoResult.output}"`);
   }
 
-  // Parse target type and info: TYPE|name|parent|inSOI
-  const typeMatch = output.match(/(VESSEL|PLANET|MOON)\|([^|]+)\|([^|]+)\|(\w+)/);
-  if (!typeMatch) {
-    return null;
-  }
-
-  const [, typeStr, name, parentBody, inSOIStr] = typeMatch;
-  const targetClass = typeStr.toLowerCase() as TargetClass;
+  const [, typename, name, parentBody, inSOIStr] = infoMatch;
   const isInShipSOI = inSOIStr.toLowerCase() === 'true';
 
-  // Parse encounter info
-  const encMatch = output.match(/ENC\|(\w+)/);
-  const hasEncounter = encMatch !== null;
-  const encounterBody = encMatch ? encMatch[1] : undefined;
+  // Classify target
+  let targetClass: TargetClass;
+  if (typename === 'Vessel') {
+    targetClass = 'vessel';
+  } else if (parentBody === 'Sun') {
+    targetClass = 'planet';
+  } else {
+    targetClass = 'moon';
+  }
+
+  // Step 3: Check for encounter (separate query for reliability)
+  const encResult = await conn.execute(
+    'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "ENC|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NOENC". }',
+    2000
+  );
+  const encMatch = encResult.output.match(/ENC\|(\w+)/);
 
   return {
     name: name.trim(),
     class: targetClass,
     parentBody: parentBody.trim(),
     isInShipSOI,
-    hasEncounter,
-    encounterBody,
+    hasEncounter: encMatch !== null,
+    encounterBody: encMatch ? encMatch[1] : undefined,
   };
 }
 

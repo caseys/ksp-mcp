@@ -29,7 +29,7 @@ export async function adjustApoapsis(
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEAP(${altitude}, "${timeRef}").`;
-  return executeManeuverCommand(conn, cmd);
+  return executeManeuverCommand(conn, cmd, 10_000, 'adjust_apoapsis');
 }
 
 // ============================================================================

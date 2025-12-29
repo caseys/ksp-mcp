@@ -105,7 +105,7 @@ export async function hohmannTransfer(
 
 export const hohmannTransferTool: ToolDefinition = {
   name: 'hohmann_transfer',
-  description: 'Go to a moon or vessel. Use for: fly to Mun, navigate to Minmus, transfer to vessel. NOT for planets - use interplanetary_transfer instead.',
+  description: 'Transfer to moon or vessel. Usually followed by course correction. NOT for planets - use interplanetary_transfer instead.',
   inputSchema: {
     target: autoTargetSchema,
     // Note: MechJeb does not have working capture logic - timeReference and capture temporarily disabled

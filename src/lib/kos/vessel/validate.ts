@@ -56,6 +56,8 @@ export interface VesselStateRequirements {
   requireManeuverNode?: boolean;
   /** Must have stable orbit (periapsis > 0) */
   requireStableOrbit?: boolean;
+  /** Must NOT have an encounter (future conic patch) */
+  forbidEncounter?: boolean;
 }
 
 /**
@@ -247,6 +249,15 @@ export async function validateVesselState(
     };
   }
 
+  // Check forbidden encounter (for orbital orientation maneuvers)
+  if (requirements.forbidEncounter && hasEncounter) {
+    return {
+      valid: false,
+      stateInfo,
+      error: `Current trajectory not compatible with ${toolName} maneuver.`,
+    };
+  }
+
   // All checks passed
   return { valid: true, stateInfo };
 }
@@ -270,4 +281,13 @@ export const STABLE_ORBIT_REQUIREMENTS: VesselStateRequirements = {
  */
 export const LAUNCH_REQUIREMENTS: VesselStateRequirements = {
   allowedStatuses: ['prelaunch', 'landed'],
+};
+
+/**
+ * Validation requirements for orbital orientation tools (inclination, plane matching, etc.)
+ * Must have clean orbit with no future conic patches
+ */
+export const CLEAN_ORBIT_REQUIREMENTS: VesselStateRequirements = {
+  forbiddenStatuses: ['prelaunch', 'landed', 'splashed'],
+  forbidEncounter: true,
 };

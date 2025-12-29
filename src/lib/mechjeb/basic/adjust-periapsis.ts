@@ -29,7 +29,7 @@ export async function adjustPeriapsis(
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEPE(${altitude}, "${timeRef}").`;
-  return executeManeuverCommand(conn, cmd);
+  return executeManeuverCommand(conn, cmd, 10_000, 'adjust_periapsis');
 }
 
 // ============================================================================

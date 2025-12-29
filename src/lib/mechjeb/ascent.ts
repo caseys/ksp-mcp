@@ -17,6 +17,7 @@ import { delay } from '../utils/progress.js';
 import { parseNumber } from './shared.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
+import { StableWarpTracker } from '../utils/stable-warp.js';
 
 /**
  * Detect kOS errors in output
@@ -109,6 +110,9 @@ export class AscentHandle {
     let consecutiveEmptyResponses = 0;
     const MAX_EMPTY_RESPONSES = 3;
 
+    // Warp detection - enable warp when APO stabilizes during coast phase
+    const warpTracker = new StableWarpTracker(this.conn, this.logger, 2, 'Ascent');
+
     // Get atmosphere height for this body using labeled output
     const atmResult = await this.conn.execute('PRINT "ATM:" + ROUND(SHIP:BODY:ATM:HEIGHT).');
     const atmMatch = atmResult.output.match(/ATM:(-?\d+)/);
@@ -159,6 +163,13 @@ export class AscentHandle {
       const apoapsis = Number.parseInt(statusMatch[2]);
       const periapsis = Number.parseInt(statusMatch[3]);
       const body = statusMatch[4];
+
+      // Smart warp: detect when ascent burn complete (APO+PER stable, still suborbital)
+      if (periapsis < 0 && apoapsis >= this.targetAltitude * 0.9) {
+        // Track both APO and PER - only stable when both are unchanged
+        const state = `${Math.round(apoapsis / 1000)},${Math.round(periapsis / 1000)}`;
+        await warpTracker.check(state);
+      }
 
       // Log progress every 10 seconds
       const now = Date.now();
@@ -469,7 +480,8 @@ export class AscentProgram {
     await delay(500);  // Let the stage command process
     this.logger.progress('[Ascent] LAUNCHED - MechJeb in control');
 
-    // Enable 2x warp after 15 seconds if autoWarp is enabled
+    // Enable 2x warp after 15 seconds if autoWarp is enabled (helps during initial climb)
+    // Additional 4x warp is enabled in waitForCompletion() when APO stabilizes (coast phase)
     if (autoWarp) {
       setTimeout(async () => {
         try {

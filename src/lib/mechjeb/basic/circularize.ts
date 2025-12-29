@@ -27,7 +27,7 @@ export async function circularize(
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("${timeRef}").`;
-  return executeManeuverCommand(conn, cmd);
+  return executeManeuverCommand(conn, cmd, 10_000, 'circularize');
 }
 
 // ============================================================================

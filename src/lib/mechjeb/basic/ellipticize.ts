@@ -32,7 +32,7 @@ export async function ellipticize(
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ELLIPTICIZE(${newPeA}, ${newApA}, "${timeRef}").`;
-  return executeManeuverCommand(conn, cmd);
+  return executeManeuverCommand(conn, cmd, 10_000, 'ellipticize');
 }
 
 // ============================================================================

@@ -23,7 +23,7 @@ export async function changeSemiMajorAxis(
   timeRef = 'APOAPSIS'
 ): Promise<ManeuverResult> {
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:SEMIMAJOR(${newSma}, "${timeRef}").`;
-  return executeManeuverCommand(conn, cmd);
+  return executeManeuverCommand(conn, cmd, 10_000, 'change_semi_major_axis');
 }
 
 // ============================================================================

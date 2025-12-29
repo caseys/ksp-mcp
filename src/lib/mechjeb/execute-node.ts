@@ -10,6 +10,7 @@ import { queryNumber, unlockControls } from './shared.js';
 import { delay } from '../utils/progress.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
+import { StableWarpTracker } from '../utils/stable-warp.js';
 
 export interface ExecuteNodeResult {
   success: boolean;
@@ -222,6 +223,9 @@ export async function executeNode(
     }
   }
 
+  // Stable state warp - enable 2x warp when coasting to node
+  const warpTracker = new StableWarpTracker(conn, log, 2, 'ExecuteNode');
+
   // Retry loop for incomplete burns
   let lastAttempt = 0;
 
@@ -302,6 +306,11 @@ export async function executeNode(
         const dvRemaining = Number.parseFloat(progressMatch[1]);
         const executorEnabled = progressMatch[2].toLowerCase() === 'true';
         lastDvRemaining = dvRemaining;
+
+        // Stable state warp: if coasting to node (high dV = not burning yet)
+        if (dvRemaining > 10) {
+          await warpTracker.check(String(Math.round(dvRemaining)));
+        }
 
         // Log progress every poll (every 10s)
         log.progress(`[ExecuteNode] Progress: ${dvRemaining.toFixed(1)} m/s remaining, executor: ${executorEnabled ? 'ON' : 'OFF'}`);

@@ -173,18 +173,71 @@ export function sanitizeError(rawOutput: string, operation?: string): string {
 }
 
 /**
+ * Validate that a created maneuver node is in the current conic patch.
+ * If node is beyond the next SOI change, clears it and returns error.
+ *
+ * @param conn kOS connection
+ * @param toolName Name of tool for error message
+ * @returns Validation result - valid:true if node is in current patch
+ */
+export async function validateNodeInCurrentPatch(
+  conn: KosConnection,
+  toolName: string
+): Promise<{ valid: boolean; error?: string }> {
+  // Check if we have both a node AND a future patch
+  const result = await conn.execute(
+    'IF HASNODE AND SHIP:ORBIT:HASNEXTPATCH { ' +
+    'PRINT "CHECK|" + NEXTNODE:ETA + "|" + (SHIP:ORBIT:NEXTPATCH:STARTTIME - TIME:SECONDS). } ' +
+    'ELSE { PRINT "OK". }',
+    3000
+  );
+
+  const match = result.output.match(/CHECK\|([\d.]+)\|([\d.]+)/);
+  if (match) {
+    const nodeEta = Number.parseFloat(match[1]);
+    const timeToSOI = Number.parseFloat(match[2]);
+
+    if (nodeEta > timeToSOI) {
+      // Node is beyond current patch - clear it
+      await conn.execute('REMOVE NEXTNODE.', 2000);
+      return {
+        valid: false,
+        error: `${toolName} planning resulted in a maneuver beyond the current patch.\n` +
+               `Node was ${Math.round(nodeEta - timeToSOI)}s past SOI change. Node has been removed.`,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
  * Execute a maneuver planning command and return the result with node info
+ *
+ * @param conn kOS connection
+ * @param cmd kOS command to execute
+ * @param timeout Command timeout in ms
+ * @param toolName Optional tool name - if provided, validates node is in current patch
  */
 export async function executeManeuverCommand(
   conn: KosConnection,
   cmd: string,
-  timeout = 10_000
+  timeout = 10_000,
+  toolName?: string
 ): Promise<ManeuverResult> {
   const result = await conn.execute(cmd, timeout);
 
   const success = result.output.includes('True');
   if (!success) {
     return { success: false, error: sanitizeError(result.output) };
+  }
+
+  // Validate node is in current patch if toolName provided
+  if (toolName) {
+    const patchValidation = await validateNodeInCurrentPatch(conn, toolName);
+    if (!patchValidation.valid) {
+      return { success: false, error: patchValidation.error };
+    }
   }
 
   // Use kOS native NEXTNODE instead of broken MechJeb INFO suffixes

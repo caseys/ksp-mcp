@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, sanitizeError, validateNodeInCurrentPatch, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
@@ -44,6 +44,12 @@ export async function killRelativeVelocity(
   const success = result.output.includes('True');
   if (!success) {
     return { success: false, error: sanitizeError(result.output, 'Match velocities') };
+  }
+
+  // Validate node is in current patch
+  const patchValidation = await validateNodeInCurrentPatch(conn, 'match_velocities');
+  if (!patchValidation.valid) {
+    return { success: false, error: patchValidation.error };
   }
 
   const nodeInfo = await queryNodeInfo(conn);
