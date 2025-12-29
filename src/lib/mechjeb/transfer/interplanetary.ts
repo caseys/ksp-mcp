@@ -111,8 +111,8 @@ export const interplanetaryTransferTool: ToolDefinition = {
         let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
 
         // Include warning if present (crash trajectory, close approach, etc.)
-        if (result.error) {
-          text += '\n\n' + result.error;
+        if (result.warning) {
+          text += '\n\n' + result.warning;
         }
 
         return ctx.successResponse('interplanetary', text);

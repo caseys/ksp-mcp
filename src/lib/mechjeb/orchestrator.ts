@@ -326,12 +326,18 @@ export class ManeuverOrchestrator {
       if (trajectoryCheck.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
         // Correct target - check for crash trajectory
         if (trajectoryCheck.encounterPeriapsis !== undefined && trajectoryCheck.encounterPeriapsis < 0) {
-          // Crash trajectory - warn user to run course correction
+          // Crash trajectory - suggest appropriate tool based on current SOI
+          const currentSOI = await this.getSOIBody();
+          const inTargetSOI = currentSOI.toLowerCase() === trajectoryCheck.encounterBody?.toLowerCase();
+          const suggestion = inTargetSOI
+            ? 'Run crash_avoidance to raise periapsis immediately.'
+            : 'Run course_correct to raise periapsis before SOI entry.';
+
           return {
             ...result,
-            error: `⚠️ Transfer successful but trajectory will IMPACT ${trajectoryCheck.encounterBody}!\n` +
-                   `Encounter periapsis: ${(trajectoryCheck.encounterPeriapsis / 1000).toFixed(1)} km (below surface)\n` +
-                   `Run course_correct to raise periapsis before SOI entry.`,
+            warning: `⚠️ Trajectory will impact ${trajectoryCheck.encounterBody}!\n` +
+                     `Encounter periapsis: ${(trajectoryCheck.encounterPeriapsis / 1000).toFixed(1)} km (below surface)\n` +
+                     suggestion,
           };
         }
         // Success - no crash trajectory
@@ -340,8 +346,8 @@ export class ManeuverOrchestrator {
       // Wrong encounter target - this shouldn't happen after planning succeeded
       return {
         ...result,
-        error: `⚠️ Post-burn encounter is with ${trajectoryCheck.encounterBody}, not ${targetName}.\n` +
-               'Burn execution may have been imprecise. Consider course correction.',
+        warning: `⚠️ Post-burn encounter is with ${trajectoryCheck.encounterBody}, not ${targetName}.\n` +
+                 'Burn execution may have been imprecise. Consider course correction.',
       };
     }
 
@@ -349,10 +355,10 @@ export class ManeuverOrchestrator {
     if (trajectoryCheck.isCloseApproach) {
       return {
         ...result,
-        error: `⚠️ Close approach created (no SOI encounter after burn).\n` +
-               `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
-               `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
-               `A course_correct burn is recommended.`,
+        warning: `⚠️ Close approach created (no SOI encounter after burn).\n` +
+                 `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
+                 `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
+                 `A course_correct burn is recommended.`,
       };
     }
 
@@ -566,12 +572,18 @@ export class ManeuverOrchestrator {
       if (trajectoryCheck.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
         // Correct target - check for crash trajectory
         if (trajectoryCheck.encounterPeriapsis !== undefined && trajectoryCheck.encounterPeriapsis < 0) {
-          // Crash trajectory - warn user to run course correction
+          // Crash trajectory - suggest appropriate tool based on current SOI
+          const currentSOI = await this.getSOIBody();
+          const inTargetSOI = currentSOI.toLowerCase() === trajectoryCheck.encounterBody?.toLowerCase();
+          const suggestion = inTargetSOI
+            ? 'Run crash_avoidance to raise periapsis immediately.'
+            : 'Run course_correct to raise periapsis before SOI entry.';
+
           return {
             ...result,
-            error: `⚠️ Transfer successful but trajectory will IMPACT ${trajectoryCheck.encounterBody}!\n` +
-                   `Encounter periapsis: ${(trajectoryCheck.encounterPeriapsis / 1000).toFixed(1)} km (below surface)\n` +
-                   `Run course_correct to raise periapsis before SOI entry.`,
+            warning: `⚠️ Trajectory will impact ${trajectoryCheck.encounterBody}!\n` +
+                     `Encounter periapsis: ${(trajectoryCheck.encounterPeriapsis / 1000).toFixed(1)} km (below surface)\n` +
+                     suggestion,
           };
         }
         // Success - no crash trajectory
@@ -588,10 +600,10 @@ export class ManeuverOrchestrator {
     if (trajectoryCheck.isCloseApproach) {
       return {
         ...result,
-        error: `⚠️ Close approach created (no SOI encounter after burn).\n` +
-               `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
-               `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
-               `A course_correct burn is recommended.`,
+        warning: `⚠️ Close approach created (no SOI encounter after burn).\n` +
+                 `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
+                 `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
+                 `A course_correct burn is recommended.`,
       };
     }
 

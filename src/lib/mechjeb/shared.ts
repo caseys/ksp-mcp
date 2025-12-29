@@ -22,6 +22,7 @@ export interface ManeuverResult {
   timeToNode?: number;    // seconds
   nodesCreated?: number;  // actual number of nodes created
   error?: string;
+  warning?: string;       // Non-error guidance (e.g., crash trajectory needs follow-up)
   targetInfo?: TargetEncounterInfo;  // Target-specific encounter info
 }
 
@@ -192,20 +193,27 @@ export async function validateNodeInCurrentPatch(
     3000
   );
 
+  console.log(`[${toolName}] validateNodeInCurrentPatch raw output: ${result.output}`);
+
   const match = result.output.match(/CHECK\|([\d.]+)\|([\d.]+)/);
   if (match) {
     const nodeEta = Number.parseFloat(match[1]);
     const timeToSOI = Number.parseFloat(match[2]);
 
+    console.log(`[${toolName}] nodeEta=${nodeEta}s, timeToSOI=${timeToSOI}s, nodeAfterSOI=${nodeEta > timeToSOI}`);
+
     if (nodeEta > timeToSOI) {
       // Node is beyond current patch - clear it
       await conn.execute('REMOVE NEXTNODE.', 2000);
+      console.log(`[${toolName}] Node was ${Math.round(nodeEta - timeToSOI)}s past SOI change - REMOVED`);
       return {
         valid: false,
         error: `${toolName} planning resulted in a maneuver beyond the current patch.\n` +
                `Node was ${Math.round(nodeEta - timeToSOI)}s past SOI change. Node has been removed.`,
       };
     }
+  } else {
+    console.log(`[${toolName}] No patch check needed (output was OK or no match)`);
   }
 
   return { valid: true };
@@ -225,15 +233,23 @@ export async function executeManeuverCommand(
   timeout = 10_000,
   toolName?: string
 ): Promise<ManeuverResult> {
+  if (toolName) {
+    console.log(`[${toolName}] executeManeuverCommand starting`);
+  }
+
   const result = await conn.execute(cmd, timeout);
 
   const success = result.output.includes('True');
   if (!success) {
+    if (toolName) {
+      console.log(`[${toolName}] Planning failed: ${result.output}`);
+    }
     return { success: false, error: sanitizeError(result.output) };
   }
 
   // Validate node is in current patch if toolName provided
   if (toolName) {
+    console.log(`[${toolName}] Planning succeeded, validating patch...`);
     const patchValidation = await validateNodeInCurrentPatch(conn, toolName);
     if (!patchValidation.valid) {
       return { success: false, error: patchValidation.error };
