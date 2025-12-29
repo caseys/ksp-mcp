@@ -14,6 +14,7 @@ import {
 import { getStatus, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
+import { formatActiveOperationStatus } from '../utils/operation-state.js';
 import { listQuicksaves } from '../lib/kos/kuniverse.js';
 import { registerAllTools } from '../lib/tool-registry.js';
 import type { ToolContext, TargetSelectMode, OrbitInfo, McpLogger } from '../lib/tool-types.js';
@@ -292,6 +293,11 @@ export function createServer(): McpServer {
     'ksp://status',
     async () => {
       const status = await getStatus(undefined, FULL_TELEMETRY_OPTIONS);
+      // Add active operation info if any
+      const operationStatus = formatActiveOperationStatus();
+      if (operationStatus && status.formatted) {
+        status.formatted = status.formatted + operationStatus;
+      }
       return {
         contents: [{
           uri: 'ksp://status',

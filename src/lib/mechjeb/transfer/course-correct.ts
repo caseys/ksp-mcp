@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
 import { getTargetValidationInfo } from '../../kos/target/validate.js';
+import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
@@ -26,6 +27,12 @@ export async function courseCorrection(
   targetPeriapsis: number,
   logger?: McpLogger
 ): Promise<ManeuverResult> {
+  // Validate vessel state: must not be on ground
+  const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'course_correct');
+  if (!vesselValidation.valid) {
+    return { success: false, error: vesselValidation.error };
+  }
+
   // Check target exists and has encounter
   const targetInfo = await getTargetValidationInfo(conn);
   if (!targetInfo) {

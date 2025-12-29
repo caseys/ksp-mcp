@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { validateVesselState, STABLE_ORBIT_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
@@ -21,6 +22,12 @@ export async function adjustApoapsis(
   altitude: number,
   timeRef = 'PERIAPSIS'
 ): Promise<ManeuverResult> {
+  // Validate vessel state: must be in stable orbit (not escaped, not on ground)
+  const validation = await validateVesselState(conn, STABLE_ORBIT_REQUIREMENTS, 'adjust_apoapsis');
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
+
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEAP(${altitude}, "${timeRef}").`;
   return executeManeuverCommand(conn, cmd);
 }

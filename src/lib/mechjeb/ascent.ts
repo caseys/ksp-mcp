@@ -494,6 +494,8 @@ export class AscentProgram {
 import { z } from 'zod';
 import type { ToolDefinition } from '../tool-types.js';
 import { distanceSchema } from '../tool-types.js';
+import { validateVesselState, LAUNCH_REQUIREMENTS } from '../kos/vessel/validate.js';
+import { setActiveOperation, clearActiveOperation } from '../../utils/operation-state.js';
 
 /**
  * Launch ascent tool definition
@@ -515,9 +517,16 @@ export const launchAscentTool: ToolDefinition = {
   },
   tier: 1,
   handler: async (args, ctx, extra) => {
+    setActiveOperation('launch_and_circularize', 'Launching to orbit');
     try {
       const conn = await ctx.ensureConnected();
       const logger = ctx.createLogger(extra);
+
+      // Validate vessel state: must be landed or prelaunch
+      const validation = await validateVesselState(conn, LAUNCH_REQUIREMENTS, 'launch_and_circularize');
+      if (!validation.valid) {
+        return ctx.errorResponse('launch', validation.error ?? 'Invalid vessel state');
+      }
 
       // Get default altitude based on body's atmosphere
       let altitude = args.altitude as number | undefined;
@@ -548,6 +557,8 @@ export const launchAscentTool: ToolDefinition = {
       }
     } catch (error) {
       return ctx.errorResponse('launch', error instanceof Error ? error.message : String(error));
+    } finally {
+      clearActiveOperation();
     }
   },
 };

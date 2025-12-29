@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
+import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
@@ -22,6 +23,12 @@ export async function killRelativeVelocity(
   conn: KosConnection,
   timeRef = 'CLOSEST_APPROACH'
 ): Promise<ManeuverResult> {
+  // Validate vessel state: must not be on ground
+  const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'match_velocities');
+  if (!vesselValidation.valid) {
+    return { success: false, error: vesselValidation.error };
+  }
+
   // Pre-validate target: must be in same SOI (typically used for vessel rendezvous)
   const validation = await validateTarget(conn, {
     requireSameSOI: true,

@@ -429,6 +429,7 @@ export async function disableNodeExecutor(conn: KosConnection): Promise<void> {
 
 import { z } from 'zod';
 import type { ToolDefinition } from '../tool-types.js';
+import { setActiveOperation, clearActiveOperation } from '../../utils/operation-state.js';
 
 /**
  * Execute node tool definition
@@ -458,6 +459,7 @@ export const executeNodeTool: ToolDefinition = {
   },
   tier: 1,
   handler: async (args, ctx, extra) => {
+    setActiveOperation('execute_node', 'Executing maneuver node');
     try {
       const conn = await ctx.ensureConnected();
       const logger = ctx.createLogger(extra);
@@ -486,6 +488,8 @@ export const executeNodeTool: ToolDefinition = {
       }
     } catch (error) {
       return ctx.errorResponse('execute_node', error instanceof Error ? error.message : String(error));
+    } finally {
+      clearActiveOperation();
     }
   },
 };

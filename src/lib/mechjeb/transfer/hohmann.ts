@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
+import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
@@ -28,6 +29,12 @@ export async function hohmannTransfer(
   timeRef = 'COMPUTED',
   capture = false
 ): Promise<ManeuverResult> {
+  // Validate vessel state: must not be on ground
+  const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'hohmann_transfer');
+  if (!vesselValidation.valid) {
+    return { success: false, error: vesselValidation.error };
+  }
+
   // Pre-validate target: must be moon or vessel in same SOI
   const validation = await validateTarget(conn, {
     allowedClasses: ['moon', 'vessel'],
@@ -128,10 +135,10 @@ export const hohmannTransferTool: ToolDefinition = {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
 
-      // Auto-select target if not provided
+      // Auto-select target if not provided (use 2nd closest to avoid targeting current SOI body)
       let target = args.target as string | undefined;
       if (!target) {
-        const autoTarget = await ctx.selectTarget(orchestrator, 'closest-body');
+        const autoTarget = await ctx.selectTarget(orchestrator, 'second-closest');
         if (autoTarget) {
           target = autoTarget;
         }

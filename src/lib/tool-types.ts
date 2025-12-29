@@ -55,10 +55,10 @@ export interface ToolContext {
  * Target selection modes for auto-select
  */
 export type TargetSelectMode =
-  | 'closest-body'      // Closest body (excluding SOI) - for hohmann_transfer
+  | 'closest-body'      // Closest body (excluding SOI)
   | 'closest-vessel'    // Closest vessel - for match_planes, match_velocities
   | 'furthest-body'     // Furthest body - for interplanetary_transfer
-  | 'second-closest';   // 2nd closest body (excluding SOI) - for set_target, course_correct
+  | 'second-closest';   // 2nd closest body (excluding SOI) - for hohmann_transfer, set_target, course_correct
 
 /**
  * Orbit info returned by getOrbitInfo

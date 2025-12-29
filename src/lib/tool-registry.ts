@@ -2,10 +2,12 @@
  * Tool Registry
  *
  * Central registry that collects all tool definitions and registers them with the MCP server.
+ * Includes operation guard to prevent conflicting operations.
  */
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition, ToolContext } from './tool-types.js';
+import { getActiveOperation, clearActiveOperation } from '../utils/operation-state.js';
 
 // Import tool definitions from lib files
 
@@ -70,12 +72,58 @@ import { commandTool, disconnectTool, switchCpuTool } from '../transport/connect
 import { listCpusTool } from '../transport/list-cpus.js';
 
 /**
+ * Abort operation tool - cancels the currently running operation.
+ */
+const abortOperationTool: ToolDefinition = {
+  name: 'abort_operation',
+  description: 'Cancel the currently running operation. Use if something goes wrong or you need to stop.',
+  inputSchema: {},
+  annotations: {
+    readOnlyHint: false,
+    destructiveHint: true,
+    idempotentHint: true,
+    openWorldHint: false,
+  },
+  tier: 1,
+  handler: async (_args, context) => {
+    const activeOp = getActiveOperation();
+    if (!activeOp) {
+      return context.successResponse('Abort', 'No operation is currently running.');
+    }
+
+    const toolName = activeOp.toolName;
+    const duration = Math.round((Date.now() - activeOp.startedAt) / 1000);
+
+    clearActiveOperation();
+
+    return context.successResponse('Abort',
+      `Aborted ${toolName} after ${duration}s. Note: KSP may still be executing - use SAS or manual control.`
+    );
+  },
+};
+
+/**
+ * Tools that are exempt from the operation guard.
+ * - Read-only tools: can always check status
+ * - abort_operation: must always work to cancel running ops
+ */
+const GUARD_EXEMPT_TOOLS = new Set([
+  'status',
+  'get_target',
+  'get_targets',
+  'list_saves',
+  'list_cpus',
+  'abort_operation',
+]);
+
+/**
  * All registered tools.
  * Each tool file exports a toolDefinition that is imported and added here.
  */
 export const allTools: ToolDefinition[] = [
   // Core/Status
   statusTool,
+  abortOperationTool,
 
   // Maneuver Planning (Tier 1 - Most Common)
   launchAscentTool,
@@ -119,6 +167,7 @@ export const allTools: ToolDefinition[] = [
 
 /**
  * Register all tools with the MCP server.
+ * Includes operation guard to prevent conflicting concurrent operations.
  */
 export function registerAllTools(server: McpServer, context: ToolContext): void {
   for (const tool of allTools) {
@@ -130,7 +179,24 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
         annotations: tool.annotations,
         _meta: { tier: tool.tier },
       },
-      (args, extra) => tool.handler(args as Record<string, unknown>, context, extra)
+      (args, extra) => {
+        // Check operation guard (exempt certain tools)
+        if (!GUARD_EXEMPT_TOOLS.has(tool.name)) {
+          const activeOp = getActiveOperation();
+          if (activeOp && activeOp.toolName !== tool.name) {
+            const duration = Math.round((Date.now() - activeOp.startedAt) / 1000);
+            return {
+              isError: true,
+              content: [{
+                type: 'text' as const,
+                text: `Cannot run ${tool.name}: ${activeOp.toolName} is currently executing (${duration}s). Wait for completion or use abort_operation.`,
+              }],
+            };
+          }
+        }
+
+        return tool.handler(args as Record<string, unknown>, context, extra);
+      }
     );
   }
 }

@@ -5,6 +5,7 @@
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
@@ -24,6 +25,12 @@ export async function ellipticize(
   newApA: number,
   timeRef = 'APOAPSIS'
 ): Promise<ManeuverResult> {
+  // Validate vessel state: must not be on ground
+  const validation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'ellipticize');
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
+
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ELLIPTICIZE(${newPeA}, ${newApA}, "${timeRef}").`;
   return executeManeuverCommand(conn, cmd);
 }

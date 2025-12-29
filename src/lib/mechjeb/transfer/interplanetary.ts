@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
+import { validateVesselState } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema, type McpLogger, nullLogger } from '../../tool-types.js';
@@ -28,6 +29,15 @@ export async function interplanetaryTransfer(
 ): Promise<ManeuverResult> {
   const { waitForPhaseAngle = true, logger } = options;
   const log = logger ?? nullLogger;
+
+  // Validate vessel state: must be orbiting a planet (not a moon)
+  const vesselValidation = await validateVesselState(conn, {
+    forbiddenStatuses: ['prelaunch', 'landed', 'splashed'],
+    requireAtPlanet: true,
+  }, 'interplanetary_transfer');
+  if (!vesselValidation.valid) {
+    return { success: false, error: vesselValidation.error };
+  }
 
   // Pre-validate target: must be a planet, and not the current SOI body
   const validation = await validateTarget(conn, {

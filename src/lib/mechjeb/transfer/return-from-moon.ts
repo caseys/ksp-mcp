@@ -4,6 +4,7 @@
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { validateVesselState } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
@@ -19,6 +20,16 @@ export async function returnFromMoon(
   conn: KosConnection,
   targetPeriapsis: number
 ): Promise<ManeuverResult> {
+  // Validate vessel state: must be orbiting a moon
+  const validation = await validateVesselState(conn, {
+    forbiddenStatuses: ['prelaunch', 'landed', 'splashed'],
+    requireAtMoon: true,
+  }, 'return_from_moon');
+
+  if (!validation.valid) {
+    return { success: false, error: validation.error };
+  }
+
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:MOONRETURN(${targetPeriapsis}).`;
   return executeManeuverCommand(conn, cmd);
 }
