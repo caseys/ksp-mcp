@@ -152,9 +152,25 @@ export const hohmannTransferTool: ToolDefinition = {
         const execInfo = result.executed ? ' (executed)' : '';
         let text = `${nodeCount} node(s): ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
 
-        // Include warning if present (crash trajectory, close approach, etc.)
-        if (result.warning) {
-          text += '\n\n' + result.warning;
+        // Query current encounter info for guidance
+        const { queryTargetEncounterInfo } = await import('../shared.js');
+        const encounterInfo = await queryTargetEncounterInfo(conn);
+
+        if (encounterInfo && encounterInfo.targetType === 'body') {
+          const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+          const encPeKm = (peAlt / 1000).toFixed(0);
+          text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km`;
+
+          // CLEAR directive based on trajectory safety
+          if (peAlt < 10_000) {
+            // Unsafe trajectory - MUST fix before warping
+            text += ` - UNSAFE trajectory!`;
+            text += `\nREQUIRED: Use course_correct to fix trajectory before doing anything else.`;
+          } else {
+            // Safe trajectory - can proceed
+            text += ` (safe)`;
+            text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+          }
         }
 
         if (args.includeTelemetry) {

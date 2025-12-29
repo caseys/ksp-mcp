@@ -127,12 +127,27 @@ export const courseCorrectTool: ToolDefinition = {
       const execInfo = result.executed ? ' (executed)' : '';
       let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
 
+      // Always show corrected trajectory - critical for LLM to know state
+      const { queryTargetEncounterInfo } = await import('../shared.js');
+      const encounterInfo = await queryTargetEncounterInfo(conn);
+      if (encounterInfo && encounterInfo.targetType === 'body') {
+        const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+        const encPeKm = (peAlt / 1000).toFixed(0);
+        if (peAlt >= 10_000) {
+          text += `\nTrajectory corrected! Encounter: ${encounterInfo.targetName} at ${encPeKm}km (safe)`;
+          text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+        } else if (peAlt > 0) {
+          text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km (low but safe)`;
+          text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+        } else {
+          text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km - still unsafe, run course_correct again`;
+        }
+      }
+
       if (args.includeTelemetry) {
-        const { queryTargetEncounterInfo } = await import('../shared.js');
         const { getShipTelemetry, formatTargetEncounterInfo } = await import('../telemetry.js');
-        const targetInfo = await queryTargetEncounterInfo(conn);
-        if (targetInfo) {
-          text += '\n\n' + formatTargetEncounterInfo(targetInfo);
+        if (encounterInfo) {
+          text += '\n\n' + formatTargetEncounterInfo(encounterInfo);
         }
         const telemetry = await getShipTelemetry(conn, { timeoutMs: 2500 });
         text += '\n\n' + telemetry.formatted;

@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, formatResultingOrbit, type ManeuverResult } from '../shared.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
@@ -75,8 +75,14 @@ export const circularizeTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('circularize',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+
+        // Show resulting orbit after execution
+        if (result.executed) {
+          text += await formatResultingOrbit(conn);
+        }
+
+        return ctx.successResponse('circularize', text);
       } else {
         return ctx.errorResponse('circularize', result.error ?? 'Failed');
       }

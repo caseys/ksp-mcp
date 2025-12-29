@@ -385,3 +385,29 @@ export async function queryTargetEncounterInfo(
     };
   }
 }
+
+/**
+ * Format the current orbit info for tool output.
+ * Shows body, apoapsis, periapsis, and whether orbit is circular.
+ *
+ * @param conn kOS connection
+ * @returns Formatted string like "\nOrbit: 100.0 × 80.0 km at Kerbin (circular)"
+ */
+export async function formatResultingOrbit(conn: KosConnection): Promise<string> {
+  try {
+    const orbitInfo = await conn.execute(
+      'PRINT SHIP:BODY:NAME + "|" + ROUND(APOAPSIS/1000, 1) + "|" + ROUND(PERIAPSIS/1000, 1) + "|" + ROUND(ORBIT:ECCENTRICITY, 4).',
+      3000
+    );
+    const parts = orbitInfo.output.split('|').map(s => s.trim());
+    if (parts.length >= 4) {
+      const [body, apoKm, peKm, ecc] = parts;
+      const eccNum = Number.parseFloat(ecc);
+      const isCircular = eccNum < 0.05;
+      return `\nOrbit: ${apoKm} × ${peKm} km at ${body}${isCircular ? ' (circular)' : ''}`;
+    }
+  } catch {
+    // Ignore errors - best effort
+  }
+  return '';
+}

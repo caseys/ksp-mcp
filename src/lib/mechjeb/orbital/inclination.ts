@@ -62,8 +62,13 @@ export const changeInclinationTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('change_inclination',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 1).', 2000);
+          const inc = incInfo.output.trim();
+          text += `\nInclination: ${inc}°`;
+        }
+        return ctx.successResponse('change_inclination', text);
       } else {
         return ctx.errorResponse('change_inclination', result.error ?? 'Failed');
       }

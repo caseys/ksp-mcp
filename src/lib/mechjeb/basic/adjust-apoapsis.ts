@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, formatResultingOrbit, type ManeuverResult } from '../shared.js';
 import { validateVesselState, STABLE_ORBIT_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
@@ -70,8 +70,11 @@ export const adjustApoapsisTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('adjust_apoapsis',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          text += await formatResultingOrbit(conn);
+        }
+        return ctx.successResponse('adjust_apoapsis', text);
       } else {
         return ctx.errorResponse('adjust_apoapsis', result.error ?? 'Failed');
       }
