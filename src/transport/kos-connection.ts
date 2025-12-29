@@ -71,6 +71,9 @@ export class KosConnection {
   private commandSequence = 0;
   private options: Required<Omit<KosConnectionOptions, 'transport' | 'transportType' | 'cpuLabel'>> & { cpuLabel?: string };
 
+  // Command serialization lock to prevent interleaved commands
+  private commandLock: Promise<void> = Promise.resolve();
+
   constructor(options: KosConnectionOptions = {}) {
     this.options = {
       host: options.host ?? config.kos.host,
@@ -206,11 +209,51 @@ export class KosConnection {
   }
 
   /**
-   * Execute a kOS command and return the result
+   * Acquire command lock to serialize commands.
+   * Returns a release function that must be called when done.
+   * Includes timeout to prevent deadlocks.
+   */
+  private async acquireCommandLock(timeoutMs: number): Promise<() => void> {
+    // Race between lock acquisition and timeout
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      setTimeout(() => reject(new Error('Command lock timeout - previous command may be stuck')), timeoutMs + 5000);
+    });
+
+    // Wait for any pending command to complete (with timeout)
+    await Promise.race([this.commandLock, timeoutPromise]);
+
+    // Create new lock that will be released when we're done
+    let release: () => void;
+    let released = false;
+    this.commandLock = new Promise(resolve => {
+      release = () => {
+        if (!released) {
+          released = true;
+          resolve();
+        }
+      };
+    });
+
+    return release!;
+  }
+
+  /**
+   * Execute a kOS command and return the result.
+   * Commands are serialized to prevent interleaving.
    */
   async execute(command: string, timeoutMs = config.timeouts.command, options?: ExecuteOptions): Promise<CommandResult> {
     if (!this.state.connected || !this.transport) {
       return { success: false, output: '', error: 'Not connected to kOS' };
+    }
+
+    // Serialize commands to prevent interleaving
+    let releaseLock: (() => void) | null = null;
+    try {
+      releaseLock = await this.acquireCommandLock(timeoutMs);
+    } catch (error) {
+      // Lock acquisition failed (timeout) - reset lock state and fail
+      this.commandLock = Promise.resolve();
+      return { success: false, output: '', error: error instanceof Error ? error.message : 'Lock acquisition failed' };
     }
 
     try {
@@ -270,6 +313,16 @@ export class KosConnection {
       }
 
       return { success: false, output: '', error: errorMsg };
+    } finally {
+      // Always release lock, even if something unexpected happened
+      if (releaseLock) {
+        try {
+          releaseLock();
+        } catch {
+          // Release failed - reset lock to prevent permanent deadlock
+          this.commandLock = Promise.resolve();
+        }
+      }
     }
   }
 

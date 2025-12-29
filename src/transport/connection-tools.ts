@@ -19,6 +19,37 @@ interface CpuPreference {
 }
 let cpuPreference: CpuPreference | null = null;
 
+// =============================================================================
+// Connection Safety Monitor
+// =============================================================================
+
+/**
+ * Safety monitor script - injected on connection to release controls on signal loss.
+ * Idempotent: only initializes once per kOS session.
+ *
+ * Trigger: CommNet signal loss - fires when radio contact with KSC lost
+ */
+const SAFETY_MONITOR_SCRIPT = `
+IF NOT (DEFINED KSP_MCP_SAFETY_INIT) {
+  GLOBAL KSP_MCP_SAFETY_INIT IS TRUE.
+  FUNCTION KSP_MCP_RELEASE { UNLOCK STEERING. UNLOCK THROTTLE. SET SHIP:CONTROL:NEUTRALIZE TO TRUE. IF NOT SAS { SAS ON. } }
+  WHEN NOT HOMECONNECTION:ISCONNECTED THEN { KSP_MCP_RELEASE(). PRINT "[ksp-mcp] Signal lost.". PRESERVE. }
+  PRINT "[ksp-mcp] Safety monitor active.".
+}`.trim();
+
+/**
+ * Inject the safety monitor script.
+ * Called after successful connection.
+ */
+async function injectSafetyMonitor(conn: KosConnection): Promise<void> {
+  try {
+    await conn.execute(SAFETY_MONITOR_SCRIPT, 5000);
+  } catch (error) {
+    // Non-fatal - log but don't fail connection
+    console.warn('[ksp-mcp] Failed to inject safety monitor:', error);
+  }
+}
+
 /**
  * Set runtime CPU preference for all subsequent connections.
  * This overrides config.kos.cpuId/cpuLabel until cleared or process stops.
@@ -264,6 +295,9 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
         cpuTag: connectedState.cpuTag || '(unnamed)',
       };
     }
+
+    // Inject safety monitor (idempotent - only initializes once per kOS session)
+    await injectSafetyMonitor(getConnection());
 
     return getConnection();
   } catch (error) {
