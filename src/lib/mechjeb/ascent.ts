@@ -570,7 +570,7 @@ export const launchAscentTool: ToolDefinition = {
         if (result.success) {
           const orbit = result.finalOrbit;
           return ctx.successResponse('launch',
-            `Orbit achieved! APO: ${(orbit.apoapsis / 1000).toFixed(1)} km, PER: ${(orbit.periapsis / 1000).toFixed(1)} km`);
+            `Orbit achieved! APO: ${(orbit.apoapsis / 1000).toFixed(1)} km, PER: ${(orbit.periapsis / 1000).toFixed(1)} km\nNext: set target for transfer`);
         } else {
           return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
         }

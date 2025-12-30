@@ -512,6 +512,21 @@ export const executeNodeTool: ToolDefinition = {
           text += `, ${result.deltaV.remaining?.toFixed(1) ?? '0'} m/s remaining`;
         }
 
+        // Check for encounter to provide context-aware next step
+        const { queryTargetEncounterInfo } = await import('./shared.js');
+        const encounterInfo = await queryTargetEncounterInfo(conn);
+        if (encounterInfo && encounterInfo.targetType === 'body') {
+          const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+          if (peAlt < 10_000 && peAlt > 0) {
+            text += `\nNext: course_correct to fix low periapsis`;
+          } else if (peAlt >= 10_000) {
+            text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+          }
+        } else if (!encounterInfo) {
+          // No encounter - generic hint
+          text += `\nManeuver complete`;
+        }
+
         if (args.includeTelemetry) {
           const { getShipTelemetry } = await import('./telemetry.js');
           const telemetry = await getShipTelemetry(conn, { timeoutMs: 2500 });

@@ -419,7 +419,7 @@ export const landTool: ToolDefinition = {
 
         if (monitorResult.success) {
           return ctx.successResponse('land',
-            `Landing complete! ${monitorResult.finalStatus.status}`);
+            `Landing complete! ${monitorResult.finalStatus.status}\nMission complete - vessel safely on surface`);
         } else {
           return ctx.errorResponse('land',
             monitorResult.error ?? `Landing failed: ${monitorResult.finalStatus.status}`);
