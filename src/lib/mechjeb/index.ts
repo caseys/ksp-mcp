@@ -97,3 +97,9 @@ export class MechJebClient {
     return result.output;
   }
 }
+
+// Export targeting module
+export * from './targeting/index.js';
+
+// Export landing module
+export * from './landing/index.js';

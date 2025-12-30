@@ -43,6 +43,22 @@ import {
   interplanetaryTransferTool,
 } from './mechjeb/transfer/index.js';
 
+// MechJeb targeting tools
+import {
+  setPositionTargetTool,
+  getRendezvousInfoTool,
+  getTargetOrbitTool,
+  getTargetPositionTool,
+} from './mechjeb/targeting/index.js';
+
+// MechJeb landing tools
+import {
+  landTool,
+  configureLandingTool,
+  getLandingPredictionTool,
+  findLandingSiteTool,
+} from './mechjeb/landing/index.js';
+
 // kOS target tools (pure kOS, no MechJeb)
 import {
   setTargetTool,
@@ -114,6 +130,12 @@ const GUARD_EXEMPT_TOOLS = new Set([
   'list_saves',
   'list_cpus',
   'abort_operation',
+  // MechJeb targeting (read-only)
+  'get_rendezvous_info',
+  'get_target_orbit',
+  'get_target_position',
+  // MechJeb landing (read-only)
+  'get_landing_prediction',
 ]);
 
 /**
@@ -133,6 +155,7 @@ export const allTools: ToolDefinition[] = [
   matchPlanesTool,
   executeNodeTool,
   crashAvoidanceTool,
+  landTool,
 
   // Maneuver Planning (Tier 2 - Common)
   adjustApoapsisTool,
@@ -150,6 +173,13 @@ export const allTools: ToolDefinition[] = [
   listSavesTool,
   quicksaveTool,
   listCpusTool,
+  // MechJeb targeting (Tier 2)
+  setPositionTargetTool,
+  getRendezvousInfoTool,
+  findLandingSiteTool,
+  // MechJeb landing (Tier 2)
+  configureLandingTool,
+  getLandingPredictionTool,
 
   // Advanced (Tier 3)
   changeAscendingNodeTool,
@@ -163,6 +193,9 @@ export const allTools: ToolDefinition[] = [
   disconnectTool,
   switchCpuTool,
   runScriptTool,
+  // MechJeb targeting (Tier 3)
+  getTargetOrbitTool,
+  getTargetPositionTool,
 ];
 
 /**

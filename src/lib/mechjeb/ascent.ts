@@ -12,12 +12,11 @@ import type {
   AscentProgress,
   AscentResult
 } from '../types.js';
-import { ensureConnected } from '../../transport/connection-tools.js';
 import { delay } from '../utils/progress.js';
-import { parseNumber } from './shared.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { StableWarpTracker } from '../utils/stable-warp.js';
+import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 /**
  * Detect kOS errors in output
@@ -105,10 +104,6 @@ export class AscentHandle {
     this.logger.progress('[Ascent] Waiting for MechJeb to complete ascent...');
 
     const MAX_WAIT_MS = 900_000; // 15 minutes max
-    const startTime = Date.now();
-    let lastLogTime = 0;
-    let consecutiveEmptyResponses = 0;
-    const MAX_EMPTY_RESPONSES = 3;
 
     // Warp detection - enable warp when APO stabilizes during coast phase
     const warpTracker = new StableWarpTracker(this.conn, this.logger, 2, 'Ascent');
@@ -122,105 +117,106 @@ export class AscentHandle {
     const atmHeight = Number.parseInt(atmMatch[1]);
     this.logger.info(`[Ascent] Target: periapsis >= ${Math.round(atmHeight/1000)}km (atmosphere height)`);
 
-    while (Date.now() - startTime < MAX_WAIT_MS) {
-      // Query current status (use SET then PRINT for reliable MechJeb addon output)
-      const statusResult = await this.conn.execute(
-        'SET _E TO ADDONS:MJ:ASCENT:ENABLED. ' +
-        'SET _A TO ROUND(APOAPSIS). ' +
-        'SET _P TO ROUND(PERIAPSIS). ' +
-        'SET _B TO SHIP:BODY:NAME. ' +
-        'PRINT "E:" + _E + " A:" + _A + " P:" + _P + " B:" + _B.'
-      );
+    let lastLogTime = 0;
 
-      // Parse results - "E:True A:100000 P:-500000 B:Kerbin"
-      const statusMatch = statusResult.output.match(/E:(True|False)\s*A:(-?\d+)\s*P:(-?\d+)\s*B:(\w+)/i);
-
-      // Detect stale connection (empty/unparseable output)
-      if (!statusMatch || statusResult.output.trim() === '') {
-        consecutiveEmptyResponses++;
-        this.logger.warn(`[Ascent] Empty response (${consecutiveEmptyResponses}/${MAX_EMPTY_RESPONSES}), connection may be stale`);
-
-        if (consecutiveEmptyResponses >= MAX_EMPTY_RESPONSES) {
-          this.logger.warn('[Ascent] Too many empty responses, reconnecting...');
-          try {
-            // Force reconnect using ensureConnected
-            this.conn = await ensureConnected();
-            consecutiveEmptyResponses = 0;
-            this.logger.info('[Ascent] Reconnected successfully');
-          } catch (error) {
-            this.logger.error(`[Ascent] Reconnect failed: ${error instanceof Error ? error.message : String(error)}`);
-          }
-        }
-
-        await delay(pollIntervalMs);
-        continue;
-      }
-
-      // Got valid response, reset counter
-      consecutiveEmptyResponses = 0;
-
-      const enabled = statusMatch[1].toLowerCase() === 'true';
-      const apoapsis = Number.parseInt(statusMatch[2]);
-      const periapsis = Number.parseInt(statusMatch[3]);
-      const body = statusMatch[4];
-
-      // Smart warp: detect when ascent burn complete (APO+PER stable, still suborbital)
-      if (periapsis < 0 && apoapsis >= this.targetAltitude * 0.9) {
-        // Track both APO and PER - only stable when both are unchanged
-        const state = `${Math.round(apoapsis / 1000)},${Math.round(periapsis / 1000)}`;
-        await warpTracker.check(state);
-      }
-
-      // Log progress every 10 seconds
-      const now = Date.now();
-      if (now - lastLogTime >= 10_000) {
-        this.logger.progress(`[Ascent] APO:${Math.round(apoapsis/1000)}km PER:${Math.round(periapsis/1000)}km`);
-        lastLogTime = now;
-      }
-
-      // Check completion conditions:
-      // 1. Orbit achieved (periapsis above atmosphere)
-      // 2. Ascent autopilot disabled (manual abort or MechJeb completed)
-      // Use >= and check against atmHeight (not atmHeight+10km) to be more lenient
-      const inOrbit = periapsis >= atmHeight;
-
-      if (inOrbit || !enabled) {
-        // Disable autopilot if we're in orbit but it's still enabled
-        if (inOrbit && enabled) {
-          await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
-        }
-
-        // Success if we achieved orbit (periapsis above atmosphere)
-        const success = inOrbit;
-        this.logger.progress(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
-        this.logger.progress(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${success ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
-
-        // Clear any leftover maneuver nodes (circularization may leave tiny residual)
-        await clearNodes(this.conn);
-
-        return {
-          success,
-          finalOrbit: { apoapsis, periapsis },
-          aborted: !success
-        };
-      }
-
-      // Wait before next poll
-      await delay(pollIntervalMs);
+    interface AscentPollState {
+      enabled: boolean;
+      apoapsis: number;
+      periapsis: number;
+      body: string;
+      inOrbit: boolean;
     }
 
-    // Timeout - get final status
-    const finalResult = await this.conn.execute('PRINT APOAPSIS. PRINT PERIAPSIS.');
-    const apoapsis = parseNumber(finalResult.output.split('\n')[0] || '0');
-    const periapsis = parseNumber(finalResult.output.split('\n')[1] || '0');
+    const result = await pollWithBlackoutResilience<AscentPollState>({
+      poll: async () => {
+        const statusResult = await this.conn.execute(
+          'SET _E TO ADDONS:MJ:ASCENT:ENABLED. ' +
+          'SET _A TO ROUND(APOAPSIS). ' +
+          'SET _P TO ROUND(PERIAPSIS). ' +
+          'SET _B TO SHIP:BODY:NAME. ' +
+          'PRINT "E:" + _E + " A:" + _A + " P:" + _P + " B:" + _B.'
+        );
 
+        const statusMatch = statusResult.output.match(/E:(True|False)\s*A:(-?\d+)\s*P:(-?\d+)\s*B:(\w+)/i);
+        if (!statusMatch) {
+          throw new Error('Failed to parse ascent status');
+        }
+
+        const enabled = statusMatch[1].toLowerCase() === 'true';
+        const apoapsis = Number.parseInt(statusMatch[2]);
+        const periapsis = Number.parseInt(statusMatch[3]);
+        const body = statusMatch[4];
+        const inOrbit = periapsis >= atmHeight;
+
+        return { enabled, apoapsis, periapsis, body, inOrbit };
+      },
+
+      isDone: (state) => state.inOrbit || !state.enabled,
+      isSuccess: (state) => state.inOrbit,
+
+      timeoutMs: MAX_WAIT_MS,
+      pollIntervalMs,
+      logger: this.logger,
+      context: 'Ascent',
+
+      onPoll: async (state) => {
+        // Smart warp: detect when ascent burn complete (APO+PER stable, still suborbital)
+        if (state.periapsis < 0 && state.apoapsis >= this.targetAltitude * 0.9) {
+          const warpState = `${Math.round(state.apoapsis / 1000)},${Math.round(state.periapsis / 1000)}`;
+          await warpTracker.check(warpState);
+        }
+
+        // Log progress every 10 seconds
+        const now = Date.now();
+        if (now - lastLogTime >= 10_000) {
+          this.logger.progress(`[Ascent] APO:${Math.round(state.apoapsis/1000)}km PER:${Math.round(state.periapsis/1000)}km`);
+          lastLogTime = now;
+        }
+      },
+    });
+
+    // Handle completion
+    if (result.result) {
+      const { enabled, apoapsis, periapsis, body, inOrbit } = result.result;
+
+      // Disable autopilot if we're in orbit but it's still enabled
+      if (inOrbit && enabled) {
+        try {
+          await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
+        } catch {
+          // Ignore - may still be in blackout
+        }
+      }
+
+      if (!result.timedOut) {
+        this.logger.progress(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
+        this.logger.progress(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${inOrbit ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
+
+        // Clear any leftover maneuver nodes
+        try {
+          await clearNodes(this.conn);
+        } catch {
+          // Ignore
+        }
+
+        return {
+          success: inOrbit,
+          finalOrbit: { apoapsis, periapsis },
+          aborted: !inOrbit,
+        };
+      }
+    }
+
+    // Timeout
     this.logger.error(`[Ascent] TIMEOUT after ${MAX_WAIT_MS/1000}s`);
-    this.logger.progress(`[Ascent] Final: APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km`);
+    const finalApoapsis = result.result?.apoapsis ?? 0;
+    const finalPeriapsis = result.result?.periapsis ?? 0;
+    this.logger.progress(`[Ascent] Final: APO: ${Math.round(finalApoapsis/1000)}km, PER: ${Math.round(finalPeriapsis/1000)}km`);
 
     return {
       success: false,
-      finalOrbit: { apoapsis, periapsis },
-      aborted: false
+      finalOrbit: { apoapsis: finalApoapsis, periapsis: finalPeriapsis },
+      aborted: false,
     };
   }
 
@@ -230,24 +226,31 @@ export class AscentHandle {
    */
   async waitForLiftoff(pollIntervalMs = 1000, timeoutMs = 60_000): Promise<AscentResult> {
     this.logger.progress('[Ascent] Waiting for liftoff...');
-    const startTime = Date.now();
 
-    while (Date.now() - startTime < timeoutMs) {
-      const progress = await this.getProgress();
+    const result = await pollWithBlackoutResilience<AscentProgress>({
+      poll: () => this.getProgress(),
 
-      // Ship has lifted off when:
-      // - Phase changes from prelaunch, OR
-      // - Altitude exceeds 100m
-      if (progress.phase !== 'prelaunch' || progress.altitude > 100) {
-        this.logger.progress(`[Ascent] Liftoff confirmed! ALT: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
-        return {
-          success: true,
-          finalOrbit: { apoapsis: progress.apoapsis, periapsis: progress.periapsis },
-          aborted: false
-        };
-      }
+      isDone: (progress) => progress.phase !== 'prelaunch' || progress.altitude > 100,
+      isSuccess: (progress) => progress.phase !== 'prelaunch' || progress.altitude > 100,
 
-      await delay(pollIntervalMs);
+      timeoutMs,
+      pollIntervalMs,
+      logger: this.logger,
+      context: 'Liftoff',
+
+      onPoll: (progress) => {
+        if (progress.phase !== 'prelaunch' || progress.altitude > 100) {
+          this.logger.progress(`[Ascent] Liftoff confirmed! ALT: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
+        }
+      },
+    });
+
+    if (result.success && result.result) {
+      return {
+        success: true,
+        finalOrbit: { apoapsis: result.result.apoapsis, periapsis: result.result.periapsis },
+        aborted: false,
+      };
     }
 
     // Timeout
@@ -255,7 +258,7 @@ export class AscentHandle {
     return {
       success: false,
       finalOrbit: { apoapsis: 0, periapsis: 0 },
-      aborted: false
+      aborted: false,
     };
   }
 
@@ -520,6 +523,7 @@ export const launchAscentTool: ToolDefinition = {
     inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees, not required'),
     // Note: Circularization is always enabled to make things simpler for LLMs
     // circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
+    wait: z.boolean().optional().default(true).describe('Wait for orbit to be achieved (default: true). Set false to return immediately after launch.'),
   },
   annotations: {
     readOnlyHint: false,
@@ -557,15 +561,23 @@ export const launchAscentTool: ToolDefinition = {
         autoWarp: true,
       });
 
-      // Wait for completion (blocking call that monitors ascent)
-      const result = await handle.waitForCompletion();
+      const wait = args.wait as boolean | undefined ?? true;
 
-      if (result.success) {
-        const orbit = result.finalOrbit;
-        return ctx.successResponse('launch',
-          `Orbit achieved! APO: ${(orbit.apoapsis / 1000).toFixed(1)} km, PER: ${(orbit.periapsis / 1000).toFixed(1)} km`);
+      if (wait) {
+        // Wait for completion (blocking call that monitors ascent)
+        const result = await handle.waitForCompletion();
+
+        if (result.success) {
+          const orbit = result.finalOrbit;
+          return ctx.successResponse('launch',
+            `Orbit achieved! APO: ${(orbit.apoapsis / 1000).toFixed(1)} km, PER: ${(orbit.periapsis / 1000).toFixed(1)} km`);
+        } else {
+          return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
+        }
       } else {
-        return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
+        // Return immediately after launch
+        return ctx.successResponse('launch',
+          `Launch started! Target: ${(altitude / 1000).toFixed(0)} km orbit. Use status to monitor progress.`);
       }
     } catch (error) {
       return ctx.errorResponse('launch', error instanceof Error ? error.message : String(error));

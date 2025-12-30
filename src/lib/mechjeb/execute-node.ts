@@ -11,6 +11,7 @@ import { delay } from '../utils/progress.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { StableWarpTracker } from '../utils/stable-warp.js';
+import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 export interface ExecuteNodeResult {
   success: boolean;
@@ -67,44 +68,70 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
 
   let lastAngle = 180;
   let noProgressSince = Date.now();
-  const startTime = Date.now();
-  let aligned = false;
 
-  while (Date.now() - startTime < MAX_ALIGN_TIME) {
-    const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-    log.progress(`[AlignToNode] Angle: ${angle.toFixed(1)}°`);
-
-    if (angle < ALIGN_THRESHOLD) {
-      log.progress(`[AlignToNode] Aligned! (${angle.toFixed(2)}°)`);
-      aligned = true;
-      break;
-    }
-
-    // Check for progress (improvement of at least 0.5 degrees)
-    if (angle < lastAngle - 0.5) {
-      noProgressSince = Date.now();
-      lastAngle = angle;
-    } else if (Date.now() - noProgressSince > RCS_TRIGGER_TIME) {
-      // No progress for 3s - enable RCS to help rotation
-      await conn.execute('RCS ON.');
-      log.progress(`[AlignToNode] No progress, enabled RCS (${angle.toFixed(1)}°)`);
-      noProgressSince = Date.now(); // Reset timer after enabling RCS
-    }
-
-    await delay(500);
+  interface AlignState {
+    angle: number;
+    aligned: boolean;
   }
+
+  const result = await pollWithBlackoutResilience<AlignState>({
+    poll: async () => {
+      const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+      return { angle, aligned: angle < ALIGN_THRESHOLD };
+    },
+
+    isDone: (state) => state.aligned,
+    isSuccess: (state) => state.aligned,
+
+    timeoutMs: MAX_ALIGN_TIME,
+    pollIntervalMs: 500,
+    logger: log,
+    context: 'AlignToNode',
+
+    onPoll: async (state) => {
+      log.progress(`[AlignToNode] Angle: ${state.angle.toFixed(1)}°`);
+
+      if (state.aligned) {
+        log.progress(`[AlignToNode] Aligned! (${state.angle.toFixed(2)}°)`);
+        return;
+      }
+
+      // Check for progress (improvement of at least 0.5 degrees)
+      if (state.angle < lastAngle - 0.5) {
+        noProgressSince = Date.now();
+        lastAngle = state.angle;
+      } else if (Date.now() - noProgressSince > RCS_TRIGGER_TIME) {
+        // No progress for 3s - enable RCS to help rotation
+        try {
+          await conn.execute('RCS ON.');
+          log.progress(`[AlignToNode] No progress, enabled RCS (${state.angle.toFixed(1)}°)`);
+          noProgressSince = Date.now(); // Reset timer after enabling RCS
+        } catch {
+          // Ignore RCS enable errors during blackout
+        }
+      }
+    },
+  });
 
   // Keep SAS in MANEUVER mode - MechJeb will take over when enabled
   // Restore RCS state only
-  if (!wasRcsOn) {
-    await conn.execute('RCS OFF.');
+  try {
+    if (!wasRcsOn) {
+      await conn.execute('RCS OFF.');
+    }
+  } catch {
+    // Ignore errors during cleanup
   }
 
   // Final verification
-  const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-  log.progress(`[AlignToNode] Final angle: ${finalAngle.toFixed(1)}°, aligned: ${aligned}`);
-
-  return finalAngle < ALIGN_THRESHOLD;
+  try {
+    const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+    log.progress(`[AlignToNode] Final angle: ${finalAngle.toFixed(1)}°, aligned: ${result.success}`);
+    return finalAngle < ALIGN_THRESHOLD;
+  } catch {
+    // If we can't verify, trust the poll result
+    return result.success;
+  }
 }
 
 export interface ExecuteNodeOptions {

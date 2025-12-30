@@ -8,6 +8,7 @@
 
 import { KosConnection } from '../../transport/kos-connection.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
+import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -187,20 +188,23 @@ async function warpToNode(
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(NEXTNODE:TIME - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close to target
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeout) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+  const result = await pollWithBlackoutResilience<number>({
+    poll: async () => Number.parseFloat(await queryValue(conn, 'NEXTNODE:ETA')),
+    isDone: (eta) => eta <= leadTime + 5,
+    isSuccess: (eta) => eta <= leadTime + 5,
+    timeoutMs: timeout,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    logger: log,
+    context: 'Warp',
+    onPoll: (eta) => log.progress(`[Warp] Node ETA: ${eta.toFixed(0)}s`),
+  });
 
-    const currentEta = Number.parseFloat(await queryValue(conn, 'NEXTNODE:ETA'));
-    log.progress(`[Warp] Node ETA: ${currentEta.toFixed(0)}s`);
-
-    if (currentEta <= leadTime + 5) {
-      log.progress('[Warp] Node warp complete');
-      return await getBasicStatus(conn);
-    }
+  if (result.success) {
+    log.progress('[Warp] Node warp complete');
+    return await getBasicStatus(conn);
   }
 
-  return { success: false, error: 'Warp timeout' };
+  return { success: false, error: result.timedOut ? 'Warp timeout' : 'Warp failed' };
 }
 
 /**
@@ -229,32 +233,48 @@ async function warpToSOI(
   // Start warp to SOI transition
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + SHIP:ORBIT:NEXTPATCHETA - ${leadTime}).`, 5000);
 
-  // Poll body name until it changes
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeout) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
-
-    const newBody = await queryValue(conn, 'SHIP:BODY:NAME');
-
-    // Check if body changed (we crossed SOI)
-    if (newBody.toLowerCase() !== currentBody.toLowerCase()) {
-      log.progress(`[Warp] Crossed into ${newBody} SOI`);
-
-      // Wait for warp to fully stop and KSP to settle
-      await new Promise(resolve => setTimeout(resolve, 2000));
-
-      // Get SOI info including periapsis check
-      return await getSOIStatus(conn, newBody, logger);
-    }
-
-    // Also check if we're getting close to transition (within leadTime)
-    const remainingEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
-    if (remainingEta < 100_000) { // Only log if ETA is reasonable
-      log.progress(`[Warp] SOI ETA: ${remainingEta.toFixed(0)}s`);
-    }
+  // Poll body name until it changes (SOI crossed)
+  interface SOIPollState {
+    body: string;
+    eta: number | null;
   }
 
-  return { success: false, error: 'SOI warp timeout' };
+  const result = await pollWithBlackoutResilience<SOIPollState>({
+    poll: async () => {
+      const body = await queryValue(conn, 'SHIP:BODY:NAME');
+      let eta: number | null = null;
+      try {
+        eta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
+      } catch {
+        // May not have ETA if already crossed or during blackout
+      }
+      return { body, eta };
+    },
+    isDone: (state) => state.body.toLowerCase() !== currentBody.toLowerCase(),
+    isSuccess: (state) => state.body.toLowerCase() !== currentBody.toLowerCase(),
+    timeoutMs: timeout,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    logger: log,
+    context: 'Warp',
+    onPoll: (state) => {
+      if (state.eta !== null && state.eta < 100_000) {
+        log.progress(`[Warp] SOI ETA: ${state.eta.toFixed(0)}s`);
+      }
+    },
+  });
+
+  if (result.success && result.result) {
+    const newBody = result.result.body;
+    log.progress(`[Warp] Crossed into ${newBody} SOI`);
+
+    // Wait for warp to fully stop and KSP to settle
+    await new Promise(resolve => setTimeout(resolve, 2000));
+
+    // Get SOI info including periapsis check
+    return await getSOIStatus(conn, newBody, logger);
+  }
+
+  return { success: false, error: result.timedOut ? 'SOI warp timeout' : 'SOI warp failed' };
 }
 
 /**
@@ -318,20 +338,23 @@ async function warpToOrbitalPoint(
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ETA:${point} - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeout) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+  const result = await pollWithBlackoutResilience<number>({
+    poll: async () => Number.parseFloat(await queryValue(conn, `ETA:${point}`)),
+    isDone: (eta) => eta <= leadTime + 5,
+    isSuccess: (eta) => eta <= leadTime + 5,
+    timeoutMs: timeout,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    logger: log,
+    context: 'Warp',
+    onPoll: (eta) => log.progress(`[Warp] ${point} ETA: ${eta.toFixed(0)}s`),
+  });
 
-    const currentEta = Number.parseFloat(await queryValue(conn, `ETA:${point}`));
-    log.progress(`[Warp] ${point} ETA: ${currentEta.toFixed(0)}s`);
-
-    if (currentEta <= leadTime + 5) {
-      log.progress(`[Warp] ${point.toLowerCase()} warp complete`);
-      return await getBasicStatus(conn);
-    }
+  if (result.success) {
+    log.progress(`[Warp] ${point.toLowerCase()} warp complete`);
+    return await getBasicStatus(conn);
   }
 
-  return { success: false, error: 'Warp timeout' };
+  return { success: false, error: result.timedOut ? 'Warp timeout' : 'Warp failed' };
 }
 
 /**
@@ -432,25 +455,28 @@ export async function warpForward(
   // Start warp
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
 
-  // Wait for real time to pass (warp should complete before this)
-  // Poll WARP status until it's 0
-  const startTime = Date.now();
-  while (Date.now() - startTime < timeout) {
-    await new Promise(resolve => setTimeout(resolve, POLL_INTERVAL_MS));
+  // Poll WARP status until it's 0 (warp complete)
+  const result = await pollWithBlackoutResilience<number>({
+    poll: async () => {
+      const warpResult = await conn.execute('PRINT WARP.', 3000);
+      const warpMatch = warpResult.output.match(/^(\d+)/);
+      return warpMatch ? Number.parseInt(warpMatch[1], 10) : -1;
+    },
+    isDone: (warpLevel) => warpLevel === 0,
+    isSuccess: (warpLevel) => warpLevel === 0,
+    timeoutMs: timeout,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    logger: log,
+    context: 'Warp',
+    onPoll: (warpLevel) => log.progress(`[Warp] Warp level: ${warpLevel}`),
+  });
 
-    const warpResult = await conn.execute('PRINT WARP.', 3000);
-    const warpMatch = warpResult.output.match(/^(\d+)/);
-    const warpLevel = warpMatch ? Number.parseInt(warpMatch[1], 10) : -1;
-
-    if (warpLevel === 0) {
-      log.progress('[Warp] Forward warp complete');
-      return await getBasicStatus(conn);
-    }
-
-    log.progress(`[Warp] Warp level: ${warpLevel}`);
+  if (result.success) {
+    log.progress('[Warp] Forward warp complete');
+    return await getBasicStatus(conn);
   }
 
-  return { success: false, error: 'Warp timeout' };
+  return { success: false, error: result.timedOut ? 'Warp timeout' : 'Warp failed' };
 }
 
 // ============================================================================

@@ -35,6 +35,16 @@ const TOOL_ALIASES: Record<string, string> = {
   'cpus': 'list_cpus',
   'cpu': 'switch_cpu',
 
+  // Landing
+  'landing': 'land',
+  'landing-prediction': 'get_landing_prediction',
+  'configure-land': 'configure_landing',
+  'position-target': 'set_position_target',
+  'find-site': 'find_landing_site',
+  'rendezvous-info': 'get_rendezvous_info',
+  'target-orbit': 'get_target_orbit',
+  'target-position': 'get_target_position',
+
   // Kebab to snake conversions
   'launch-ascent': 'launch_ascent',
   'hohmann-transfer': 'hohmann_transfer',
@@ -63,6 +73,14 @@ const TOOL_ALIASES: Record<string, string> = {
   'run-script': 'run_script',
   'list-cpus': 'list_cpus',
   'switch-cpu': 'switch_cpu',
+  // Landing / Targeting kebab conversions
+  'set-position-target': 'set_position_target',
+  'find-landing-site': 'find_landing_site',
+  'get-rendezvous-info': 'get_rendezvous_info',
+  'get-target-orbit': 'get_target_orbit',
+  'get-target-position': 'get_target_position',
+  'configure-landing': 'configure_landing',
+  'get-landing-prediction': 'get_landing_prediction',
 };
 
 // Tool-specific positional argument mappings
@@ -93,6 +111,10 @@ const POSITIONAL_ARGS: Record<string, string[]> = {
   'change_semi_major_axis': ['semiMajorAxis'],
   'change_eccentricity': ['eccentricity'],
   'switch_cpu': ['cpuId'],
+  // Landing / Targeting
+  'land': ['action'],
+  'set_position_target': ['latitude', 'longitude'],
+  'configure_landing': ['touchdownSpeed'],
 };
 
 /**
@@ -204,6 +226,9 @@ Rendezvous:
   clear-target              Clear navigation target
   match-planes              Align orbit with target
   match-velocities          Match speed with target
+  rendezvous-info           Phase angle, closest approach, node times
+  target-orbit              Target orbital elements
+  target-position           Relative position/velocity to target
 
 Orbital Maneuvers:
   adjust-apoapsis <alt>     Change orbit high point
@@ -216,6 +241,12 @@ Advanced Orbital:
   change-periapsis-longitude <lon>   Rotate orbit orientation
   change-semi-major-axis <sma>       Change orbital period
   change-eccentricity <ecc>          Change orbit shape
+
+Landing:
+  land <action>             Start/abort/status landing (action: start, abort, status)
+  position-target <lat> <lng>  Set surface landing target
+  configure-land            Configure landing settings
+  landing-prediction        Get predicted landing location
 
 Execution:
   execute                   Execute next maneuver node
@@ -249,6 +280,9 @@ Examples:
   ksp-mcp warp soi                         # Warp to SOI change
   ksp-mcp circularize --time-ref PERIAPSIS # Circularize at periapsis
   ksp-mcp interplanetary Duna              # Transfer to Duna
+  ksp-mcp land start --preset KSC          # Land at KSC runway
+  ksp-mcp position-target 0 -74            # Set landing target coords
+  ksp-mcp rendezvous-info                  # Get phase angle to target
 `);
 }
 
