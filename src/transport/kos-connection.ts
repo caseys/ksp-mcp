@@ -668,7 +668,7 @@ export class KosConnection {
       .digest('hex')
       .slice(0, 8)
       .toUpperCase();
-    const token = `__MCP_DONE_${this.commandSequence.toString(36).toUpperCase()}_${hash}__`;
+    const token = `[MCP.${this.commandSequence.toString(36).toUpperCase()}.${hash}]`;
     this.commandSequence = (this.commandSequence + 1) % Number.MAX_SAFE_INTEGER;
     return {
       token,
