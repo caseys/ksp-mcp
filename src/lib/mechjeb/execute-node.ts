@@ -102,6 +102,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
     pollIntervalMs: 750,
     logger: log,
     context: 'AlignToNode',
+    connection: conn,
 
     onPoll: async (state) => {
       log.progress(`[AlignToNode] Angle: ${state.angle.toFixed(1)}°`);
@@ -364,6 +365,7 @@ export async function executeNode(
       pollIntervalMs,
       logger: log,
       context: 'ExecuteNode',
+      connection: conn,
 
       onPoll: async (state) => {
         if (state.noNode) return;

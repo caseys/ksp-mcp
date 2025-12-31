@@ -169,6 +169,7 @@ export class AscentHandle {
       pollIntervalMs,
       logger: this.logger,
       context: 'Ascent',
+      connection: this.conn,
 
       onPoll: async (state) => {
         // Log status changes
@@ -261,6 +262,7 @@ export class AscentHandle {
       pollIntervalMs,
       logger: this.logger,
       context: 'Liftoff',
+      connection: this.conn,
 
       onPoll: (progress) => {
         if (progress.phase !== 'prelaunch' || progress.altitude > 100) {

@@ -242,6 +242,7 @@ async function warpToNode(
     pollIntervalMs: POLL_INTERVAL_MS,
     logger: log,
     context: 'Warp',
+    connection: conn,
     onPoll: (eta) => log.progress(`[Warp] Node ETA: ${formatTime(eta)}`),
   });
 
@@ -303,6 +304,7 @@ async function warpToSOI(
     pollIntervalMs: POLL_INTERVAL_MS,
     logger: log,
     context: 'Warp',
+    connection: conn,
     onPoll: (state) => {
       if (state.eta !== null && state.eta < 100_000) {
         log.progress(`[Warp] S.O.I. ETA: ${formatTime(state.eta)}`);
@@ -398,6 +400,7 @@ async function warpToOrbitalPoint(
     pollIntervalMs: POLL_INTERVAL_MS,
     logger: log,
     context: 'Warp',
+    connection: conn,
     onPoll: (eta) => log.progress(`[Warp] ${point} ETA: ${formatTime(eta)}`),
   });
 
@@ -521,6 +524,7 @@ export async function warpForward(
     pollIntervalMs: POLL_INTERVAL_MS,
     logger: log,
     context: 'Warp',
+    connection: conn,
     onPoll: (warpLevel) => log.progress(`[Warp] Warp level: ${warpLevel}`),
   });
 

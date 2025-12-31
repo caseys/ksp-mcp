@@ -159,6 +159,7 @@ async function monitorLanding(
     pollIntervalMs,
     logger,
     context: 'Landing',
+    connection: conn,
 
     onPoll: (state) => {
       // Log progress if status changed
