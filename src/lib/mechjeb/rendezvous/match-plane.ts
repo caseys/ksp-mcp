@@ -81,8 +81,16 @@ export const matchPlanesTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('match_planes',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          // Show both inclinations - relative inc is complex to calculate
+          const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2) + "|" + ROUND(TARGET:ORBIT:INCLINATION, 2).', 2000);
+          const match = incInfo.output.match(/([\d.]+)\|([\d.]+)/);
+          if (match) {
+            text += `\nInclination: ${match[1]}° (target: ${match[2]}°)`;
+          }
+        }
+        return ctx.successResponse('match_planes', text);
       } else {
         return ctx.errorResponse('match_planes', result.error ?? 'Failed');
       }

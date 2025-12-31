@@ -150,7 +150,7 @@ export const listSavesTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 2,
+  tier: 3,
   handler: async (_args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();
@@ -185,7 +185,7 @@ export const quicksaveTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 2,
+  tier: 3,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

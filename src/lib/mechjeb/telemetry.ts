@@ -344,7 +344,8 @@ export async function getShipTelemetry(
   const hasNode = nodeDv > 0;
 
   // Handle escape trajectory sentinel values (-1 means infinity)
-  const isEscapeTrajectory = apoRaw < 0 || periodRaw < 0;
+  const isEscapeTrajectory = apoRaw < 0 || periodRaw === -1;
+  const isImpactTrajectory = periodRaw < -1;
   const apo = isEscapeTrajectory ? Infinity : apoRaw;
   const period = isEscapeTrajectory ? Infinity : periodRaw;
 
@@ -371,12 +372,12 @@ export async function getShipTelemetry(
 
   // Build formatted output
   lines.push('=== Ship Status ===');
-  lines.push("")
-  lines.push(`SOI: ${soi}`);
+  lines.push(`${vesselType} ${vesselStatus}`)
+  lines.push(`SOI Body: ${soi}`);
   lines.push(`Apoapsis: ${isEscapeTrajectory ? 'Escape' : `${(apo / 1000).toFixed(1)} km`}`);
-  lines.push(`Periapsis: ${(per / 1000).toFixed(1)} km`);
+  lines.push(`Periapsis: ${isImpactTrajectory ? 'Impact' : `${(per / 1000).toFixed(1)} km`}`);
   lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : `${period.toFixed(0)}s`} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
-  lines.push(`Vessel: ${vesselName} (${vesselType}) - ${vesselStatus}`);
+  lines.push(`Vessel: ${vesselName}`);
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
@@ -514,10 +515,13 @@ export async function getStatus(
 /**
  * Format target encounter info for display in tool outputs.
  *
+ * TODO: This function is currently unused. Consider using it in tool outputs
+ * that show encounter information (hohmann, interplanetary, course_correct).
+ *
  * @param info Target encounter info from queryTargetEncounterInfo
  * @returns Formatted string with target-specific details
  */
-export function formatTargetEncounterInfo(info: TargetEncounterInfo): string {
+function _formatTargetEncounterInfo(info: TargetEncounterInfo): string {
   const lines: string[] = [];
 
   if (info.targetType === 'body') {

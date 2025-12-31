@@ -63,8 +63,13 @@ export const changeAscendingNodeTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('change_ascending_node',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          const lanInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:LAN, 2).', 2000);
+          const lan = lanInfo.output.trim();
+          text += `\nLAN: ${lan}°`;
+        }
+        return ctx.successResponse('change_ascending_node', text);
       } else {
         return ctx.errorResponse('change_ascending_node', result.error ?? 'Failed');
       }

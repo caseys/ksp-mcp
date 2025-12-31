@@ -36,12 +36,39 @@ export interface ExecuteNodeProgress {
 const MAX_RETRIES = 3;
 const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes
 const DEFAULT_POLL_INTERVAL_MS = 10_000; // 10 seconds
-const DV_THRESHOLD = 0.5; // m/s - consider burn complete below this
+const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 
 // Alignment configuration
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
 const RCS_TRIGGER_TIME = 3000; // ms - enable RCS if no progress after this
 const MAX_ALIGN_TIME = 60_000; // ms - maximum time to wait for alignment
+
+/**
+ * Kick-start MechJeb's warp handling with a brief warp pulse.
+ * Only triggers if warp is currently 0 (1x speed).
+ */
+async function kickstartWarp(conn: KosConnection, logger: McpLogger): Promise<boolean> {
+  // Check warp and pulse in one kOS command to reduce round trips
+  // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
+  const result = await conn.execute(
+    'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. WAIT 0.3. SET WARP TO 1. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
+    5000
+  );
+
+  /* keep for reference
+  await conn.execute('SET WARP TO 0.');
+  await conn.execute(
+    'IF WARP < 6 { SET WARP TO WARP + 1. }',
+    3000
+  );
+  */  
+     
+  const kicked = result.output.includes('KICKED');
+  if (kicked) {
+    logger.progress('[Execute Node] Warp kickstart MechJeb');
+  }
+  return kicked;
+}
 
 /**
  * Align ship to maneuver node using kOS LOCK STEERING before MechJeb takes over.
@@ -84,7 +111,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
     isSuccess: (state) => state.aligned,
 
     timeoutMs: MAX_ALIGN_TIME,
-    pollIntervalMs: 500,
+    pollIntervalMs: 750,
     logger: log,
     context: 'AlignToNode',
 
@@ -226,8 +253,8 @@ export async function executeNode(
 
   // Warp to node if it's far away (more than 60s)
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
-  if (nodeEta > 60) {
-    const warpLeadTime = 30; // Stop warping 30s before node
+  if (nodeEta > 20) {
+    const warpLeadTime = 10; // Stop warping 10s before node
     log.progress(`[ExecuteNode] Node is ${nodeEta.toFixed(0)}s away, warping to T-${warpLeadTime}s`);
 
     // Use KUNIVERSE:TIMEWARP:WARPTO which doesn't block
@@ -272,18 +299,12 @@ export async function executeNode(
     // Turn off SAS - MechJeb handles its own steering now
     await conn.execute('SAS OFF.');
 
-    // Warp assist: if node > 30s away, briefly trigger 2x warp to help MechJeb take over steering
-    // Only cancel warp if we actually set it (avoids interfering when warp wasn't needed)
-    const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 3000);
+    // Warp assist: if node > 15s away, kickstart MechJeb warp handling
+    const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 1500);
     const nodeEtaForWarp = Number.parseFloat(warpCheckResult.output.match(/\d[\d.]*/)?.[0] || '0');
-    if (nodeEtaForWarp > 30) {
-      await delay(3000);
-      await conn.execute('SET WARP TO 1.');
-      log.progress('[ExecuteNode] Warp assist: triggered 2x warp for MechJeb takeover');
-
-      // Brief delay then cancel - only runs if we set warp
-      await delay(500);
-      await conn.execute('SET WARP TO 0.');
+    if (nodeEtaForWarp > 15) {
+      await delay(3000); // Let MechJeb take over steering first
+      await kickstartWarp(conn, log);
     }
 
     // In async mode, return immediately after starting executor
@@ -477,11 +498,7 @@ export const executeNodeTool: ToolDefinition = {
     async: z.boolean()
       .optional()
       .default(false)
-      .describe('If true, return immediately after starting executor instead of waiting for completion'),
-    includeTelemetry: z.boolean()
-      .optional()
-      .default(false)
-      .describe('Include ship telemetry in response (slower but more info)'),
+      .describe('If true, return immediately after starting executor.'),
     timeoutSeconds: z.number()
       .optional()
       .default(240)
@@ -493,7 +510,7 @@ export const executeNodeTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 1,
+  tier: 3,
   handler: async (args, ctx, extra) => {
     setActiveOperation('execute_node', 'Executing maneuver node');
     try {
@@ -525,12 +542,6 @@ export const executeNodeTool: ToolDefinition = {
         } else if (!encounterInfo) {
           // No encounter - generic hint
           text += `\nManeuver complete`;
-        }
-
-        if (args.includeTelemetry) {
-          const { getShipTelemetry } = await import('./telemetry.js');
-          const telemetry = await getShipTelemetry(conn, { timeoutMs: 2500 });
-          text += '\n\n' + telemetry.formatted;
         }
 
         return ctx.successResponse('execute_node', text);

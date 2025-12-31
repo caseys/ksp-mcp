@@ -2,7 +2,6 @@
  * Hohmann Transfer - Transfer to target body or vessel
  */
 
-import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
@@ -118,10 +117,6 @@ export const hohmannTransferTool: ToolDefinition = {
     //   .default(false)
     //   .describe('Include capture burn for vessel rendezvous. Default: false (transfer only).'),
     execute: executeSchema,
-    includeTelemetry: z.boolean()
-      .optional()
-      .default(false)
-      .describe('Include ship telemetry in response'),
   },
   annotations: {
     readOnlyHint: false,
@@ -171,17 +166,6 @@ export const hohmannTransferTool: ToolDefinition = {
             text += ` (safe)`;
             text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
           }
-        }
-
-        if (args.includeTelemetry) {
-          const { queryTargetEncounterInfo } = await import('../shared.js');
-          const { getShipTelemetry, formatTargetEncounterInfo } = await import('../telemetry.js');
-          const targetInfo = await queryTargetEncounterInfo(conn);
-          if (targetInfo) {
-            text += '\n\n' + formatTargetEncounterInfo(targetInfo);
-          }
-          const telemetry = await getShipTelemetry(conn, { timeoutMs: 2500 });
-          text += '\n\n' + telemetry.formatted;
         }
 
         return ctx.successResponse('hohmann_transfer', text);

@@ -163,13 +163,13 @@ export class AscentHandle {
         // Smart warp: detect when ascent burn complete (APO+PER stable, still suborbital)
         if (state.periapsis < 0 && state.apoapsis >= this.targetAltitude * 0.9) {
           const warpState = `${Math.round(state.apoapsis / 1000)},${Math.round(state.periapsis / 1000)}`;
-          await warpTracker.check(warpState);
+          await warpTracker.check(warpState);          
         }
 
         // Log progress every 10 seconds
         const now = Date.now();
         if (now - lastLogTime >= 10_000) {
-          this.logger.progress(`[Ascent] APO:${Math.round(state.apoapsis/1000)}km PER:${Math.round(state.periapsis/1000)}km`);
+          this.logger.progress(`[Ascent] Apop:${Math.round(state.apoapsis/1000)}km Peri:${Math.round(state.periapsis/1000)}km`);
           lastLogTime = now;
         }
       },
@@ -211,7 +211,7 @@ export class AscentHandle {
     this.logger.error(`[Ascent] TIMEOUT after ${MAX_WAIT_MS/1000}s`);
     const finalApoapsis = result.result?.apoapsis ?? 0;
     const finalPeriapsis = result.result?.periapsis ?? 0;
-    this.logger.progress(`[Ascent] Final: APO: ${Math.round(finalApoapsis/1000)}km, PER: ${Math.round(finalPeriapsis/1000)}km`);
+    this.logger.progress(`[Ascent] Final: Apop: ${Math.round(finalApoapsis/1000)}km, Peri: ${Math.round(finalPeriapsis/1000)}km`);
 
     return {
       success: false,
@@ -240,7 +240,7 @@ export class AscentHandle {
 
       onPoll: (progress) => {
         if (progress.phase !== 'prelaunch' || progress.altitude > 100) {
-          this.logger.progress(`[Ascent] Liftoff confirmed! ALT: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
+          this.logger.progress(`[Ascent] Liftoff confirmed! Altitude: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
         }
       },
     });
@@ -570,7 +570,7 @@ export const launchAscentTool: ToolDefinition = {
         if (result.success) {
           const orbit = result.finalOrbit;
           return ctx.successResponse('launch',
-            `Orbit achieved! APO: ${(orbit.apoapsis / 1000).toFixed(1)} km, PER: ${(orbit.periapsis / 1000).toFixed(1)} km\nNext: set target for transfer`);
+            `Orbit achieved! Apop: ${(orbit.apoapsis / 1000).toFixed(1)} km, Peri: ${(orbit.periapsis / 1000).toFixed(1)} km\nNext: set target for transfer`);
         } else {
           return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
         }

@@ -96,8 +96,13 @@ export const matchVelocitiesTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('match_velocities',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          const relVelInfo = await conn.execute('PRINT ROUND((TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT):MAG, 1).', 2000);
+          const relVel = relVelInfo.output.trim();
+          text += `\nRelative velocity: ${relVel} m/s`;
+        }
+        return ctx.successResponse('match_velocities', text);
       } else {
         return ctx.errorResponse('match_velocities', result.error ?? 'Failed');
       }

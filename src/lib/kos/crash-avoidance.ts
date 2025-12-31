@@ -385,7 +385,7 @@ export const crashAvoidanceTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 1,
+  tier: 3,
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();

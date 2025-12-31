@@ -70,8 +70,13 @@ export const changeEccentricityTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('change_eccentricity',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          const eccInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:ECCENTRICITY, 4).', 2000);
+          const ecc = eccInfo.output.trim();
+          text += `\nEccentricity: ${ecc}`;
+        }
+        return ctx.successResponse('change_eccentricity', text);
       } else {
         return ctx.errorResponse('change_eccentricity', result.error ?? 'Failed');
       }

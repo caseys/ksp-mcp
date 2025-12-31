@@ -36,7 +36,19 @@ export class StableWarpTracker {
       this.stableCount++;
       if (this.stableCount >= this.samplesRequired) {
         try {
-          await this.conn.execute('SET WARP TO 1.'); // 2x warp
+          await this.conn.execute(
+            'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. WAIT 0.3. SET WARP TO 1. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
+            5000
+          );
+
+          /* keep for reference
+          await this.conn.execute('SET WARP TO 0.');
+          await this.conn.execute(
+            'IF WARP < 6 { SET WARP TO WARP + 1. }',
+            3000
+          );
+          */
+
           this.logger.info(`[${this.context}] Stable state - enabled 2x warp`);
         } catch {
           // Ignore warp errors - non-critical
@@ -52,7 +64,8 @@ export class StableWarpTracker {
   }
 
   /** Reset tracker (e.g., when state should change) */
-  reset(): void {
+  async reset(): Promise<void> {
+    await this.conn.execute('SET WARP TO 0.');
     this.hasWarped = false;
     this.stableCount = 0;
     this.lastState = null;

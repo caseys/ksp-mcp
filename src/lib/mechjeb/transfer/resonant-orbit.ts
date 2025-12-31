@@ -77,8 +77,15 @@ export const resonantOrbitTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('resonant_orbit',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          const orbitInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:PERIOD, 1) + "|" + ROUND(APOAPSIS/1000, 1).', 2000);
+          const match = orbitInfo.output.match(/([\d.]+)\|([\d.]+)/);
+          if (match) {
+            text += `\nNew orbit: period ${match[1]}s, apoapsis ${match[2]}km`;
+          }
+        }
+        return ctx.successResponse('resonant_orbit', text);
       } else {
         return ctx.errorResponse('resonant_orbit', result.error ?? 'Failed');
       }

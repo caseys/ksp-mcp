@@ -10,7 +10,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
-import { executeSchema, targetSchema, distanceSchema } from '../../tool-types.js';
+import { executeSchema, distanceSchema, parseTarget } from '../../tool-types.js';
 
 /**
  * Create a maneuver node for course correction.
@@ -79,13 +79,11 @@ export const courseCorrectTool: ToolDefinition = {
   name: 'course_correct',
   description: 'Fine-tune approach after transfer. Requires existing encounter - use hohmann_transfer first if none.',
   inputSchema: {
-    target: targetSchema,
+    target: z.preprocess(parseTarget, z.string())
+      .optional()
+      .describe('Target name (body or vessel) set by previous tool. Use get_targets to list available names.'),
     targetDistance: distanceSchema.optional().default(50_000).describe('Target periapsis (bodies) or closest approach (vessels) in meters (default: 50km)'),
     execute: executeSchema,
-    includeTelemetry: z.boolean()
-      .optional()
-      .default(false)
-      .describe('Include ship telemetry in response (slower but more info)'),
   },
   annotations: {
     readOnlyHint: false,
@@ -142,15 +140,6 @@ export const courseCorrectTool: ToolDefinition = {
         } else {
           text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km - still unsafe, run course_correct again`;
         }
-      }
-
-      if (args.includeTelemetry) {
-        const { getShipTelemetry, formatTargetEncounterInfo } = await import('../telemetry.js');
-        if (encounterInfo) {
-          text += '\n\n' + formatTargetEncounterInfo(encounterInfo);
-        }
-        const telemetry = await getShipTelemetry(conn, { timeoutMs: 2500 });
-        text += '\n\n' + telemetry.formatted;
       }
 
       return ctx.successResponse('course_correct', text);

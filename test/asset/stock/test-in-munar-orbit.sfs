@@ -657,7 +657,7 @@ GAME
 	FLIGHTSTATE
 	{
 		version = 1.12.5
-		UT = 25137.15420557954
+		UT = 26870.554791897677
 		activeVessel = 7
 		mapViewFiltering = -1026
 		commNetUIModeTracking = Network
@@ -1566,18 +1566,18 @@ GAME
 			landedAt = 
 			displaylandedAt = 
 			splashed = False
-			met = 24853.994205579507
+			met = 26587.394791897645
 			lct = 283.16000000003243
-			lastUT = 25137.15420557954
-			distanceTraveled = 1439096.4183650159
+			lastUT = 26870.554791897677
+			distanceTraveled = 1580197.401707588
 			root = 0
-			lat = 0.24327761667090902
-			lon = 123.16114348325138
-			alt = 11428.544611384801
-			hgt = 7160.35156
-			nrm = -0.217614919,-0.293748021,0.930782318
-			rot = 0.220947981,-0.0242450945,-0.668163538,0.710036457
-			CoM = -0.00661566854,-1.73878908,-3.09348106E-05
+			lat = -0.47976263458578283
+			lon = 19.764934568342461
+			alt = 11249.280146710284
+			hgt = 11249.2803
+			nrm = 0.130248904,0.991439581,0.00911587477
+			rot = 0.600915134,0.365160227,-0.371188819,0.606447101
+			CoM = -0.00661528856,-1.73878765,-2.8014183E-05
 			stg = 3
 			prst = False
 			ref = 233546716
@@ -1590,18 +1590,18 @@ GAME
 			OverrideAxisControl = 0,0,0,0
 			OverrideGroupNames = ,,,
 			altDispState = ASL
-			cPch = 0.2
-			cHdg = -3.563934
+			cPch = 0
+			cHdg = -2.330268
 			cMod = 0
 			ORBIT
 			{
-				SMA = 211276.82409454288
-				ECC = 0.00072036316628836384
-				INC = 0.50934659421879691
-				LPE = 210.44828261253463
-				LAN = 29.742860992598025
-				MNA = 3.1080715866704858
-				EPH = 25137.15420557954
+				SMA = 211276.78178392121
+				ECC = 0.00072147892065618378
+				INC = 0.50934654866307727
+				LPE = 210.63536828665468
+				LAN = 29.742859941312872
+				MNA = 1.377159255919929
+				EPH = 26870.554791897677
 				REF = 2
 			}
 			PART
@@ -1630,8 +1630,8 @@ GAME
 				attN = bottom, 7
 				mass = 0.200000003
 				shielded = False
-				temp = 146.52358289877472
-				tempExt = 146.626212941414
+				temp = 145.29764815238207
+				tempExt = 145.30269470817686
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -2152,7 +2152,7 @@ GAME
 						MechJebModuleLandingAutopilot
 						{
 							DeployGears = True
-							DeployChutes = True
+							DeployChutes = False
 							RCSAdjustment = True
 							UnlockParts = 
 							UnlockTechs = 
@@ -2537,7 +2537,7 @@ GAME
 							MarkUT = 283.16000000003243
 							DeltaVExpended = NaN
 							DragLosses = 135.05521557508033
-							GravityLosses = 3375.1406692817095
+							GravityLosses = 3374.6664289513728
 							SteeringLosses = NaN
 							MarkLAN = 110.13471116307278
 							MarkLatitude = -0.097206099400214047
@@ -2572,7 +2572,7 @@ GAME
 					MaxPartId = 100
 					ECPerInstruction = 3.99999999E-06
 					ECPerBytePerSecond = 0
-					RequiredPower = 0.000200000009
+					RequiredPower = 0.00140000007
 					stagingEnabled = True
 					activated = True
 					EVENTS
@@ -2725,8 +2725,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00200000009
 				shielded = False
-				temp = 146.88297664206362
-				tempExt = 146.98294498993585
+				temp = 145.74080069591801
+				tempExt = 145.77060628077692
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -2989,8 +2989,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00200000009
 				shielded = False
-				temp = 146.88298820693728
-				tempExt = 146.98339081819444
+				temp = 145.74080069591801
+				tempExt = 145.77060628077692
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -3229,8 +3229,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.100000001
 				shielded = False
-				temp = 146.45736577430318
-				tempExt = 146.53701849318014
+				temp = 144.87503637347297
+				tempExt = 145.06280391541216
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -3438,8 +3438,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.100000001
 				shielded = False
-				temp = 146.45699466566253
-				tempExt = 146.53688063801224
+				temp = 144.87516099218738
+				tempExt = 145.06286288004353
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -3647,8 +3647,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.54718845946798
-				tempExt = 146.58546592790748
+				temp = 145.26887680887265
+				tempExt = 145.27638261394748
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -3823,8 +3823,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.54648977076005
-				tempExt = 146.58429328259723
+				temp = 145.26879611528352
+				tempExt = 145.27635541575168
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -4000,8 +4000,8 @@ GAME
 				attN = bottom, 8
 				mass = 0.0375000015
 				shielded = False
-				temp = 146.54642825642463
-				tempExt = 146.56170923592035
+				temp = 145.4744521093871
+				tempExt = 145.45551137721404
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -4171,8 +4171,8 @@ GAME
 				attN = top, 7
 				mass = 0.100000001
 				shielded = False
-				temp = 146.60891942546871
-				tempExt = 146.61657843352347
+				temp = 145.52318960482836
+				tempExt = 145.48564171680783
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -4429,8 +4429,8 @@ GAME
 				attN = bottom, 10
 				mass = 0.0500000007
 				shielded = False
-				temp = 146.6728056696731
-				tempExt = 146.68355440409479
+				temp = 145.5679441463005
+				tempExt = 145.53767477061666
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -4647,8 +4647,8 @@ GAME
 				attN = bottom, 9
 				mass = 0.0399999991
 				shielded = False
-				temp = 146.75976124625123
-				tempExt = 146.81186655374336
+				temp = 145.62703976902725
+				tempExt = 145.60959137269143
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -4801,8 +4801,8 @@ GAME
 				attN = bottom, 12
 				mass = 0.0500000007
 				shielded = False
-				temp = 146.85299905639462
-				tempExt = 146.96400569271259
+				temp = 145.68859599439563
+				tempExt = 145.67596878192037
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -5038,8 +5038,8 @@ GAME
 				attN = top, 11
 				mass = 0.100000001
 				shielded = False
-				temp = 146.94621356065886
-				tempExt = 147.24858883261584
+				temp = 145.74987014865184
+				tempExt = 145.75912117671987
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -5521,7 +5521,7 @@ GAME
 				RESOURCE
 				{
 					name = ElectricCharge
-					amount = 15
+					amount = 14.999800000008939
 					maxAmount = 15
 					flowState = True
 					isTweakable = True
@@ -5548,7 +5548,7 @@ GAME
 				dstg = 5
 				sqor = 3
 				sepI = 3
-				sidx = 1
+				sidx = 0
 				attm = 0
 				sameVesselCollision = False
 				srfN = , -1
@@ -5568,8 +5568,8 @@ GAME
 				attN = bottom, 20
 				mass = 0.150000006
 				shielded = False
-				temp = 147.02140229964081
-				tempExt = 147.60548179647688
+				temp = 145.79593138887046
+				tempExt = 145.83842147765569
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -5995,8 +5995,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00200000009
 				shielded = False
-				temp = 147.09669456301009
-				tempExt = 147.44664372227265
+				temp = 145.82674463171588
+				tempExt = 146.06391598873824
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -6259,8 +6259,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00200000009
 				shielded = False
-				temp = 147.09669456301009
-				tempExt = 147.44664372227265
+				temp = 145.81712639322873
+				tempExt = 145.81927364856904
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -6501,8 +6501,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.0500000007
 				shielded = False
-				temp = 147.01755583641585
-				tempExt = 147.27854367072797
+				temp = 145.79344446118921
+				tempExt = 145.81272268771932
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -6697,8 +6697,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.0500000007
 				shielded = False
-				temp = 147.01308279778212
-				tempExt = 147.27356978337096
+				temp = 145.79325475498146
+				tempExt = 145.81048826717711
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -6893,8 +6893,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.0500000007
 				shielded = False
-				temp = 147.01755583641585
-				tempExt = 147.27854367072797
+				temp = 145.79344446118921
+				tempExt = 145.81272268771932
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -7089,8 +7089,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.0500000007
 				shielded = False
-				temp = 147.01308417372803
-				tempExt = 147.2736230140853
+				temp = 145.79325475498146
+				tempExt = 145.81048826717711
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -7284,8 +7284,8 @@ GAME
 				attN = bottom, 21
 				mass = 0.275000006
 				shielded = False
-				temp = 147.0926448521808
-				tempExt = 147.40045183341485
+				temp = 145.82153906830936
+				tempExt = 145.88558241843825
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -7446,7 +7446,7 @@ GAME
 				dstg = 6
 				sqor = 3
 				sepI = 3
-				sidx = 0
+				sidx = 1
 				attm = 0
 				sameVesselCollision = False
 				srfN = srfAttach, -1
@@ -7454,8 +7454,8 @@ GAME
 				attN = bottom, -1
 				mass = 1
 				shielded = False
-				temp = 147.32272844400183
-				tempExt = 147.64646614444203
+				temp = 145.84094012064722
+				tempExt = 145.94896148771852
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -7796,8 +7796,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0399999991
 				shielded = False
-				temp = 147.02150309957079
-				tempExt = 147.30679913187547
+				temp = 145.82562249867235
+				tempExt = 145.85191116144512
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -7998,8 +7998,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0399999991
 				shielded = False
-				temp = 147.01656553606071
-				tempExt = 147.25922737475184
+				temp = 145.82562234931638
+				tempExt = 145.85191111173336
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -8200,8 +8200,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0399999991
 				shielded = False
-				temp = 147.01651724138759
-				tempExt = 147.25921130051756
+				temp = 145.82562234931638
+				tempExt = 145.85191111173336
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -8402,8 +8402,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0399999991
 				shielded = False
-				temp = 147.01660829816103
-				tempExt = 147.25924160754343
+				temp = 145.84238313704202
+				tempExt = 146.03769338251462
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -8604,8 +8604,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 147.04295996332445
-				tempExt = 147.3803255825201
+				temp = 145.8258963220714
+				tempExt = 145.85243673390022
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -8790,8 +8790,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 147.02924092051802
-				tempExt = 147.26510750070065
+				temp = 145.82589617867683
+				tempExt = 145.85243668663875
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -8976,8 +8976,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 147.02922250759687
-				tempExt = 147.26510143207295
+				temp = 145.82589617867683
+				tempExt = 145.85243668663875
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -9162,8 +9162,8 @@ GAME
 				srfN = srfAttach, 20,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 147.0292323439385
-				tempExt = 147.26510467398634
+				temp = 145.82589620457122
+				tempExt = 145.85243669517325
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -9348,8 +9348,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00100000005
 				shielded = False
-				temp = 147.10672379973997
-				tempExt = 147.45319977977269
+				temp = 145.82036200554367
+				tempExt = 145.82076178673154
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -9615,8 +9615,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00100000005
 				shielded = False
-				temp = 147.10672379973997
-				tempExt = 147.45319977977269
+				temp = 145.82036200554367
+				tempExt = 145.82076178673154
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -9858,8 +9858,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00100000005
 				shielded = False
-				temp = 147.10672379973997
-				tempExt = 147.45319977977269
+				temp = 145.82036200554367
+				tempExt = 145.82076178673154
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -10101,8 +10101,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00100000005
 				shielded = False
-				temp = 147.10672379973997
-				tempExt = 147.45319977977269
+				temp = 145.83003394467147
+				tempExt = 146.00376301198011
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -10344,8 +10344,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00999999978
 				shielded = False
-				temp = 146.90881607305408
-				tempExt = 147.37285466128264
+				temp = 145.82137851848137
+				tempExt = 146.03639860785628
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -10488,8 +10488,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00999999978
 				shielded = False
-				temp = 146.90881598881708
-				tempExt = 147.37285463437772
+				temp = 145.79275360763251
+				tempExt = 145.8099018221904
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -10632,8 +10632,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00999999978
 				shielded = False
-				temp = 146.90884710529951
-				tempExt = 147.37286457283787
+				temp = 145.79274316115425
+				tempExt = 145.80989848559068
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -10776,8 +10776,8 @@ GAME
 				srfN = srfAttach, 13,Collider 1
 				mass = 0.00999999978
 				shielded = False
-				temp = 146.90881988802198
-				tempExt = 147.37285587976564
+				temp = 145.82084860395909
+				tempExt = 146.0077320236249
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -10917,8 +10917,8 @@ GAME
 				srfN = srfAttach, 12,collider
 				mass = 0.0149999997
 				shielded = False
-				temp = 146.91153371261873
-				tempExt = 147.11445750894481
+				temp = 145.74615697805478
+				tempExt = 145.73887692128224
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -11076,8 +11076,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 146.33640886807552
-				tempExt = 146.46164478653586
+				temp = 145.09830630542987
+				tempExt = 145.18166664325145
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -11393,8 +11393,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 146.33698853382438
-				tempExt = 146.46192970007937
+				temp = 145.10030591843926
+				tempExt = 145.18263656539369
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -11702,8 +11702,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 146.33640886807552
-				tempExt = 146.46164478653586
+				temp = 145.09830630542987
+				tempExt = 145.18166664325145
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -12011,8 +12011,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 146.67965968415419
-				tempExt = 146.97972007609209
+				temp = 145.16597487364501
+				tempExt = 145.2867770383881
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -12320,8 +12320,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.57648530898138
-				tempExt = 146.92107444505857
+				temp = 145.38711113329904
+				tempExt = 145.35757177881132
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -12520,8 +12520,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.50155446240529
-				tempExt = 146.57771674670357
+				temp = 145.26463411859373
+				tempExt = 145.27894379846191
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -12720,8 +12720,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.50155446242906
-				tempExt = 146.57771674671048
+				temp = 145.2661168057497
+				tempExt = 145.27936336270656
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -12920,8 +12920,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.50155446240529
-				tempExt = 146.57771674670357
+				temp = 145.26463411859373
+				tempExt = 145.27894379846191
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -13120,8 +13120,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.5396981090922
-				tempExt = 146.60793539555854
+				temp = 145.28993677058676
+				tempExt = 145.29421378237822
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -13320,8 +13320,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.5396981090922
-				tempExt = 146.60793539555854
+				temp = 145.28993676922485
+				tempExt = 145.29421378217575
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -13520,8 +13520,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.55167011408093
-				tempExt = 146.83051557613635
+				temp = 145.28997711630771
+				tempExt = 145.29422234340521
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -13720,8 +13720,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.5396981090922
-				tempExt = 146.60793539555854
+				temp = 145.28993676922485
+				tempExt = 145.29421378217575
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -13920,8 +13920,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.95034091537599
-				tempExt = 147.01058656815556
+				temp = 145.71275660851396
+				tempExt = 145.79063783152776
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -14120,8 +14120,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.95034091537599
-				tempExt = 147.01058656815556
+				temp = 145.71275660851396
+				tempExt = 145.79063783152776
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -14319,8 +14319,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0199999996
 				shielded = False
-				temp = 146.46921507028799
-				tempExt = 146.55123371356643
+				temp = 145.20922568441321
+				tempExt = 145.22302599006375
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -14461,8 +14461,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0149999997
 				shielded = False
-				temp = 146.51576083212981
-				tempExt = 146.57272784352969
+				temp = 145.46922251912704
+				tempExt = 145.73743510384125
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -14694,8 +14694,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0149999997
 				shielded = False
-				temp = 146.51302566521062
-				tempExt = 146.55715542264113
+				temp = 145.22234871044299
+				tempExt = 145.24604244481174
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -14927,8 +14927,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0149999997
 				shielded = False
-				temp = 146.51304416279967
-				tempExt = 146.55716221140062
+				temp = 145.21759677493739
+				tempExt = 145.24445642844498
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -15160,8 +15160,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0149999997
 				shielded = False
-				temp = 146.63158054485538
-				tempExt = 147.11049739262111
+				temp = 145.68263159710304
+				tempExt = 146.02003458491936
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -15392,8 +15392,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.50490234585749
-				tempExt = 146.58979588888965
+				temp = 145.26453195253987
+				tempExt = 145.28437369228493
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -15577,8 +15577,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.0500000007
 				shielded = False
-				temp = 146.45389830428303
-				tempExt = 146.55177190789709
+				temp = 145.07715585450734
+				tempExt = 145.21267899704938
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -15654,7 +15654,7 @@ GAME
 					EfficiencyBonus = 1
 					IsActivated = False
 					stagingEnabled = True
-					lastUpdateTime = 25137.15420557954
+					lastUpdateTime = 26870.554791897677
 					EVENTS
 					{
 					}
@@ -15751,8 +15751,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00999999978
 				shielded = False
-				temp = 146.43313762830496
-				tempExt = 146.56398274773116
+				temp = 145.23136467284297
+				tempExt = 145.27240527432747
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -15943,8 +15943,8 @@ GAME
 				attN = bottom, 0
 				mass = 0.0500000007
 				shielded = False
-				temp = 146.53543425428231
-				tempExt = 146.52531152070353
+				temp = 145.43065943009725
+				tempExt = 145.39823701608631
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -16086,8 +16086,8 @@ GAME
 				attN = bottom, 61
 				mass = 0.0500000007
 				shielded = False
-				temp = 146.51706275695994
-				tempExt = 146.63600944835588
+				temp = 145.24677154626892
+				tempExt = 145.47157214933443
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -16323,8 +16323,8 @@ GAME
 				attN = bottom, 62
 				mass = 0.0375000015
 				shielded = False
-				temp = 146.49242306926701
-				tempExt = 146.79842456264402
+				temp = 145.23575787364351
+				tempExt = 145.66612393206822
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -16493,8 +16493,8 @@ GAME
 				attN = bottom, 63
 				mass = 0.0199999996
 				shielded = False
-				temp = 146.49692662889063
-				tempExt = 146.65652303778845
+				temp = 145.24148068012747
+				tempExt = 145.47545250135622
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -16708,8 +16708,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.00100000005
 				shielded = False
-				temp = 146.53351314649976
-				tempExt = 146.51381500762841
+				temp = 145.42646272638683
+				tempExt = 145.39234346981607
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -16972,8 +16972,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.00100000005
 				shielded = False
-				temp = 146.53351314438964
-				tempExt = 146.51381500608375
+				temp = 145.42646272638683
+				tempExt = 145.39234346981607
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -17212,8 +17212,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.00100000005
 				shielded = False
-				temp = 146.53351314438964
-				tempExt = 146.51381500608375
+				temp = 145.42646272638683
+				tempExt = 145.39234346981607
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -17452,8 +17452,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.00100000005
 				shielded = False
-				temp = 146.53351314438964
-				tempExt = 146.51381500608375
+				temp = 145.42646272638683
+				tempExt = 145.39234346981607
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -17692,8 +17692,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.0149999997
 				shielded = False
-				temp = 146.53183655963801
-				tempExt = 146.51130590650476
+				temp = 145.41378369611201
+				tempExt = 145.38701331958268
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -17851,8 +17851,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.0149999997
 				shielded = False
-				temp = 146.54019016030895
-				tempExt = 146.5538471409449
+				temp = 145.4137839490414
+				tempExt = 145.38701341552718
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -18010,8 +18010,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.53499540015525
-				tempExt = 146.52051111172835
+				temp = 145.42183993383682
+				tempExt = 145.39431405335608
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -18210,8 +18210,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.00124999997
 				shielded = False
-				temp = 146.53499540015525
-				tempExt = 146.52051111172835
+				temp = 145.42183993118402
+				tempExt = 145.39431405292876
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -18409,8 +18409,8 @@ GAME
 				srfN = srfAttach, 61,collider
 				mass = 0.0500000007
 				shielded = False
-				temp = 146.55502536023573
-				tempExt = 146.6669462018921
+				temp = 145.43798181985011
+				tempExt = 145.48328536040412
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0
@@ -18603,8 +18603,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.52296671994182
-				tempExt = 146.57767376991464
+				temp = 145.26545542148727
+				tempExt = 145.27574334714257
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -18867,8 +18867,8 @@ GAME
 				srfN = srfAttach, 0,COL
 				mass = 0.00499999989
 				shielded = False
-				temp = 146.52644291832345
-				tempExt = 146.58820107770143
+				temp = 145.32803866369326
+				tempExt = 145.29592423897805
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -19108,8 +19108,8 @@ GAME
 				attN = bottom, -1
 				mass = 0.00100000005
 				shielded = False
-				temp = 146.56040288276716
-				tempExt = 146.60195041148711
+				temp = 145.45091045079812
+				tempExt = 145.51589485027216
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -19246,8 +19246,8 @@ GAME
 				attN = bottom, -1
 				mass = 0.0799999982
 				shielded = False
-				temp = 146.56820225515918
-				tempExt = 146.90086113855654
+				temp = 145.44534773595981
+				tempExt = 145.60013651003004
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -19360,7 +19360,7 @@ GAME
 					CoreTempGoalAdjustment = 0
 					CoreThermalEnergy = 22159.994073316022
 					stagingEnabled = True
-					lastUpdateTime = 25137.15420557954
+					lastUpdateTime = 26870.554791897677
 					EVENTS
 					{
 					}
@@ -19432,8 +19432,8 @@ GAME
 				srfN = srfAttach, 76,cubestrut
 				mass = 0.00200000009
 				shielded = False
-				temp = 146.64778113492179
-				tempExt = 146.92686903206499
+				temp = 145.44969311234431
+				tempExt = 145.47029353903326
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -19696,8 +19696,8 @@ GAME
 				srfN = srfAttach, 76,cubestrut
 				mass = 0.00200000009
 				shielded = False
-				temp = 146.5791580052599
-				tempExt = 146.57146191560921
+				temp = 145.45082277954023
+				tempExt = 145.48458087726684
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -19936,8 +19936,8 @@ GAME
 				attN = bottom, -1
 				mass = 0.100000001
 				shielded = False
-				temp = 146.56763335318095
-				tempExt = 146.92486773548717
+				temp = 146.46806503074566
+				tempExt = 146.54040327389257
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -20138,8 +20138,8 @@ GAME
 			}
 			TARGET
 			{
-				type = CelestialBody
-				tgtId = Mun
+				type = Generic
+				tgtId = New Game Object
 			}
 			CTRLSTATE
 			{
@@ -20554,23 +20554,23 @@ GAME
 			landed = False
 			skipGroundPositioning = False
 			skipGroundPositioningForDroppedPart = False
-			vesselSpawning = True
+			vesselSpawning = False
 			launchedFrom = LaunchPad
 			landedAt = 
 			displaylandedAt = 
 			splashed = False
-			met = 38.280000000835571
+			met = 1416.9608243491384
 			lct = 25098.874205578704
-			lastUT = 25137.15420557954
-			distanceTraveled = 21721.875071577924
+			lastUT = 26515.835029927843
+			distanceTraveled = 37630.143337297595
 			root = 0
-			lat = 0.24332173453128494
-			lon = 123.16718421312666
-			alt = 11433.806842121325
-			hgt = 7166.45605
-			nrm = -0.215948328,-0.251770407,0.943386376
-			rot = 0.221214592,-0.0220362823,-0.675067365,0.703464806
-			CoM = -6.55649899E-07,-3.04874825,-1.04307651E-06
+			lat = -0.41982608679259675
+			lon = -33.432398694162508
+			alt = 11764.999513392657
+			hgt = 11765
+			nrm = -0.271143734,-0.292489499,0.917023003
+			rot = 0.220979825,-0.0217839405,-0.67514503,0.703471899
+			CoM = -7.63684511E-06,-3.04872322,2.38418579E-05
 			stg = 4
 			prst = False
 			ref = 0
@@ -20585,16 +20585,16 @@ GAME
 			altDispState = DEFAULT
 			cPch = 0
 			cHdg = 0
-			cMod = -1
+			cMod = 0
 			ORBIT
 			{
-				SMA = 211624.95437409607
-				ECC = 0.00095747184743452229
-				INC = 0.50938552491321709
-				LPE = 8.553127029467479
-				LAN = 29.744689027240668
-				MNA = 0.3480953438461839
-				EPH = 25137.15420557954
+				SMA = 211624.95425687282
+				ECC = 0.00095754075177482783
+				INC = 0.5093855251187156
+				LPE = 8.5547270430186444
+				LAN = 29.744689124005276
+				MNA = 0.41428930413646653
+				EPH = 25162.414205580091
 				REF = 2
 			}
 			PART
@@ -20623,8 +20623,8 @@ GAME
 				attN = bottom, 1
 				mass = 0.0900000036
 				shielded = False
-				temp = 152.71282995214077
-				tempExt = 153.83592506505769
+				temp = 152.81150218421379
+				tempExt = 153.19035813643765
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -20634,7 +20634,7 @@ GAME
 				autostrutMode = Off
 				rigidAttachment = False
 				flag = Squad/Flags/default
-				rTrf = Decoupler.1p5
+				rTrf = Decoupler.1p5 (test-from-launchpad Debris)
 				modCost = 0
 				modMass = 0
 				moduleVariantName = Basic
@@ -20841,8 +20841,8 @@ GAME
 				attN = bottom, 2
 				mass = 1.125
 				shielded = False
-				temp = 152.72200263599669
-				tempExt = 153.59971351345933
+				temp = 152.32661127503778
+				tempExt = 152.28110598172395
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5
@@ -20992,8 +20992,8 @@ GAME
 				attN = bottom, -1
 				mass = 2
 				shielded = False
-				temp = 154.48262383247948
-				tempExt = 154.20809423921153
+				temp = 152.0071739137374
+				tempExt = 151.90292475212243
 				tempExtUnexp = 4
 				staticPressureAtm = 0
 				expt = 0.5

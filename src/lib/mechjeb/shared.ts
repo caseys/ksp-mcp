@@ -186,10 +186,14 @@ export async function validateNodeInCurrentPatch(
   toolName: string
 ): Promise<{ valid: boolean; error?: string }> {
   // Check if we have both a node AND a future patch
+  // Guard against edge cases where STARTTIME isn't available
   const result = await conn.execute(
     'IF HASNODE AND SHIP:ORBIT:HASNEXTPATCH { ' +
-    'PRINT "CHECK|" + NEXTNODE:ETA + "|" + (SHIP:ORBIT:NEXTPATCH:STARTTIME - TIME:SECONDS). } ' +
-    'ELSE { PRINT "OK". }',
+    '  SET np TO SHIP:ORBIT:NEXTPATCH. ' +
+    '  IF np:TRANSITION = "ENCOUNTER" OR np:TRANSITION = "ESCAPE" { ' +
+    '    PRINT "CHECK|" + NEXTNODE:ETA + "|" + (np:STARTTIME - TIME:SECONDS). ' +
+    '  } ELSE { PRINT "OK". } ' +
+    '} ELSE { PRINT "OK". }',
     3000
   );
 

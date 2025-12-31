@@ -15,6 +15,7 @@ const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
 
 export type WarpTarget = 'node' | 'soi' | 'periapsis' | 'apoapsis';
 
+
 /**
  * Crash trajectory check result
  */
@@ -27,6 +28,31 @@ interface CrashCheck {
   encounterPeriapsis?: number;
   etaToSOI?: number;
 }
+
+
+async function kickstartWarp(conn: KosConnection, logger: McpLogger): Promise<boolean> {
+  // Check warp and pulse in one kOS command to reduce round trips
+  // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
+  const result = await conn.execute(
+    'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. WAIT 0.3. SET WARP TO 1. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
+    5000
+  );
+
+  /*
+  await conn.execute(
+    'IF WARP < 6 { SET WARP TO WARP + 1. }',
+    3000
+  );
+  */
+
+  const kicked = result.output.includes('KICKED');
+  if (kicked) {
+    logger.progress('[Execute Node] Warp kickstart MechJeb');
+  }
+  return kicked;
+}
+
+
 
 /**
  * Check if warping to a target time would result in a crash.
@@ -258,14 +284,17 @@ async function warpToSOI(
     context: 'Warp',
     onPoll: (state) => {
       if (state.eta !== null && state.eta < 100_000) {
-        log.progress(`[Warp] SOI ETA: ${state.eta.toFixed(0)}s`);
+        log.progress(`[Warp] S.O.I. ETA: ${state.eta.toFixed(0)}s`);
+      }
+      if (state.eta !== null && state.eta > 10) {
+        kickstartWarp(conn, log)
       }
     },
   });
 
   if (result.success && result.result) {
     const newBody = result.result.body;
-    log.progress(`[Warp] Crossed into ${newBody} SOI`);
+    log.progress(`[Warp] Crossed into ${newBody} S.O.I.`);
 
     // Wait for warp to fully stop and KSP to settle
     await new Promise(resolve => setTimeout(resolve, 2000));
@@ -274,7 +303,7 @@ async function warpToSOI(
     return await getSOIStatus(conn, newBody, logger);
   }
 
-  return { success: false, error: result.timedOut ? 'SOI warp timeout' : 'SOI warp failed' };
+  return { success: false, error: result.timedOut ? 'S.O.I. warp timeout' : 'S.O.I. warp failed' };
 }
 
 /**
@@ -326,7 +355,7 @@ async function warpToOrbitalPoint(
     return {
       success: false,
       error: `Cannot warp to ${point.toLowerCase()} - will CRASH in ${crashCheck.encounterBody}!\n` +
-             `SOI transition in ${crashCheck.etaToSOI}s (before ${point.toLowerCase()} at ${initialEta.toFixed(0)}s)\n` +
+             `S.O.I. transition in ${crashCheck.etaToSOI}s (before ${point.toLowerCase()} at ${initialEta.toFixed(0)}s)\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
              `Use course_correct to fix trajectory first.`,
     };
@@ -505,7 +534,7 @@ export const warpTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 2,
+  tier: 1,
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();

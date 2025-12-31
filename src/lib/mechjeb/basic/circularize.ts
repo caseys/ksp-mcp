@@ -36,7 +36,7 @@ export async function circularize(
 
 export const circularizeTool: ToolDefinition = {
   name: 'circularize',
-  description: 'Circularize orbit in current SOI. Warp to SOI or launch to orbit before use.',
+  description: 'Circularize orbit in current SOI. Warp to SOI or launch to orbit before use. Do NOT use if already near circular.',
   inputSchema: {
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'])
       .optional()

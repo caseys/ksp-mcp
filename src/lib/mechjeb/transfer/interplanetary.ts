@@ -115,6 +115,24 @@ export const interplanetaryTransferTool: ToolDefinition = {
           text += '\n\n' + result.warning;
         }
 
+        // Query encounter info for guidance
+        const { queryTargetEncounterInfo } = await import('../shared.js');
+        const encounterInfo = await queryTargetEncounterInfo(conn);
+
+        if (encounterInfo && encounterInfo.targetType === 'body') {
+          const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+          const encPeKm = (peAlt / 1000).toFixed(0);
+          text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km`;
+
+          if (peAlt < 10_000) {
+            text += ` - UNSAFE trajectory!`;
+            text += `\nREQUIRED: Use course_correct to fix trajectory before doing anything else.`;
+          } else {
+            text += ` (safe)`;
+            text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+          }
+        }
+
         return ctx.successResponse('interplanetary', text);
       } else {
         return ctx.errorResponse('interplanetary', result.error ?? 'Failed');

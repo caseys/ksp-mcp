@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
-import { nullLogger } from '../../tool-types.js';
+import { nullLogger, parseTarget } from '../../tool-types.js';
 import { setActiveOperation, clearActiveOperation } from '../../../utils/operation-state.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
@@ -21,6 +21,68 @@ import {
   type LandingConfig,
 } from './shared.js';
 import { findLandingSite } from './find-site.js';
+
+// ============================================================================
+// Target Validation
+// ============================================================================
+
+/**
+ * Check if current KSP target is valid for landing:
+ * - Position target (surface coordinates), OR
+ * - Landed vessel on same body as ship
+ * Returns { valid, lat?, lng?, name? } or { valid: false }
+ */
+async function getValidLandingTarget(conn: KosConnection): Promise<{
+  valid: boolean;
+  latitude?: number;
+  longitude?: number;
+  name?: string;
+}> {
+  // Check for MechJeb position target first
+  const mjTarget = await conn.execute(
+    'SET TGT TO ADDONS:MJ:TARGET. ' +
+    'IF TGT:POSITIONTARGETEXISTS { PRINT "POS|" + TGT:TARGETLATITUDE + "|" + TGT:TARGETLONGITUDE + "|" + TGT:TARGETBODY. } ' +
+    'ELSE { PRINT "NOPOS". }',
+    3000
+  );
+
+  const posMatch = mjTarget.output.match(/POS\|([-\d.]+)\|([-\d.]+)\|(.+)/);
+  if (posMatch) {
+    const lat = Number.parseFloat(posMatch[1]);
+    const lng = Number.parseFloat(posMatch[2]);
+    const body = posMatch[3].trim();
+
+    // Verify it's on our current body
+    const shipBody = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+    if (shipBody.output.includes(body)) {
+      return { valid: true, latitude: lat, longitude: lng, name: `Position ${lat.toFixed(2)}°, ${lng.toFixed(2)}°` };
+    }
+  }
+
+  // Check for landed vessel target on same body
+  const vesselCheck = await conn.execute(
+    'IF HASTARGET AND TARGET:ISTYPE("Vessel") { ' +
+    '  IF TARGET:STATUS = "LANDED" OR TARGET:STATUS = "SPLASHED" { ' +
+    '    IF TARGET:BODY:NAME = SHIP:BODY:NAME { ' +
+    '      PRINT "LANDED|" + TARGET:GEOPOSITION:LAT + "|" + TARGET:GEOPOSITION:LNG + "|" + TARGET:NAME. ' +
+    '    } ELSE { PRINT "WRONGBODY". } ' +
+    '  } ELSE { PRINT "NOTLANDED". } ' +
+    '} ELSE { PRINT "NOTARGET". }',
+    3000
+  );
+
+  const landedMatch = vesselCheck.output.match(/LANDED\|([-\d.]+)\|([-\d.]+)\|(.+)/);
+  if (landedMatch) {
+    return {
+      valid: true,
+      latitude: Number.parseFloat(landedMatch[1]),
+      longitude: Number.parseFloat(landedMatch[2]),
+      name: landedMatch[3].trim(),
+    };
+  }
+
+  return { valid: false };
+}
 
 // Configuration
 const DEFAULT_POLL_INTERVAL_MS = 5000; // 5 seconds
@@ -173,31 +235,32 @@ function formatTime(seconds: number | undefined): string {
 export const landTool: ToolDefinition = {
   name: 'land',
   description:
-    'Start, stop, or check landing autopilot. ' +
-    'action="start" begins landing (at position target if set, or anywhere). ' +
-    'action="abort" stops landing. action="status" checks progress. ' +
-    'Optional: specify lat/lng or preset to set landing target. ' +
-    'Optional: include config params (touchdownSpeed, deployGears, etc.) to configure before starting.',
+    'Land on surface from orbit.',
   inputSchema: {
     action: z.enum(['start', 'abort', 'status'])
       .optional()
       .default('start')
       .describe('start=begin landing (default), abort=cancel, status=check progress'),
 
-    // Position target (optional)
+    // Target (NEW - first optional param for targeting)
+    target: z.preprocess(parseTarget, z.string())
+      .optional()
+      .describe('Landed vessel name to land near. If omitted, uses existing target (if valid surface/vessel) or auto-finds site.'),
+
+    // Position override (only if target not specified)
     latitude: z.number()
       .min(-90)
       .max(90)
       .optional()
-      .describe('Target latitude for precision landing (-90 to 90)'),
+      .describe('Override: target latitude (-90 to 90). Ignored if target specified.'),
     longitude: z.number()
       .min(-180)
       .max(180)
       .optional()
-      .describe('Target longitude for precision landing (-180 to 180)'),
-    preset: z.enum(['KSC'])
+      .describe('Override: target longitude (-180 to 180). Ignored if target specified.'),
+    named_preset: z.enum(['KSC'])
       .optional()
-      .describe('Use preset location. "KSC" = Kerbin Space Center runway'),
+      .describe('ADVANCED: Built-in waypoint. Ignored if target specified.'),
 
     // Config (optional - applied before start)
     touchdownSpeed: z.number()
@@ -219,7 +282,7 @@ export const landTool: ToolDefinition = {
     wait: z.boolean()
       .optional()
       .default(true)
-      .describe('Wait for landing to complete (default: true). Set false to return immediately after starting.'),
+      .describe('Wait for landing to complete (default: true).'),
   },
   annotations: {
     readOnlyHint: false,
@@ -254,55 +317,114 @@ export const landTool: ToolDefinition = {
     setActiveOperation('land', 'Landing in progress');
     const logger = ctx.createLogger(extra);
 
-    // Track auto-found site coordinates for deorbit burn logic
-    let autoFoundLat: number | undefined;
-    let autoFoundLng: number | undefined;
-
     try {
-      // Step 1: Set position target if provided
+      // Step 1: Resolve landing target
+      const target = args.target as string | undefined;
       const latitude = args.latitude as number | undefined;
       const longitude = args.longitude as number | undefined;
-      const preset = args.preset as 'KSC' | undefined;
+      const namedPreset = args.named_preset as 'KSC' | undefined;
 
-      if (preset === 'KSC') {
+      // Track resolved coordinates for deorbit burn logic
+      let targetLat: number | undefined;
+      let targetLng: number | undefined;
+
+      // Check if target is the current SOI body - if so, ignore it (use auto-land)
+      let effectiveTarget = target;
+      if (target) {
+        const bodyCheck = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+        const currentBody = bodyCheck.output.trim().split('\n').pop()?.trim() ?? '';
+        if (target.toLowerCase() === currentBody.toLowerCase()) {
+          logger.info(`[Landing] Target "${target}" is current SOI body, using auto-land`);
+          effectiveTarget = undefined;
+        }
+      }
+
+      if (effectiveTarget) {
+        // Target is a vessel name - try to find it and get its position
+        const vesselResult = await conn.execute(
+          `IF EXISTS(VESSEL("${effectiveTarget}")) { ` +
+          `  SET V TO VESSEL("${effectiveTarget}"). ` +
+          `  IF V:STATUS = "LANDED" OR V:STATUS = "SPLASHED" { ` +
+          `    IF V:BODY:NAME = SHIP:BODY:NAME { ` +
+          `      PRINT "OK|" + V:GEOPOSITION:LAT + "|" + V:GEOPOSITION:LNG. ` +
+          `    } ELSE { PRINT "WRONGBODY|" + V:BODY:NAME. } ` +
+          `  } ELSE { PRINT "NOTLANDED|" + V:STATUS. } ` +
+          `} ELSE { PRINT "NOTFOUND". }`,
+          5000
+        );
+
+        const okMatch = vesselResult.output.match(/OK\|([-\d.]+)\|([-\d.]+)/);
+        if (okMatch) {
+          targetLat = Number.parseFloat(okMatch[1]);
+          targetLng = Number.parseFloat(okMatch[2]);
+          logger.progress(`[Landing] Target vessel "${effectiveTarget}" at ${targetLat.toFixed(2)}°, ${targetLng.toFixed(2)}°`);
+          const targetResult = await setLandingPositionTarget(conn, targetLat, targetLng);
+          if (!targetResult.success) {
+            return ctx.errorResponse('land', targetResult.error ?? 'Failed to set position target');
+          }
+        } else if (vesselResult.output.includes('WRONGBODY')) {
+          const bodyMatch = vesselResult.output.match(/WRONGBODY\|(\w+)/);
+          return ctx.errorResponse('land', `Vessel "${effectiveTarget}" is on ${bodyMatch?.[1] ?? 'different body'}, not current SOI`);
+        } else if (vesselResult.output.includes('NOTLANDED')) {
+          const statusMatch = vesselResult.output.match(/NOTLANDED\|(\w+)/);
+          return ctx.errorResponse('land', `Vessel "${effectiveTarget}" is not landed (status: ${statusMatch?.[1] ?? 'unknown'})`);
+        } else {
+          return ctx.errorResponse('land', `Vessel "${effectiveTarget}" not found`);
+        }
+      } else if (namedPreset === 'KSC') {
         logger.progress('[Landing] Setting target: KSC');
         const targetResult = await setLandingPositionTargetKSC(conn);
         if (!targetResult.success) {
           return ctx.errorResponse('land', targetResult.error ?? 'Failed to set KSC target');
         }
+        targetLat = -0.0972;
+        targetLng = -74.5577;
       } else if (latitude !== undefined && longitude !== undefined) {
         logger.progress(`[Landing] Setting target: ${latitude.toFixed(2)}°, ${longitude.toFixed(2)}°`);
         const targetResult = await setLandingPositionTarget(conn, latitude, longitude);
         if (!targetResult.success) {
           return ctx.errorResponse('land', targetResult.error ?? 'Failed to set position target');
         }
+        targetLat = latitude;
+        targetLng = longitude;
       } else {
-        // No explicit target - auto-find optimal landing site
-        logger.progress('[Landing] Finding optimal landing site...');
-        const siteResult = await findLandingSite(conn);
-        if (siteResult.found && siteResult.latitude !== undefined && siteResult.longitude !== undefined) {
-          // Store for deorbit burn logic
-          autoFoundLat = siteResult.latitude;
-          autoFoundLng = siteResult.longitude;
-          // Set the found site as position target
-          const targetResult = await setLandingPositionTarget(conn, siteResult.latitude, siteResult.longitude);
+        // No explicit target - check existing target first, then auto-find
+        const existingTarget = await getValidLandingTarget(conn);
+        if (existingTarget.valid) {
+          logger.progress(`[Landing] Using existing target: ${existingTarget.name}`);
+          const targetResult = await setLandingPositionTarget(conn, existingTarget.latitude!, existingTarget.longitude!);
           if (targetResult.success) {
-            logger.progress(`[Landing] Auto-selected: ${siteResult.latitude.toFixed(2)}°, ${siteResult.longitude.toFixed(2)}°`);
-            if (siteResult.relaxedRequirements) {
-              logger.info(`[Landing] Note: ${siteResult.relaxedRequirements}`);
+            targetLat = existingTarget.latitude;
+            targetLng = existingTarget.longitude;
+          } else {
+            logger.info('[Landing] Failed to set existing target, falling back to auto-find');
+          }
+        }
+
+        // Fall back to auto-find if no existing target or it failed
+        if (targetLat === undefined) {
+          logger.progress('[Landing] Finding optimal landing site...');
+          const siteResult = await findLandingSite(conn);
+          if (siteResult.found && siteResult.latitude !== undefined && siteResult.longitude !== undefined) {
+            targetLat = siteResult.latitude;
+            targetLng = siteResult.longitude;
+            const targetResult = await setLandingPositionTarget(conn, targetLat, targetLng);
+            if (targetResult.success) {
+              logger.progress(`[Landing] Auto-selected: ${targetLat.toFixed(2)}°, ${targetLng.toFixed(2)}°`);
+              if (siteResult.relaxedRequirements) {
+                logger.info(`[Landing] Note: ${siteResult.relaxedRequirements}`);
+              }
+            } else {
+              logger.info('[Landing] Found site but failed to set target, will land at current trajectory');
             }
           } else {
-            logger.info('[Landing] Found site but failed to set target, will land at current trajectory');
+            logger.info('[Landing] No optimal site found, will land at current trajectory');
           }
-        } else {
-          logger.info('[Landing] No optimal site found, will land at current trajectory');
         }
       }
 
       // Step 2: Deorbit burn (only if target is within 1/4 orbit)
       // If target is farther, let MechJeb handle timing
-      const targetLat = latitude ?? autoFoundLat;
-      const targetLng = longitude ?? autoFoundLng;
 
       let skipDeorbitBurn = targetLat === undefined || targetLng === undefined;
 

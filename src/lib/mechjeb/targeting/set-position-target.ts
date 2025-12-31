@@ -74,7 +74,7 @@ export const setPositionTargetTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 2,
+  tier: 3,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

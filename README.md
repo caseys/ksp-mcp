@@ -25,8 +25,9 @@ Enables LLMs to directly control KSP spacecraft through kOS scripting and MechJe
 
 - **Kerbal Space Program** with the following mods:
   - [kOS](https://github.com/KSP-KOS/KOS) - Scripting and automation
-  - [MechJeb2](https://github.com/MuMech/MechJeb2) - Autopilot and maneuver planning (dev version needed)
-  - [kOS.MechJeb2.Addon](https://github.com/belpyro/kOS.MechJeb2.Addon) - Exposes MechJeb to kOS (in active dev)
+  - [MechJeb2 (dev)](https://github.com/MuMech/MechJeb2) - Autopilot and maneuver planning
+  - [kOS.MechJeb2.Addon (dev)](https://github.com/caseys/kOS.MechJeb2.Addon/tree/develop) - Exposes MechJeb to kOS (dev version needed - fork of belpyro's work until dev is complete)
+
 
 - **kOS Telnet Server** enabled (configured in KSP settings)
 

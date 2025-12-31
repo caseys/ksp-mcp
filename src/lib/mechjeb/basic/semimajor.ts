@@ -56,8 +56,13 @@ export const changeSemiMajorAxisTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        return ctx.successResponse('change_semi_major_axis',
-          `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`);
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        if (result.executed) {
+          const periodInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:PERIOD, 1).', 2000);
+          const period = periodInfo.output.trim();
+          text += `\nOrbital period: ${period}s`;
+        }
+        return ctx.successResponse('change_semi_major_axis', text);
       } else {
         return ctx.errorResponse('change_semi_major_axis', result.error ?? 'Failed');
       }
