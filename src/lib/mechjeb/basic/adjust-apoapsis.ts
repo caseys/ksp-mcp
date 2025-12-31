@@ -9,6 +9,7 @@ import { validateVesselState, STABLE_ORBIT_REQUIREMENTS } from '../../kos/vessel
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to adjust apoapsis.
@@ -54,10 +55,11 @@ export const adjustApoapsisTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 2,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
+      const logger = ctx.createLogger(extra);
 
       // Default altitude: current apoapsis + 10km
       let altitude = args.altitude as number | undefined;
@@ -66,11 +68,15 @@ export const adjustApoapsisTool: ToolDefinition = {
         altitude = orbitInfo ? orbitInfo.apoapsis + 10_000 : 100_000;
       }
 
-      const result = await orchestrator.adjustApoapsis(altitude, args.timeRef as string, { execute: args.execute as boolean });
+      const result = await orchestrator.adjustApoapsis(altitude, args.timeRef as string, {
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'adjust_apoapsis',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           text += await formatResultingOrbit(conn);
         }

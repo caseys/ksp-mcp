@@ -11,6 +11,7 @@ import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { executeSchema, distanceSchema, parseTarget } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node for course correction.
@@ -108,13 +109,27 @@ export const courseCorrectTool: ToolDefinition = {
       }
 
       // Try course correction
-      let result = await orchestrator.courseCorrection(args.targetDistance as number, { target, execute: args.execute as boolean, logger });
+      let result = await orchestrator.courseCorrection(args.targetDistance as number, {
+        target,
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'course_correct',
+      });
 
       // If no encounter, do hohmann transfer first
       if (!result.success && result.error?.toLowerCase().includes('no encounter')) {
-        const hohmannResult = await orchestrator.hohmannTransfer('COMPUTED', false, { target, execute: args.execute as boolean, logger });
+        const hohmannResult = await orchestrator.hohmannTransfer('COMPUTED', false, {
+          target,
+          execute: args.execute as boolean,
+          logger,
+          callerTool: 'course_correct',
+        });
         if (hohmannResult.success) {
-          result = await orchestrator.courseCorrection(args.targetDistance as number, { execute: args.execute as boolean, logger });
+          result = await orchestrator.courseCorrection(args.targetDistance as number, {
+            execute: args.execute as boolean,
+            logger,
+            callerTool: 'course_correct',
+          });
         }
       }
 
@@ -123,7 +138,7 @@ export const courseCorrectTool: ToolDefinition = {
       }
 
       const execInfo = result.executed ? ' (executed)' : '';
-      let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+      let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
       // Always show corrected trajectory - critical for LLM to know state
       const { queryTargetEncounterInfo } = await import('../shared.js');

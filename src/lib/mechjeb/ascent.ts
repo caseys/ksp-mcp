@@ -13,6 +13,7 @@ import type {
   AscentResult
 } from '../types.js';
 import { delay } from '../utils/progress.js';
+import { formatOrbit } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { kickstartWarp } from '../kos/warp.js';
@@ -101,7 +102,7 @@ export class AscentHandle {
    * More reliable than blocking kOS UNTIL loop - handles connection recovery
    */
   async waitForCompletion(pollIntervalMs = 5000): Promise<AscentResult> {
-    this.logger.progress('[Ascent] Waiting for MechJeb to complete ascent...');
+    this.logger.progress('[Ascent] Waiting to complete...');
 
     const MAX_WAIT_MS = 900_000; // 15 minutes max
 
@@ -115,37 +116,50 @@ export class AscentHandle {
     this.logger.info(`[Ascent] Target: periapsis >= ${Math.round(atmHeight/1000)}km (atmosphere height)`);
 
     let lastLogTime = 0;
+    let prevDeltaV: number | null = null;
+    let lastStatus = '';
 
     interface AscentPollState {
       enabled: boolean;
+      status: string;
       apoapsis: number;
       periapsis: number;
       body: string;
       inOrbit: boolean;
+      deltaV: number;
+      throttle: number;
     }
 
     const result = await pollWithBlackoutResilience<AscentPollState>({
       poll: async () => {
+        // Use pipe delimiters for robust parsing (status may contain spaces/colons)
         const statusResult = await this.conn.execute(
-          'SET _E TO ADDONS:MJ:ASCENT:ENABLED. ' +
+          'SET _ASC TO ADDONS:MJ:ASCENT. ' +
+          'SET _E TO _ASC:ENABLED. ' +
+          'SET _S TO _ASC:STATUS. ' +
           'SET _A TO ROUND(APOAPSIS). ' +
           'SET _P TO ROUND(PERIAPSIS). ' +
           'SET _B TO SHIP:BODY:NAME. ' +
-          'PRINT "E:" + _E + " A:" + _A + " P:" + _P + " B:" + _B.'
+          'SET _DV TO ROUND(SHIP:DELTAV:CURRENT, 1). ' +
+          'SET _THR TO ROUND(THROTTLE, 2). ' +
+          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _DV + "|" + _THR.'
         );
 
-        const statusMatch = statusResult.output.match(/E:(True|False)\s*A:(-?\d+)\s*P:(-?\d+)\s*B:(\w+)/i);
+        const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)\|([\d.]+)/i);
         if (!statusMatch) {
           throw new Error('Failed to parse ascent status');
         }
 
         const enabled = statusMatch[1].toLowerCase() === 'true';
-        const apoapsis = Number.parseInt(statusMatch[2]);
-        const periapsis = Number.parseInt(statusMatch[3]);
-        const body = statusMatch[4];
+        const status = statusMatch[2].trim();
+        const apoapsis = Number.parseInt(statusMatch[3]);
+        const periapsis = Number.parseInt(statusMatch[4]);
+        const body = statusMatch[5];
+        const deltaV = Number.parseFloat(statusMatch[6]);
+        const throttle = Number.parseFloat(statusMatch[7]);
         const inOrbit = periapsis >= atmHeight;
 
-        return { enabled, apoapsis, periapsis, body, inOrbit };
+        return { enabled, status, apoapsis, periapsis, body, inOrbit, deltaV, throttle };
       },
 
       isDone: (state) => state.inOrbit || !state.enabled,
@@ -157,17 +171,31 @@ export class AscentHandle {
       context: 'Ascent',
 
       onPoll: async (state) => {
-        // Kickstart warp when coasting to apoapsis (ascent burn complete, still suborbital)
-        if (state.periapsis < 0 && state.apoapsis >= this.targetAltitude * 0.9) {
-          await kickstartWarp(this.conn, this.logger);
-        }
-
-        // Log progress every 10 seconds
+        // Log status changes
         const now = Date.now();
-        if (now - lastLogTime >= 10_000) {
-          this.logger.progress(`[Ascent] Apop:${Math.round(state.apoapsis/1000)}km Peri:${Math.round(state.periapsis/1000)}km`);
+        if (state.status && state.status !== lastStatus) {
+          this.logger.progress(`[Ascent] ${state.status}  ${formatOrbit(state.apoapsis, state.periapsis)}`);
+          lastStatus = state.status;
           lastLogTime = now;
         }
+
+        // Log progress every 20 seconds at least
+        if (now - lastLogTime >= 20_000) {
+          this.logger.progress(`[Ascent] ${formatOrbit(state.apoapsis, state.periapsis)}`);
+          lastLogTime = now;
+        }
+
+        // Kickstart warp when coasting (not burning) and not yet in orbit
+        const isCoasting = state.throttle === 0;
+        const dvStable = prevDeltaV !== null && Math.abs(state.deltaV - prevDeltaV) < 1;
+        const notYetInOrbit = state.periapsis < this.targetAltitude*0.85;
+
+        if (notYetInOrbit && isCoasting && dvStable) {
+          await kickstartWarp(this.conn, this.logger, state);
+        }
+
+        // Update previous delta-v for next poll
+        prevDeltaV = state.deltaV;
       },
     });
 
@@ -186,7 +214,7 @@ export class AscentHandle {
 
       if (!result.timedOut) {
         this.logger.progress(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
-        this.logger.progress(`[Ascent] APO: ${Math.round(apoapsis/1000)}km, PER: ${Math.round(periapsis/1000)}km - ${inOrbit ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
+        this.logger.progress(`[Ascent] ${formatOrbit(apoapsis, periapsis)} - ${inOrbit ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
 
         // Clear any leftover maneuver nodes
         try {
@@ -207,7 +235,7 @@ export class AscentHandle {
     this.logger.error(`[Ascent] TIMEOUT after ${MAX_WAIT_MS/1000}s`);
     const finalApoapsis = result.result?.apoapsis ?? 0;
     const finalPeriapsis = result.result?.periapsis ?? 0;
-    this.logger.progress(`[Ascent] Final: Apop: ${Math.round(finalApoapsis/1000)}km, Peri: ${Math.round(finalPeriapsis/1000)}km`);
+    this.logger.progress(`[Ascent] Final: ${formatOrbit(finalApoapsis, finalPeriapsis)}`);
 
     return {
       success: false,
@@ -468,16 +496,29 @@ export class AscentProgram {
       this.logger.warn('[Ascent] Autopilot may not have engaged after 10 attempts, proceeding anyway');
     }
 
-    // Release controls and stage to begin launch
+    // Release controls
     await this.conn.execute('UNLOCK THROTTLE.');
     await delay(100);
     await this.conn.execute('SAS OFF.');
     await delay(100);
 
-    // Stage to begin launch - this is the critical moment
-    await this.conn.execute('STAGE.');
-    await delay(500);  // Let the stage command process
-    this.logger.progress('[Ascent] LAUNCHED - MechJeb in control');
+    // Check if we need to stage (stationary on pad vs already moving)
+    // On Kerbin: need to stage to ignite engines and release clamps
+    // On other bodies: may already be ready to fly without staging
+    const alt1Result = await this.conn.execute('PRINT ROUND(ALTITUDE, 1).');
+    const alt1 = Number.parseFloat(alt1Result.output.match(/-?[\d.]+/)?.[0] ?? '0');
+    await delay(500);
+    const alt2Result = await this.conn.execute('PRINT ROUND(ALTITUDE, 1).');
+    const alt2 = Number.parseFloat(alt2Result.output.match(/-?[\d.]+/)?.[0] ?? '0');
+
+    if (Math.abs(alt2 - alt1) < 1) {
+      // Not moving - need to stage to start
+      await this.conn.execute('STAGE.');
+      await delay(500);
+      this.logger.progress('[Ascent] STAGED');
+    } else {
+      this.logger.progress('[Ascent] LAUNCHED');
+    }
 
     // Enable 2x warp after 15 seconds if autoWarp is enabled (helps during initial climb)
     // Additional 4x warp is enabled in waitForCompletion() when APO stabilizes (coast phase)
@@ -485,12 +526,12 @@ export class AscentProgram {
       setTimeout(async () => {
         try {
           // Clear any existing warp state before enabling 2x warp
-          await this.conn.execute('SET WARP TO 0. WAIT 0.1. SET WARP TO 1.');
+          await this.conn.execute('SET WARP TO 0. WAIT 0.3. SET WARP TO 1.');
           this.logger.info('[Ascent] Enabled 2x warp');
         } catch {
           // Ignore warp errors - non-critical
         }
-      }, 15_000);
+      }, 20_000);
     }
 
     // Create handle for monitoring (pass logger for waitForCompletion)
@@ -516,8 +557,8 @@ export const launchAscentTool: ToolDefinition = {
   name: 'launch_and_circularize',
   description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent.',
   inputSchema: {
-    altitude: distanceSchema.optional().describe('Target orbit altitude in meters, not required'),
-    inclination: z.number().optional().default(0).describe('Target orbit inclination in degrees, not required'),
+    altitude: distanceSchema.optional().describe('Optional target orbit altitude in meters, default above atmosphere.'),
+    inclination: z.number().optional().default(0).describe('Optional target inclination in degrees, equatorial=0, Polar=90.'),
     // Note: Circularization is always enabled to make things simpler for LLMs
     // circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
     wait: z.boolean().optional().default(true).describe('Wait for orbit to be achieved (default: true). Set false to return immediately after launch.'),
@@ -567,14 +608,14 @@ export const launchAscentTool: ToolDefinition = {
         if (result.success) {
           const orbit = result.finalOrbit;
           return ctx.successResponse('launch',
-            `Orbit achieved! Apop: ${(orbit.apoapsis / 1000).toFixed(1)} km, Peri: ${(orbit.periapsis / 1000).toFixed(1)} km\nNext: set target for transfer`);
+            `Orbit achieved! ${formatOrbit(orbit.apoapsis, orbit.periapsis)}\nNext: set target for transfer`);
         } else {
           return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
         }
       } else {
         // Return immediately after launch
         return ctx.successResponse('launch',
-          `Launch started! Target: ${(altitude / 1000).toFixed(0)} km orbit. Use status to monitor progress.`);
+          `Launch started! Target: ${(altitude / 1000).toFixed(0)} km orbit.`);
       }
     } catch (error) {
       return ctx.errorResponse('launch', error instanceof Error ? error.message : String(error));

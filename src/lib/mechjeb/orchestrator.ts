@@ -55,6 +55,8 @@ export interface ManeuverOptions {
   execute?: boolean;
   /** Structured logger for MCP notifications. */
   logger?: McpLogger;
+  /** Name of the calling tool (for execution logging context). */
+  callerTool?: string;
 }
 
 /**
@@ -75,6 +77,8 @@ export interface OrchestratedResult extends ManeuverResult {
  * @param targetType - How to interpret target: 'auto' (try body then vessel), 'body', or 'vessel'
  * @param execute - Whether to execute the node after planning (default: true)
  * @param planFn - The function that creates the maneuver node
+ * @param logger - Optional MCP logger
+ * @param callerTool - Optional name of calling tool for logging context
  * @returns Combined result from planning and optional execution
  */
 export async function withTargetAndExecute(
@@ -83,7 +87,8 @@ export async function withTargetAndExecute(
   targetType: 'auto' | 'body' | 'vessel',
   execute: boolean,
   planFn: () => Promise<ManeuverResult>,
-  logger?: McpLogger
+  logger?: McpLogger,
+  callerTool?: string
 ): Promise<OrchestratedResult> {
 
   // Handle target setting if provided
@@ -109,7 +114,7 @@ export async function withTargetAndExecute(
   }
 
   // Execute the node
-  const execResult = await executeNode(conn, { logger });
+  const execResult = await executeNode(conn, { logger, callerTool });
 
   if (!execResult.success) {
     return {
@@ -248,10 +253,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       circularize(this.conn, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -263,10 +269,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       adjustPeriapsis(this.conn, altitude, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -278,10 +285,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'PERIAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       adjustApoapsis(this.conn, altitude, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -296,7 +304,7 @@ export class ManeuverOrchestrator {
     capture: boolean = false,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
 
     // Get the target name for post-execution validation
     // We need this before execution since TARGET might change
@@ -310,7 +318,8 @@ export class ManeuverOrchestrator {
     // Plan and optionally execute via standard flow
     const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
       hohmannTransfer(this.conn, timeRef, capture),
-      logger
+      logger,
+      callerTool
     );
 
     // If planning failed or not executed, return as-is
@@ -379,10 +388,11 @@ export class ManeuverOrchestrator {
     finalPeA: number,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       courseCorrection(this.conn, finalPeA, logger),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -394,10 +404,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'EQ_NEAREST_AD',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       changeInclination(this.conn, newInclination, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -410,10 +421,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       ellipticize(this.conn, peA, apA, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -425,10 +437,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       changeLAN(this.conn, newLAN, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -440,10 +453,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       changeLongitudeOfPeriapsis(this.conn, newLong, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -456,10 +470,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       resonantOrbit(this.conn, numerator, denominator, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -470,10 +485,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'CLOSEST_APPROACH',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       killRelativeVelocity(this.conn, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -485,10 +501,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       changeSemiMajorAxis(this.conn, semiMajorAxis, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -500,10 +517,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       changeEccentricity(this.conn, eccentricity, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -514,10 +532,11 @@ export class ManeuverOrchestrator {
     timeRef: string = 'REL_NEAREST_AD',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       matchPlane(this.conn, timeRef),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -528,10 +547,11 @@ export class ManeuverOrchestrator {
     targetPeriapsis: number,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       returnFromMoon(this.conn, targetPeriapsis),
-      logger
+      logger,
+      callerTool
     );
   }
 
@@ -545,7 +565,7 @@ export class ManeuverOrchestrator {
     waitForPhaseAngle: boolean = true,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
 
     // Get the target name for post-execution validation
     let targetName = target;
@@ -557,7 +577,8 @@ export class ManeuverOrchestrator {
     // Plan and optionally execute via standard flow
     const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
       interplanetaryTransfer(this.conn, { waitForPhaseAngle, logger }),
-      logger
+      logger,
+      callerTool
     );
 
     // If planning failed or not executed, return as-is

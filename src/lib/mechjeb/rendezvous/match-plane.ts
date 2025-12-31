@@ -4,12 +4,13 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, checkPostBurnPeriapsis, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState, CLEAN_ORBIT_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to match orbital plane with the target.
@@ -38,7 +39,14 @@ export async function matchPlane(
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:PLANE("${timeRef}").`;
-  return executeManeuverCommand(conn, cmd, 10_000, 'match_planes');
+  const result = await executeManeuverCommand(conn, cmd, 10_000, 'match_planes');
+
+  // Check for dangerous post-burn trajectory
+  if (result.success) {
+    result.warning = await checkPostBurnPeriapsis(conn);
+  }
+
+  return result;
 }
 
 // ============================================================================
@@ -63,10 +71,11 @@ export const matchPlanesTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 1,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
+      const logger = ctx.createLogger(extra);
 
       // Auto-select closest vessel if not provided
       let target = args.target as string | undefined;
@@ -77,11 +86,19 @@ export const matchPlanesTool: ToolDefinition = {
         }
       }
 
-      const result = await orchestrator.matchPlane(args.timeRef as string, { target, execute: args.execute as boolean });
+      const result = await orchestrator.matchPlane(args.timeRef as string, {
+        target,
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'match_planes',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        if (result.warning) {
+          text += `\n${result.warning}`;
+        }
         if (result.executed) {
           // Show both inclinations - relative inc is complex to calculate
           const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2) + "|" + ROUND(TARGET:ORBIT:INCLINATION, 2).', 2000);

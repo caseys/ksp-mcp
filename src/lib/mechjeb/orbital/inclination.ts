@@ -4,11 +4,12 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, checkPostBurnPeriapsis, type ManeuverResult } from '../shared.js';
 import { validateVesselState, CLEAN_ORBIT_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to change orbital inclination.
@@ -29,7 +30,14 @@ export async function changeInclination(
   }
 
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEINCLINATION(${newInclination}, "${timeRef}").`;
-  return executeManeuverCommand(conn, cmd, 10_000, 'change_inclination');
+  const result = await executeManeuverCommand(conn, cmd, 10_000, 'change_inclination');
+
+  // Check for dangerous post-burn trajectory
+  if (result.success) {
+    result.warning = await checkPostBurnPeriapsis(conn);
+  }
+
+  return result;
 }
 
 // ============================================================================
@@ -38,13 +46,13 @@ export async function changeInclination(
 
 export const changeInclinationTool: ToolDefinition = {
   name: 'change_inclination',
-  description: 'Tilt orbit. Use for polar orbit or equatorial orbit.',
+  description: 'Change orbit plane angle.',
   inputSchema: {
     newInclination: z.number().optional().default(0).describe('Target inclination in degrees (default: 0 for equatorial)'),
     timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])
       .optional()
       .default('EQ_NEAREST_AD')
-      .describe('When to execute: at ascending node, descending node, nearest AN/DN, or highest AD'),
+      .describe('When to execute: at nearest AN/DN (defualt), ascending node, descending node, highest AD'),
     execute: executeSchema,
   },
   annotations: {
@@ -54,15 +62,23 @@ export const changeInclinationTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 2,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
-      const result = await orchestrator.changeInclination(args.newInclination as number, args.timeRef as string, { execute: args.execute as boolean });
+      const logger = ctx.createLogger(extra);
+      const result = await orchestrator.changeInclination(args.newInclination as number, args.timeRef as string, {
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'change_inclination',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        if (result.warning) {
+          text += `\n${result.warning}`;
+        }
         if (result.executed) {
           const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 1).', 2000);
           const inc = incInfo.output.trim();

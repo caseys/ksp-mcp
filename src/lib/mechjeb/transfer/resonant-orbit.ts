@@ -9,6 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to establish a resonant orbit.
@@ -69,15 +70,20 @@ export const resonantOrbitTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 2,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
-      const result = await orchestrator.resonantOrbit(args.numerator as number, args.denominator as number, args.timeRef as string, { execute: args.execute as boolean });
+      const logger = ctx.createLogger(extra);
+      const result = await orchestrator.resonantOrbit(args.numerator as number, args.denominator as number, args.timeRef as string, {
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'resonant_orbit',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           const orbitInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:PERIOD, 1) + "|" + ROUND(APOAPSIS/1000, 1).', 2000);
           const match = orbitInfo.output.match(/([\d.]+)\|([\d.]+)/);

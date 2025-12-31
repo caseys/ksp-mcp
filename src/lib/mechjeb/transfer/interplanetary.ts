@@ -10,6 +10,7 @@ import { validateVesselState } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema, type McpLogger, nullLogger } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 export interface InterplanetaryOptions {
   waitForPhaseAngle?: boolean;
@@ -104,11 +105,16 @@ export const interplanetaryTransferTool: ToolDefinition = {
         }
       }
 
-      const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle as boolean, { target, execute: args.execute as boolean, logger });
+      const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle as boolean, {
+        target,
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'interplanetary_transfer',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Include warning if present (crash trajectory, close approach, etc.)
         if (result.warning) {

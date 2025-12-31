@@ -8,6 +8,7 @@ import { validateVesselState } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to return from a moon to its parent body.
@@ -52,15 +53,20 @@ export const returnFromMoonTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 2,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
-      const result = await orchestrator.returnFromMoon(args.targetPeriapsis as number, { execute: args.execute as boolean });
+      const logger = ctx.createLogger(extra);
+      const result = await orchestrator.returnFromMoon(args.targetPeriapsis as number, {
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'return_from_moon',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           // Show return trajectory info
           const trajInfo = await conn.execute(

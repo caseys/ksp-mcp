@@ -12,6 +12,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../tool-types.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
+import { formatTime } from '../../utils/format.js';
 import { setLandingPositionTarget } from './shared.js';
 
 // ============================================================================
@@ -240,11 +241,6 @@ IF found {
   };
 }
 
-function formatTime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-}
 
 // ============================================================================
 // Tool Definition

@@ -9,6 +9,7 @@ import { validateVesselState, CLEAN_ORBIT_REQUIREMENTS } from '../../kos/vessel/
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to change the Longitude of Ascending Node (LAN).
@@ -55,15 +56,20 @@ export const changeAscendingNodeTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 3,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
-      const result = await orchestrator.changeLAN(args.lan as number, args.timeRef as string, { execute: args.execute as boolean });
+      const logger = ctx.createLogger(extra);
+      const result = await orchestrator.changeLAN(args.lan as number, args.timeRef as string, {
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'change_ascending_node',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           const lanInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:LAN, 2).', 2000);
           const lan = lanInfo.output.trim();

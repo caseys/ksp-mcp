@@ -9,6 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node for a Hohmann transfer to the target.
@@ -125,10 +126,11 @@ export const hohmannTransferTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 1,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
+      const logger = ctx.createLogger(extra);
 
       // Auto-select target if not provided (use 2nd closest to avoid targeting current SOI body)
       let target = args.target as string | undefined;
@@ -140,12 +142,17 @@ export const hohmannTransferTool: ToolDefinition = {
       }
 
       // Note: Using hardcoded defaults - MechJeb does not have working capture logic
-      const result = await orchestrator.hohmannTransfer('COMPUTED', false, { target, execute: args.execute as boolean });
+      const result = await orchestrator.hohmannTransfer('COMPUTED', false, {
+        target,
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'hohmann_transfer',
+      });
 
       if (result.success) {
         const nodeCount = result.nodesCreated ?? 1;
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `${nodeCount} node(s): ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `${nodeCount} node(s): ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Query current encounter info for guidance
         const { queryTargetEncounterInfo } = await import('../shared.js');

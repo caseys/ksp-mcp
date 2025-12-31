@@ -12,6 +12,7 @@ import type { KosConnection } from '../../transport/kos-connection.js';
 import { config } from '../../config/index.js';
 import { globalKosMonitor } from '../../utils/kos-monitor.js';
 import { delay } from '../utils/progress.js';
+import { formatTime } from '../utils/format.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 
 export interface RunScriptResult {
@@ -197,7 +198,7 @@ export async function runScript(
       if (checkResult.output.includes('True')) {
         // Script completed successfully
         const executionTime = Date.now() - startTime;
-        log.progress(`[Script] Completed in ${(executionTime / 1000).toFixed(1)}s`);
+        log.progress(`[Script] Completed in ${formatTime(executionTime / 1000)}`);
         return {
           success: true,
           output: globalKosMonitor.getRecentLines(100),
@@ -208,7 +209,7 @@ export async function runScript(
 
       // Log progress every 5 seconds
       if (elapsed - lastLogTime >= 5000) {
-        log.progress(`[Script] Running... (${(elapsed / 1000).toFixed(0)}s elapsed)`);
+        log.progress(`[Script] Running... (${formatTime(elapsed / 1000)} elapsed)`);
         lastLogTime = elapsed;
       }
 

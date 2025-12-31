@@ -11,6 +11,7 @@ import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
 import { delay } from '../utils/progress.js';
+import { formatTime, formatOrbit } from '../utils/format.js';
 
 const TELEMETRY_DELAY_MS = 100;
 
@@ -173,19 +174,6 @@ export async function getMechJebInfo(conn: KosConnection): Promise<MechJebInfo> 
   };
 }
 
-/**
- * Format time in seconds to human-readable format
- */
-function formatTime(seconds: number): string {
-  if (seconds < 0) return '(past)';
-  if (seconds < 60) return `${Math.floor(seconds)}s`;
-
-  const hours = Math.floor(seconds / 3600);
-  const minutes = Math.floor((seconds % 3600) / 60);
-  const secs = Math.floor(seconds % 60);
-
-  return hours > 0 ? `${hours}h ${minutes}m ${secs}s` : `${minutes}m ${secs}s`;
-}
 
 /**
  * Ship telemetry for operation outputs
@@ -374,9 +362,16 @@ export async function getShipTelemetry(
   lines.push('=== Ship Status ===');
   lines.push(`${vesselType} ${vesselStatus}`)
   lines.push(`SOI Body: ${soi}`);
-  lines.push(`Apoapsis: ${isEscapeTrajectory ? 'Escape' : `${(apo / 1000).toFixed(1)} km`}`);
-  lines.push(`Periapsis: ${isImpactTrajectory ? 'Impact' : `${(per / 1000).toFixed(1)} km`}`);
-  lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : `${period.toFixed(0)}s`} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
+  // Orbit display (Ap by Pe format)
+  if (isEscapeTrajectory || isImpactTrajectory) {
+    const fmtAlt = (m: number) => { const km = m / 1000; return (km % 1 === 0 ? km.toFixed(0) : km.toFixed(1)) + 'km'; };
+    const apoStr = isEscapeTrajectory ? 'Escape' : fmtAlt(apo);
+    const peStr = isImpactTrajectory ? 'Impact' : fmtAlt(per);
+    lines.push(`Orbit: ${apoStr} by ${peStr}`);
+  } else {
+    lines.push(`Orbit: ${formatOrbit(apo, per)}`);
+  }
+  lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : formatTime(period)} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
   lines.push(`Vessel: ${vesselName}`);
 
   if (hasNode) {

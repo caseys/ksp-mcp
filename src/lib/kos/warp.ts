@@ -9,6 +9,7 @@
 import { KosConnection } from '../../transport/kos-connection.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
+import { formatTime } from '../utils/format.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -37,33 +38,36 @@ interface CrashCheck {
  * This works around a KSP/MechJeb quirk where warp doesn't start
  * reliably without a "kick" to get it going.
  */
-export async function kickstartWarp(conn: KosConnection, logger: McpLogger): Promise<boolean> {
+export async function kickstartWarp(conn: KosConnection, logger: McpLogger, _state?: unknown): Promise<boolean> {
   // Check warp and pulse in one kOS command to reduce round trips
   // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
+  /*
   const result = await conn.execute(
     'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
     3000
   );
+  const kicked = result.output.includes('KICKED');
+  if (kicked) {
+    logger.progress('[Execute Node] Warp kickstart MechJeb');
+  }
+  */
+  const kicked = true;
 
   // Try to increase warp speed, respecting physics vs rails mode limits
   // Physics warp max is 4x (index 2), rails warp max is much higher (index 6+)
   await conn.execute(
     'SET maxWarp TO CHOOSE 2 IF KUNIVERSE:TIMEWARP:MODE = "PHYSICS" ELSE 6. ' +
-    'IF WARP > 0 AND WARP < maxWarp { SET WARP TO WARP + 1. }',
+    //'IF WARP > 0 AND WARP < maxWarp { SET WARP TO WARP + 1. }',
+    'IF WARP < maxWarp { SET WARP TO WARP + 1. }',
     3000
   );
+  logger.progress('[Execute Node] Warp INCREASE after kickstart');
 
-  const kicked = result.output.includes('KICKED');
-  if (kicked) {
-    logger.progress('[Execute Node] Warp kickstart MechJeb');
-  }
   return kicked;
 }
 
 /**
  * Stop time warp by setting warp level to 0.
- * Note: We use SET WARP TO 0 rather than CANCELWARP() to avoid
- * interfering with the kickstartWarp workaround.
  */
 export async function stopWarp(conn: KosConnection): Promise<void> {
   await conn.execute('SET WARP TO 0.', 3000);
@@ -208,7 +212,7 @@ async function warpToNode(
     return {
       success: false,
       error: `Cannot warp to node - will CRASH first!\n` +
-             `Impact in ${crashCheck.etaToPeriapsis}s (node ETA: ${initialEta.toFixed(0)}s)\n` +
+             `Impact in ${formatTime(crashCheck.etaToPeriapsis ?? 0)} (node ETA: ${formatTime(initialEta)})\n` +
              `Use crash_avoidance tool first.`,
     };
   }
@@ -217,13 +221,13 @@ async function warpToNode(
     return {
       success: false,
       error: `Cannot warp to node - will CRASH in ${crashCheck.encounterBody}!\n` +
-             `Node is after SOI transition (${crashCheck.etaToSOI}s)\n` +
+             `Node is after SOI transition (${formatTime(crashCheck.etaToSOI ?? 0)})\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
              `Use course_correct to fix trajectory first.`,
     };
   }
 
-  log.progress(`[Warp] Warping to node T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
+  log.progress(`[Warp] Warping to node T-${formatTime(leadTime)} (ETA: ${formatTime(initialEta)})`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -238,7 +242,7 @@ async function warpToNode(
     pollIntervalMs: POLL_INTERVAL_MS,
     logger: log,
     context: 'Warp',
-    onPoll: (eta) => log.progress(`[Warp] Node ETA: ${eta.toFixed(0)}s`),
+    onPoll: (eta) => log.progress(`[Warp] Node ETA: ${formatTime(eta)}`),
   });
 
   if (result.success) {
@@ -270,7 +274,7 @@ async function warpToSOI(
   const currentBody = await queryValue(conn, 'SHIP:BODY:NAME');
   const soiEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
 
-  log.progress(`[Warp] Current body: ${currentBody}, SOI transition in ${soiEta.toFixed(0)}s`);
+  log.progress(`[Warp] Current body: ${currentBody}, SOI transition in ${formatTime(soiEta)}`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -301,9 +305,9 @@ async function warpToSOI(
     context: 'Warp',
     onPoll: (state) => {
       if (state.eta !== null && state.eta < 100_000) {
-        log.progress(`[Warp] S.O.I. ETA: ${state.eta.toFixed(0)}s`);
+        log.progress(`[Warp] S.O.I. ETA: ${formatTime(state.eta)}`);
       }
-      if (state.eta !== null && state.eta > 10) {
+      if (state.eta !== null && state.eta > 15_000) {
         kickstartWarp(conn, log)
       }
     },
@@ -311,7 +315,7 @@ async function warpToSOI(
 
   if (result.success && result.result) {
     const newBody = result.result.body;
-    log.progress(`[Warp] Crossed into ${newBody} S.O.I.`);
+    log.progress(`[Warp] Crossed into ${newBody} S.O.I. Ciculrize to establish a safe orbit.`);
 
     // Stop warp and wait for KSP to settle
     await stopWarp(conn);
@@ -363,7 +367,7 @@ async function warpToOrbitalPoint(
     return {
       success: false,
       error: `Cannot warp to ${point.toLowerCase()} - will CRASH first!\n` +
-             `Impact in ${crashCheck.etaToPeriapsis}s (before ${point.toLowerCase()})\n` +
+             `Impact in ${formatTime(crashCheck.etaToPeriapsis ?? 0)} (before ${point.toLowerCase()})\n` +
              `Use crash_avoidance tool first.`,
     };
   }
@@ -373,13 +377,13 @@ async function warpToOrbitalPoint(
     return {
       success: false,
       error: `Cannot warp to ${point.toLowerCase()} - will CRASH in ${crashCheck.encounterBody}!\n` +
-             `S.O.I. transition in ${crashCheck.etaToSOI}s (before ${point.toLowerCase()} at ${initialEta.toFixed(0)}s)\n` +
+             `S.O.I. transition in ${formatTime(crashCheck.etaToSOI ?? 0)} (before ${point.toLowerCase()} at ${formatTime(initialEta)})\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
              `Use course_correct to fix trajectory first.`,
     };
   }
 
-  log.progress(`[Warp] Warping to ${point.toLowerCase()} T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
+  log.progress(`[Warp] Warping to ${point.toLowerCase()} T-${formatTime(leadTime)} (ETA: ${formatTime(initialEta)})`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -394,7 +398,7 @@ async function warpToOrbitalPoint(
     pollIntervalMs: POLL_INTERVAL_MS,
     logger: log,
     context: 'Warp',
-    onPoll: (eta) => log.progress(`[Warp] ${point} ETA: ${eta.toFixed(0)}s`),
+    onPoll: (eta) => log.progress(`[Warp] ${point} ETA: ${formatTime(eta)}`),
   });
 
   if (result.success) {
@@ -482,8 +486,8 @@ export async function warpForward(
   if (crashCheck.willCrashCurrentSOI) {
     return {
       success: false,
-      error: `Cannot warp forward ${seconds}s - will CRASH first!\n` +
-             `Impact in ${crashCheck.etaToPeriapsis}s\n` +
+      error: `Cannot warp forward ${formatTime(seconds)} - will CRASH first!\n` +
+             `Impact in ${formatTime(crashCheck.etaToPeriapsis ?? 0)}\n` +
              `Use crash_avoidance tool first.`,
     };
   }
@@ -491,14 +495,14 @@ export async function warpForward(
   if (crashCheck.willCrashInEncounter) {
     return {
       success: false,
-      error: `Cannot warp forward ${seconds}s - will CRASH in ${crashCheck.encounterBody}!\n` +
-             `SOI transition in ${crashCheck.etaToSOI}s\n` +
+      error: `Cannot warp forward ${formatTime(seconds)} - will CRASH in ${crashCheck.encounterBody}!\n` +
+             `SOI transition in ${formatTime(crashCheck.etaToSOI ?? 0)}\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
              `Use course_correct to fix trajectory first.`,
     };
   }
 
-  log.progress(`[Warp] Warping forward ${seconds}s...`);
+  log.progress(`[Warp] Warping forward ${formatTime(seconds)}...`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -546,7 +550,7 @@ export const warpTool: ToolDefinition = {
       z.enum(['node', 'soi', 'periapsis', 'apoapsis']),
       z.number(),
     ]).describe('Warp target: "node", "soi", "periapsis", "apoapsis", or a number of seconds to warp forward'),
-    leadTime: z.number().optional().default(60).describe('Seconds before target to stop warping (default: 60)'),
+    leadTime: z.number().optional().default(10).describe('Seconds before target to stop warping (default: 15)'),
   },
   annotations: {
     readOnlyHint: false,

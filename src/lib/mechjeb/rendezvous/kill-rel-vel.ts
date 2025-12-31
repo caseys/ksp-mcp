@@ -10,6 +10,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to kill relative velocity with the target.
@@ -78,10 +79,11 @@ export const matchVelocitiesTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 2,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
+      const logger = ctx.createLogger(extra);
 
       // Auto-select closest vessel if not provided
       let target = args.target as string | undefined;
@@ -92,11 +94,16 @@ export const matchVelocitiesTool: ToolDefinition = {
         }
       }
 
-      const result = await orchestrator.killRelVel(args.timeRef as string, { target, execute: args.execute as boolean });
+      const result = await orchestrator.killRelVel(args.timeRef as string, {
+        target,
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'match_velocities',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           const relVelInfo = await conn.execute('PRINT ROUND((TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT):MAG, 1).', 2000);
           const relVel = relVelInfo.output.trim();

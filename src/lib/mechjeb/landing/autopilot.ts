@@ -8,6 +8,7 @@ import { nullLogger, parseTarget } from '../../tool-types.js';
 import { setActiveOperation, clearActiveOperation } from '../../../utils/operation-state.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
+import { formatTime } from '../../utils/format.js';
 import {
   getLandingStatus,
   setLandingConfig,
@@ -213,20 +214,14 @@ async function logAltitude(conn: KosConnection, status: LandingStatus, log: McpL
       const altitude = Number.parseInt(match[1]);
       const vSpeed = Number.parseInt(match[2]);
       const altStr = altitude > 1000 ? `${(altitude / 1000).toFixed(1)}km` : `${altitude}m`;
-      const eta = status.timeToLanding !== undefined ? ` | ETA: ${formatTime(status.timeToLanding)}` : '';
-      log.progress(`[Landing] ALT: ${altStr} | VEL: ${vSpeed} m/s${eta}`);
+      const eta = status.timeToLanding !== undefined ? ` | E-T-A: ${formatTime(status.timeToLanding)}` : '';
+      log.progress(`[Landing] Altitude: ${altStr} | Speed: ${vSpeed} m/sec${eta}`);
     }
   } catch {
     // Ignore errors during altitude logging
   }
 }
 
-function formatTime(seconds: number | undefined): string {
-  if (seconds === undefined) return 'unknown';
-  if (seconds < 60) return `${seconds.toFixed(0)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-}
 
 // ============================================================================
 // Tool Definition
@@ -318,6 +313,29 @@ export const landTool: ToolDefinition = {
     const logger = ctx.createLogger(extra);
 
     try {
+      // Step 0: Validate vessel state - must be in orbit or flying
+      const statusCheck = await conn.execute('PRINT SHIP:STATUS.', 2000);
+      const vesselStatus = statusCheck.output.trim().split('\n').pop()?.trim().toUpperCase() ?? '';
+
+      const validStatuses = ['FLYING', 'ORBITING', 'ESCAPING', 'SUB_ORBITAL'];
+      if (!validStatuses.some(s => vesselStatus.includes(s))) {
+        clearActiveOperation();
+
+        // Provide detailed error based on status
+        let errorDetail = '';
+        if (vesselStatus.includes('LANDED') || vesselStatus.includes('SPLASHED')) {
+          errorDetail = `Vessel is already ${vesselStatus.toLowerCase()}. Use launch tool to take off first.`;
+        } else if (vesselStatus.includes('PRELAUNCH')) {
+          errorDetail = 'Vessel is on the launchpad. Use launch tool to reach orbit first.';
+        } else if (vesselStatus.includes('DOCKED')) {
+          errorDetail = 'Vessel is docked. Undock first, then use land tool.';
+        } else {
+          errorDetail = `Current status: ${vesselStatus}. Must be in orbit or flying to land.`;
+        }
+
+        return ctx.errorResponse('land', `Cannot start landing: ${errorDetail}`);
+      }
+
       // Step 1: Resolve landing target
       const target = args.target as string | undefined;
       const latitude = args.latitude as number | undefined;
@@ -540,8 +558,29 @@ export const landTool: ToolDefinition = {
         const monitorResult = await monitorLanding(conn, { logger });
 
         if (monitorResult.success) {
+          // Query landing site details for informative response
+          let landingDetails = '';
+          try {
+            const siteInfo = await conn.execute(
+              'PRINT SHIP:BODY:NAME + "|" + SHIP:GEOPOSITION:TERRAINHEIGHT + "|" + SHIP:BIOME.',
+              3000
+            );
+            const siteMatch = siteInfo.output.match(/([^|]+)\|([-\d.]+)\|(.+)/);
+            if (siteMatch) {
+              const bodyName = siteMatch[1].trim();
+              const altitude = Number.parseFloat(siteMatch[2]);
+              const biome = siteMatch[3].trim();
+              const altStr = Math.abs(altitude) > 1000
+                ? `${(altitude / 1000).toFixed(1)}km`
+                : `${Math.round(altitude)}m`;
+              landingDetails = `\nLocation: ${bodyName}, ${biome} at ${altStr} elevation`;
+            }
+          } catch {
+            // Ignore errors querying site details
+          }
+
           return ctx.successResponse('land',
-            `Landing complete! ${monitorResult.finalStatus.status}\nMission complete - vessel safely on surface`);
+            `Landing complete!${landingDetails}\nVessel safely on surface.`);
         } else {
           return ctx.errorResponse('land',
             monitorResult.error ?? `Landing failed: ${monitorResult.finalStatus.status}`);

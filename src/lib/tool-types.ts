@@ -149,7 +149,7 @@ const KSP_BODIES: Record<string, string[]> = {
   'Gilly': ['gillie', 'ghillie', 'jilly', 'gill e', 'gily', 'gilley'],
   'Kerbin': ['kirbin', 'kerban', 'curbing', 'carbon', 'curbin', 'kerben', 'kirben', 'curb in', 'curve in'],
   'Mun': ['moon', 'munn', 'the mun', 'mune', 'mon', 'the moon'],
-  'Minmus': ['minimus', 'minimum', 'mimmus', 'minmas', 'min mouse', 'min mus', 'minimums', 'min miss', 'minmis', 'minmes'],
+  'Minmus': ['minas','mimmi','minimus', 'minimum', 'mimmus', 'minmas', 'min mouse', 'min mus', 'minimums', 'min miss', 'minmis', 'minmes'],
   'Duna': ['dune', 'doona', 'donna', 'tuna', 'duner', 'do na', 'dune a', 'dunah', 'djna'],
   'Ike': ['ik', 'ica', 'iky', 'ike', 'mike', 'bike', 'like'],
   'Dres': ['dress', 'drez', 'drес', 'dressed', 'dris', 'drace'],

@@ -395,12 +395,12 @@ export async function queryTargetEncounterInfo(
  * Shows body, apoapsis, periapsis, and whether orbit is circular.
  *
  * @param conn kOS connection
- * @returns Formatted string like "\nOrbit: 100.0 × 80.0 km at Kerbin (circular)"
+ * @returns Formatted string like "\nOrbit: 100km by 80km at Kerbin (circular)"
  */
 export async function formatResultingOrbit(conn: KosConnection): Promise<string> {
   try {
     const orbitInfo = await conn.execute(
-      'PRINT SHIP:BODY:NAME + "|" + ROUND(APOAPSIS/1000, 1) + "|" + ROUND(PERIAPSIS/1000, 1) + "|" + ROUND(ORBIT:ECCENTRICITY, 4).',
+      'PRINT SHIP:BODY:NAME + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000) + "|" + ROUND(ORBIT:ECCENTRICITY, 4).',
       3000
     );
     const parts = orbitInfo.output.split('|').map(s => s.trim());
@@ -408,10 +408,40 @@ export async function formatResultingOrbit(conn: KosConnection): Promise<string>
       const [body, apoKm, peKm, ecc] = parts;
       const eccNum = Number.parseFloat(ecc);
       const isCircular = eccNum < 0.05;
-      return `\nOrbit: ${apoKm} × ${peKm} km at ${body}${isCircular ? ' (circular)' : ''}`;
+      return `\nOrbit: ${apoKm}km by ${peKm}km at ${body}${isCircular ? ' (circular)' : ''}`;
     }
   } catch {
     // Ignore errors - best effort
   }
   return '';
+}
+
+/**
+ * Check if post-burn periapsis would result in crash or reentry.
+ * Call this after creating a maneuver node to warn about dangerous trajectories.
+ *
+ * @param conn kOS connection
+ * @returns Warning string if dangerous, undefined if safe
+ */
+export async function checkPostBurnPeriapsis(conn: KosConnection): Promise<string | undefined> {
+  // Query post-burn periapsis and atmosphere in one atomic command
+  const result = await conn.execute(
+    'IF HASNODE { PRINT "PE|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(SHIP:BODY:ATM:HEIGHT) + "|" + SHIP:BODY:NAME. } ELSE { PRINT "NONODE". }',
+    3000
+  );
+
+  const match = result.output.match(/PE\|(-?\d+)\|(\d+)\|(.+)/);
+  if (!match) return undefined;
+
+  const postBurnPe = Number.parseInt(match[1]);
+  const atmHeight = Number.parseInt(match[2]);
+  const bodyName = match[3].trim();
+
+  if (postBurnPe < 0) {
+    return `⚠️ CRASH WARNING: Post-burn periapsis ${(postBurnPe / 1000).toFixed(1)}km below ${bodyName} surface!`;
+  } else if (atmHeight > 0 && postBurnPe < atmHeight) {
+    return `⚠️ REENTRY WARNING: Post-burn periapsis ${(postBurnPe / 1000).toFixed(1)}km below ${bodyName} atmosphere (${(atmHeight / 1000).toFixed(0)}km)!`;
+  }
+
+  return undefined;
 }

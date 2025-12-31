@@ -8,27 +8,12 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-
-// ============================================================================
-// Formatting Utilities
-// ============================================================================
-
-function formatTime(seconds: number): string {
-  if (seconds < 60) return `${seconds.toFixed(0)}s`;
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${Math.floor(seconds % 60)}s`;
-  if (seconds < 86_400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
-  return `${Math.floor(seconds / 86_400)}d ${Math.floor((seconds % 86_400) / 3600)}h`;
-}
+import { formatTime, formatOrbit } from '../../utils/format.js';
 
 function formatDistance(meters: number): string {
   if (meters < 1000) return `${meters.toFixed(0)} m`;
   if (meters < 1_000_000) return `${(meters / 1000).toFixed(1)} km`;
   return `${(meters / 1_000_000).toFixed(2)} Mm`;
-}
-
-function formatAltitude(m: number): string {
-  if (Math.abs(m) < 1_000_000) return `${(m / 1000).toFixed(1)} km`;
-  return `${(m / 1_000_000).toFixed(2)} Mm`;
 }
 
 function formatPeriod(s: number): string {
@@ -390,7 +375,7 @@ export async function getTargetOrbitInfo(conn: KosConnection): Promise<TargetOrb
   const lan = Number.parseFloat(match[7]);
 
   let formatted = `Target: ${targetInfo.name}\n`;
-  formatted += `Orbit: ${formatAltitude(apoapsis)} × ${formatAltitude(periapsis)}\n`;
+  formatted += `Orbit: ${formatOrbit(apoapsis, periapsis)}\n`;
   formatted += `Inclination: ${inclination.toFixed(2)}°\n`;
   formatted += `Eccentricity: ${eccentricity.toFixed(4)}\n`;
   formatted += `Period: ${formatPeriod(period)}\n`;

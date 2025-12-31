@@ -9,6 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
+import { formatTime } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to circularize the orbit.
@@ -50,9 +51,10 @@ export const circularizeTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 1,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
+      const logger = ctx.createLogger(extra);
 
       // Auto-detect best timeRef if not specified
       let timeRef = args.timeRef as string | undefined;
@@ -71,11 +73,15 @@ export const circularizeTool: ToolDefinition = {
       }
 
       const orchestrator = new ManeuverOrchestrator(conn);
-      const result = await orchestrator.circularize(timeRef, { execute: args.execute as boolean });
+      const result = await orchestrator.circularize(timeRef, {
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'circularize',
+      });
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${result.timeToNode?.toFixed(0)}s${execInfo}`;
+        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Show resulting orbit after execution
         if (result.executed) {
