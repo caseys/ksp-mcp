@@ -484,7 +484,8 @@ export class AscentProgram {
     if (autoWarp) {
       setTimeout(async () => {
         try {
-          await this.conn.execute('SET WARP TO 1.');
+          // Clear any existing warp state before enabling 2x warp
+          await this.conn.execute('SET WARP TO 0. WAIT 0.1. SET WARP TO 1.');
           this.logger.info('[Ascent] Enabled 2x warp');
         } catch {
           // Ignore warp errors - non-critical

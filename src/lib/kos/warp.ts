@@ -224,7 +224,8 @@ async function warpToNode(
 
   log.progress(`[Warp] Warping to node T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
 
-  // Start warp
+  // Clear any existing warp state before starting new warp
+  await stopWarp(conn);
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(NEXTNODE:TIME - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close to target
@@ -270,7 +271,8 @@ async function warpToSOI(
 
   log.progress(`[Warp] Current body: ${currentBody}, SOI transition in ${soiEta.toFixed(0)}s`);
 
-  // Start warp to SOI transition
+  // Clear any existing warp state before starting new warp
+  await stopWarp(conn);
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + SHIP:ORBIT:NEXTPATCHETA - ${leadTime}).`, 5000);
 
   // Poll body name until it changes (SOI crossed)
@@ -378,7 +380,8 @@ async function warpToOrbitalPoint(
 
   log.progress(`[Warp] Warping to ${point.toLowerCase()} T-${leadTime}s (ETA: ${initialEta.toFixed(0)}s)`);
 
-  // Start warp
+  // Clear any existing warp state before starting new warp
+  await stopWarp(conn);
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ETA:${point} - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close
@@ -496,7 +499,8 @@ export async function warpForward(
 
   log.progress(`[Warp] Warping forward ${seconds}s...`);
 
-  // Start warp
+  // Clear any existing warp state before starting new warp
+  await stopWarp(conn);
   await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
 
   // Poll WARP status until it's 0 (warp complete)

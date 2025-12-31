@@ -230,7 +230,8 @@ export async function executeNode(
     const warpLeadTime = 10; // Stop warping 10s before node
     log.progress(`[ExecuteNode] Node is ${nodeEta.toFixed(0)}s away, warping to T-${warpLeadTime}s`);
 
-    // Use KUNIVERSE:TIMEWARP:WARPTO which doesn't block
+    // Clear any existing warp state before starting new warp
+    await stopWarp(conn);
     await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${nodeEta - warpLeadTime}).`, 5000);
 
     // Wait for warp to complete (poll until ETA is close)
