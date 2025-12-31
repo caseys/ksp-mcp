@@ -30,7 +30,14 @@ interface CrashCheck {
 }
 
 
-async function kickstartWarp(conn: KosConnection, logger: McpLogger): Promise<boolean> {
+/**
+ * Kick-start MechJeb's warp handling with a brief warp pulse.
+ * Only triggers if warp is currently 0 (1x speed).
+ *
+ * This works around a KSP/MechJeb quirk where warp doesn't start
+ * reliably without a "kick" to get it going.
+ */
+export async function kickstartWarp(conn: KosConnection, logger: McpLogger): Promise<boolean> {
   // Check warp and pulse in one kOS command to reduce round trips
   // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
   const result = await conn.execute(
@@ -52,7 +59,14 @@ async function kickstartWarp(conn: KosConnection, logger: McpLogger): Promise<bo
   return kicked;
 }
 
-
+/**
+ * Stop time warp by setting warp level to 0.
+ * Note: We use SET WARP TO 0 rather than CANCELWARP() to avoid
+ * interfering with the kickstartWarp workaround.
+ */
+export async function stopWarp(conn: KosConnection): Promise<void> {
+  await conn.execute('SET WARP TO 0.', 3000);
+}
 
 /**
  * Check if warping to a target time would result in a crash.
@@ -296,7 +310,8 @@ async function warpToSOI(
     const newBody = result.result.body;
     log.progress(`[Warp] Crossed into ${newBody} S.O.I.`);
 
-    // Wait for warp to fully stop and KSP to settle
+    // Stop warp and wait for KSP to settle
+    await stopWarp(conn);
     await new Promise(resolve => setTimeout(resolve, 2000));
 
     // Get SOI info including periapsis check

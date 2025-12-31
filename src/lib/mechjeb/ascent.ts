@@ -15,7 +15,7 @@ import type {
 import { delay } from '../utils/progress.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
-import { StableWarpTracker } from '../utils/stable-warp.js';
+import { kickstartWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 /**
@@ -105,9 +105,6 @@ export class AscentHandle {
 
     const MAX_WAIT_MS = 900_000; // 15 minutes max
 
-    // Warp detection - enable warp when APO stabilizes during coast phase
-    const warpTracker = new StableWarpTracker(this.conn, this.logger, 2, 'Ascent');
-
     // Get atmosphere height for this body using labeled output
     const atmResult = await this.conn.execute('PRINT "ATM:" + ROUND(SHIP:BODY:ATM:HEIGHT).');
     const atmMatch = atmResult.output.match(/ATM:(-?\d+)/);
@@ -160,10 +157,9 @@ export class AscentHandle {
       context: 'Ascent',
 
       onPoll: async (state) => {
-        // Smart warp: detect when ascent burn complete (APO+PER stable, still suborbital)
+        // Kickstart warp when coasting to apoapsis (ascent burn complete, still suborbital)
         if (state.periapsis < 0 && state.apoapsis >= this.targetAltitude * 0.9) {
-          const warpState = `${Math.round(state.apoapsis / 1000)},${Math.round(state.periapsis / 1000)}`;
-          await warpTracker.check(warpState);          
+          await kickstartWarp(this.conn, this.logger);
         }
 
         // Log progress every 10 seconds

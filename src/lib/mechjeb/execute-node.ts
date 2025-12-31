@@ -10,7 +10,7 @@ import { queryNumber, unlockControls } from './shared.js';
 import { delay } from '../utils/progress.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
-import { StableWarpTracker } from '../utils/stable-warp.js';
+import { kickstartWarp, stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 export interface ExecuteNodeResult {
@@ -42,33 +42,6 @@ const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
 const RCS_TRIGGER_TIME = 3000; // ms - enable RCS if no progress after this
 const MAX_ALIGN_TIME = 60_000; // ms - maximum time to wait for alignment
-
-/**
- * Kick-start MechJeb's warp handling with a brief warp pulse.
- * Only triggers if warp is currently 0 (1x speed).
- */
-async function kickstartWarp(conn: KosConnection, logger: McpLogger): Promise<boolean> {
-  // Check warp and pulse in one kOS command to reduce round trips
-  // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
-  const result = await conn.execute(
-    'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. WAIT 0.3. SET WARP TO 1. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
-    5000
-  );
-
-  /* keep for reference
-  await conn.execute('SET WARP TO 0.');
-  await conn.execute(
-    'IF WARP < 6 { SET WARP TO WARP + 1. }',
-    3000
-  );
-  */  
-     
-  const kicked = result.output.includes('KICKED');
-  if (kicked) {
-    logger.progress('[Execute Node] Warp kickstart MechJeb');
-  }
-  return kicked;
-}
 
 /**
  * Align ship to maneuver node using kOS LOCK STEERING before MechJeb takes over.
@@ -277,9 +250,6 @@ export async function executeNode(
     }
   }
 
-  // Stable state warp - enable 2x warp when coasting to node
-  const warpTracker = new StableWarpTracker(conn, log, 2, 'ExecuteNode');
-
   // Retry loop for incomplete burns
   let lastAttempt = 0;
 
@@ -292,6 +262,9 @@ export async function executeNode(
     if (areWorkaroundsEnabled() && halfBurn > 0) {
       await conn.execute(`SET nd TO NEXTNODE. SET nd:ETA TO nd:ETA - ${halfBurn.toFixed(1)}.`, 3000);
     }
+
+    // Stop any active warp before executing
+    await stopWarp(conn);
 
     // Enable MechJeb node executor
     await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
@@ -337,6 +310,7 @@ export async function executeNode(
       // We look for NONODE at end of string, after newline, or after the sentinel marker (PRINT "".)
       const isNoNode = /(?:^|\n|PRINT ""\.)NONODE(?:\n|$|")/i.test(progressResult.output);
       if (isNoNode) {
+        await stopWarp(conn);
         return {
           success: true,
           nodesExecuted: initialNodeCount,
@@ -355,9 +329,9 @@ export async function executeNode(
         const executorEnabled = progressMatch[2].toLowerCase() === 'true';
         lastDvRemaining = dvRemaining;
 
-        // Stable state warp: if coasting to node (high dV = not burning yet)
+        // Kickstart warp if coasting to node (high dV = not burning yet)
         if (dvRemaining > 10) {
-          await warpTracker.check(String(Math.round(dvRemaining)));
+          await kickstartWarp(conn, log);
         }
 
         // Log progress every poll (every 10s)
@@ -366,6 +340,7 @@ export async function executeNode(
         // If dV is below threshold, burn is complete - clear node and return success
         if (dvRemaining < DV_THRESHOLD) {
           log.progress(`[ExecuteNode] Burn complete! (${dvRemaining.toFixed(2)} m/s remaining < ${DV_THRESHOLD} m/s threshold)`);
+          await stopWarp(conn);
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
           return {
