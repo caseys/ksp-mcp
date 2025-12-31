@@ -41,16 +41,17 @@ export async function kickstartWarp(conn: KosConnection, logger: McpLogger): Pro
   // Check warp and pulse in one kOS command to reduce round trips
   // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
   const result = await conn.execute(
-    'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. WAIT 0.3. SET WARP TO 1. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
-    5000
-  );
-
-  /*
-  await conn.execute(
-    'IF WARP < 6 { SET WARP TO WARP + 1. }',
+    'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
     3000
   );
-  */
+
+  // Try to increase warp speed, respecting physics vs rails mode limits
+  // Physics warp max is 4x (index 2), rails warp max is much higher (index 6+)
+  await conn.execute(
+    'SET maxWarp TO CHOOSE 2 IF KUNIVERSE:TIMEWARP:MODE = "PHYSICS" ELSE 6. ' +
+    'IF WARP > 0 AND WARP < maxWarp { SET WARP TO WARP + 1. }',
+    3000
+  );
 
   const kicked = result.output.includes('KICKED');
   if (kicked) {
