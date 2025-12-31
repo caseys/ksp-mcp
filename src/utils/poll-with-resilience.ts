@@ -72,6 +72,9 @@ export interface PollResult<T> {
 /**
  * Classify why a connection failed using detailed health checks.
  * Uses the same logic as connection-tools.ts for consistency.
+ *
+ * IMPORTANT: Be conservative - only report 'crashed' if we're very sure.
+ * False positives are worse than false negatives here.
  */
 async function classifyConnectionFailure(
   conn: KosConnection | undefined,
@@ -79,41 +82,44 @@ async function classifyConnectionFailure(
 ): Promise<DisconnectReason> {
   // Check error message/output for signal loss indicators
   if (errorOutput && (errorOutput.includes('Signal lost') || errorOutput.includes('signal'))) {
-      return 'signal_lost';
-    }
+    return 'signal_lost';
+  }
 
-  // If we have a connection, try detailed detection
+  // If we have a connection, try a health check
   if (conn) {
     try {
       // Try a health check command with unique marker
       const marker = `POLL_CHECK_${Date.now()}`;
-      const result = await conn.execute(`PRINT "${marker}".`, 1500);
+      const result = await conn.execute(`PRINT "${marker}".`, 2000);
 
       // Check for signal lost message
       if (result.output.includes('Signal lost')) {
         return 'signal_lost';
       }
 
-      // If we got the marker back, connection is actually fine
-      if (result.output.includes(marker)) {
-        return 'unknown'; // Transient error, not a real disconnect
+      // If we got ANY response at all (even without marker), connection is working.
+      // This was likely a transient parsing error or timing issue, not a real disconnect.
+      // Only truly empty output suggests a real problem.
+      if (result.output.trim().length > 0) {
+        return 'unknown'; // Transient error, connection is fine
       }
 
-      // Command echoed but no result - likely signal loss (after first message consumed)
-      if (result.output.includes(`PRINT "${marker}"`) && !result.output.includes(marker + '\n')) {
-        return 'signal_lost';
-      }
-
-      // No response - try Ctrl+D to distinguish power loss from crash
-      const canDetach = await conn.tryDetach(2000);
-      if (canDetach) {
-        return 'power_loss';
-      } else {
+      // Truly empty output - might be signal loss (commands echo but no response)
+      return 'signal_lost';
+    } catch {
+      // Health check threw - connection is broken
+      // Try Ctrl+D to distinguish power loss from crash
+      try {
+        const canDetach = await conn.tryDetach(2000);
+        if (canDetach) {
+          return 'power_loss';
+        } else {
+          return 'crashed';
+        }
+      } catch {
+        // Even tryDetach failed - likely crashed
         return 'crashed';
       }
-    } catch {
-      // Couldn't even run health check - assume worst case
-      return 'crashed';
     }
   }
 
@@ -122,17 +128,20 @@ async function classifyConnectionFailure(
 
 /**
  * Get user-friendly message for disconnect reason.
+ * Returns null for 'unknown' since those are transient errors that don't need logging.
  */
-function getDisconnectMessage(reason: DisconnectReason, context: string): string {
+function getDisconnectMessage(reason: DisconnectReason, context: string): string | null {
   switch (reason) {
     case 'signal_lost':
       return `[${context}] Radio blackout - autopilot continues autonomously`;
     case 'power_loss':
       return `[${context}] Vessel has no power - waiting for batteries to recharge`;
     case 'crashed':
-      return `[${context}] Vessel may have crashed - monitoring stopped`;
+      return `[${context}] Vessel may have crashed - checking...`;
+    case 'unknown':
+      return null; // Don't log transient errors
     default:
-      return `[${context}] Connection lost - waiting to reconnect`;
+      return null;
   }
 }
 
@@ -197,16 +206,27 @@ export async function pollWithBlackoutResilience<T>(
     } catch (error) {
       // Connection error - classify the failure
       const errorOutput = error instanceof Error ? error.message : String(error);
+      const reason = await classifyConnectionFailure(connection, errorOutput);
+
+      // 'unknown' = transient error (parsing issue, timing, etc.) - just retry silently
+      if (reason === 'unknown') {
+        // Don't log, don't set blackout - just continue polling
+        await delay(pollIntervalMs);
+        continue;
+      }
 
       if (!inBlackout) {
-        // First failure - classify it
-        currentReason = await classifyConnectionFailure(connection, errorOutput);
-        logger.progress(getDisconnectMessage(currentReason, context));
+        // First real failure - log it
+        currentReason = reason;
+        const message = getDisconnectMessage(reason, context);
+        if (message) {
+          logger.progress(message);
+        }
         inBlackout = true;
         hadBlackout = true;
 
         // If crashed, start confirmation counter
-        if (currentReason === 'crashed') {
+        if (reason === 'crashed') {
           crashConfirmCount = 1;
         }
       } else if (currentReason === 'crashed') {
