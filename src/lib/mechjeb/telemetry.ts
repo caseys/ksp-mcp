@@ -11,7 +11,7 @@ import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
 import { delay } from '../utils/progress.js';
-import { formatTime, formatOrbit } from '../utils/format.js';
+import { formatTime, formatOrbit, fmtNum } from '../utils/format.js';
 
 const TELEMETRY_DELAY_MS = 100;
 
@@ -289,15 +289,18 @@ export async function getShipTelemetry(
   const { timeoutMs = 2500 } = options;
   const lines: string[] = [];
 
-  // Query 1: Combined base + orbital params + vessel info + node check + encounter check
+  // Query 1: Combined base + orbital params + vessel info + node check + encounter check + surface info
   // This single query gets everything we need to know what additional data to fetch
   // Note: On escape trajectories (ecc >= 1), APOAPSIS and PERIOD are infinity which breaks ROUND()
   // We use CHOOSE to output -1 as a sentinel value for these cases
+  // Note: Use CHOOSE to safely handle solar orbit (Sun has no parent body)
+  // Added: altitude, latitude, longitude for surface status display
+  const parentBodyExpr = '(CHOOSE "Sun" IF SHIP:BODY:NAME = "Sun" ELSE SHIP:BODY:BODY:NAME)';
   const baseResult = await conn.execute(
     'IF HASNODE { ' +
-      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}" + NEXTNODE:DELTAV:MAG + "${SEP}" + NEXTNODE:ETA + "${SEP}" + NEXTNODE:ORBIT:HASNEXTPATCH. ` +
+      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ${parentBodyExpr} + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}" + NEXTNODE:DELTAV:MAG + "${SEP}" + NEXTNODE:ETA + "${SEP}" + NEXTNODE:ORBIT:HASNEXTPATCH + "${SEP}" + ROUND(ALTITUDE) + "${SEP}" + ROUND(SHIP:LATITUDE,4) + "${SEP}" + ROUND(SHIP:LONGITUDE,4). ` +
     '} ELSE { ' +
-      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}0${SEP}0${SEP}" + ORBIT:HASNEXTPATCH. ` +
+      `PRINT "BASE|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ${parentBodyExpr} + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + (CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}0${SEP}0${SEP}" + ORBIT:HASNEXTPATCH + "${SEP}" + ROUND(ALTITUDE) + "${SEP}" + ROUND(SHIP:LATITUDE,4) + "${SEP}" + ROUND(SHIP:LONGITUDE,4). ` +
     '}',
     timeoutMs
   );
@@ -306,10 +309,10 @@ export async function getShipTelemetry(
     throw new Error(`Telemetry error: ${baseResult.error}`);
   }
 
-  // Parse "BASE|soi|apo|per|period|inc|ecc|lan|name|type|status|dv|eta|hasEnc"
+  // Parse "BASE|soi|soiParent|apo|per|period|inc|ecc|lan|name|type|status|dv|eta|hasEnc|alt|lat|lon"
   // Note: ETA can be negative if node is in the past, deltaV is always positive
   // Note: SHIP:NAME can contain spaces/special chars, SHIP:TYPE and SHIP:STATUS are single words
-  const baseMatch = baseResult.output.match(/BASE\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
+  const baseMatch = baseResult.output.match(/BASE\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)/i);
   if (!baseMatch) {
     // Include raw output for debugging parse failures
     const preview = baseResult.output.slice(0, 200);
@@ -317,18 +320,22 @@ export async function getShipTelemetry(
   }
 
   const soi = baseMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-  const apoRaw = parseNumber(baseMatch[2]);
-  const per = parseNumber(baseMatch[3]);
-  const periodRaw = parseNumber(baseMatch[4]);
-  const inc = parseNumber(baseMatch[5]);
-  const ecc = parseNumber(baseMatch[6]);
-  const lan = parseNumber(baseMatch[7]);
-  const vesselName = baseMatch[8].trim().replaceAll('"', '');
-  const vesselType = baseMatch[9].trim();
-  const vesselStatus = baseMatch[10].trim();
-  const nodeDv = parseNumber(baseMatch[11]);
-  const nodeEta = parseNumber(baseMatch[12]);
-  const hasEncounter = parseBool(baseMatch[13]);
+  const soiParent = baseMatch[2].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
+  const apoRaw = parseNumber(baseMatch[3]);
+  const per = parseNumber(baseMatch[4]);
+  const periodRaw = parseNumber(baseMatch[5]);
+  const inc = parseNumber(baseMatch[6]);
+  const ecc = parseNumber(baseMatch[7]);
+  const lan = parseNumber(baseMatch[8]);
+  const vesselName = baseMatch[9].trim().replaceAll('"', '');
+  const vesselType = baseMatch[10].trim();
+  const vesselStatus = baseMatch[11].trim();
+  const nodeDv = parseNumber(baseMatch[12]);
+  const nodeEta = parseNumber(baseMatch[13]);
+  const hasEncounter = parseBool(baseMatch[14]);
+  const altitude = parseNumber(baseMatch[15]);
+  const latitude = parseNumber(baseMatch[16]);
+  const longitude = parseNumber(baseMatch[17]);
   const hasNode = nodeDv > 0;
 
   // Handle escape trajectory sentinel values (-1 means infinity)
@@ -359,20 +366,38 @@ export async function getShipTelemetry(
   let target: TargetInfo | undefined;
 
   // Build formatted output
-  lines.push('=== Ship Status ===');
-  lines.push(`${vesselType} ${vesselStatus}`)
-  lines.push(`SOI Body: ${soi}`);
-  // Orbit display (Ap by Pe format)
-  if (isEscapeTrajectory || isImpactTrajectory) {
-    const fmtAlt = (m: number) => { const km = m / 1000; return (km % 1 === 0 ? km.toFixed(0) : km.toFixed(1)) + 'km'; };
-    const apoStr = isEscapeTrajectory ? 'Escape' : fmtAlt(apo);
-    const peStr = isImpactTrajectory ? 'Impact' : fmtAlt(per);
-    lines.push(`Orbit: ${apoStr} by ${peStr}`);
+  // Show "a moon of [parent]" if SOI is a moon (parent is not Sun/Kerbol)
+  const isMoon = soiParent.toLowerCase() !== 'sun' && soiParent.toLowerCase() !== 'kerbol';
+  const soiDisplay = isMoon ? `${soi}, a moon of ${soiParent}` : soi;
+
+  // Check if on surface (LANDED, SPLASHED, PRELAUNCH)
+  const isSurface = ['LANDED', 'SPLASHED', 'PRELAUNCH'].includes(vesselStatus.toUpperCase());
+
+  if (isSurface) {
+    // Surface status format
+    lines.push(`Ship: ${vesselStatus.toUpperCase()}`);
+    lines.push(`Surface of: ${soiDisplay}`);
+    const altKm = altitude / 1000;
+    lines.push(`Altitude: ${altKm >= 1 ? altKm.toFixed(1) + 'km' : altitude.toFixed(0) + 'm'}`);
+    lines.push(`Latitude: ${latitude.toFixed(4)}°`);
+    lines.push(`Longitude: ${longitude.toFixed(4)}°`);
+    lines.push(`Vessel: ${vesselName}`);
   } else {
-    lines.push(`Orbit: ${formatOrbit(apo, per)}`);
+    // Orbit status format
+    lines.push(`Ship: ${vesselStatus.toUpperCase()}`);
+    lines.push(`SOI Body: ${soiDisplay}`);
+    // Orbit display (Ap by Pe format)
+    if (isEscapeTrajectory || isImpactTrajectory) {
+      const fmtAlt = (m: number) => { const km = m / 1000; return (km % 1 === 0 ? km.toFixed(0) : km.toFixed(1)) + 'km'; };
+      const apoStr = isEscapeTrajectory ? 'Escape' : fmtAlt(apo);
+      const peStr = isImpactTrajectory ? 'Impact' : fmtAlt(per);
+      lines.push(`Orbit: ${apoStr} by ${peStr}`);
+    } else {
+      lines.push(`Orbit: ${formatOrbit(apo, per)}`);
+    }
+    lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : formatTime(period)} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
+    lines.push(`Vessel: ${vesselName}`);
   }
-  lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : formatTime(period)} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
-  lines.push(`Vessel: ${vesselName}`);
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
@@ -382,7 +407,7 @@ export async function getShipTelemetry(
       estimatedBurnTime,
     };
     lines.push('', '=== Next Maneuver ===');
-    lines.push(`Delta-V: ${nodeDv.toFixed(1)} m/s`);
+    lines.push(`Delta-V: ${fmtNum(nodeDv)} m/sec`);
     lines.push(`Time to node: ${formatTime(nodeEta)}`);
     lines.push(`Est. burn time: ${formatTime(estimatedBurnTime)}`);
   }
@@ -416,19 +441,26 @@ export async function getShipTelemetry(
   }
 
   // Query 3: Get target info (if a target is set)
+  // For body targets, also get the parent body to show "A moon of X"
+  const targetParentExpr = '(CHOOSE "Sun" IF TARGET:BODY:NAME = "Sun" ELSE TARGET:BODY:BODY:NAME)';
   const targetResult = await conn.execute(
     'IF HASTARGET { ' +
-      `PRINT "TGT|" + TARGET:NAME + "${SEP}" + TARGET:TYPENAME + "${SEP}" + ROUND(TARGET:DISTANCE). ` +
+      'IF TARGET:TYPENAME = "Body" { ' +
+        `PRINT "TGT|" + TARGET:NAME + "${SEP}" + TARGET:TYPENAME + "${SEP}" + ROUND(TARGET:DISTANCE) + "${SEP}" + ${targetParentExpr}. ` +
+      '} ELSE { ' +
+        `PRINT "TGT|" + TARGET:NAME + "${SEP}" + TARGET:TYPENAME + "${SEP}" + ROUND(TARGET:DISTANCE) + "${SEP}NONE". ` +
+      '}. ' +
     '} ELSE { PRINT "NOTGT". }',
     timeoutMs
   );
 
   if (!targetResult.error && !targetResult.output.includes('NOTGT')) {
-    const tgtMatch = targetResult.output.match(/TGT\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)/);
+    const tgtMatch = targetResult.output.match(/TGT\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^\s]+)/);
     if (tgtMatch) {
       const targetName = tgtMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
       const targetType = tgtMatch[2].trim();
       const targetDist = parseNumber(tgtMatch[3]);
+      const targetParent = tgtMatch[4].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
 
       target = {
         name: targetName,
@@ -437,7 +469,17 @@ export async function getShipTelemetry(
       };
 
       lines.push('', '=== Target ===');
-      lines.push(`${targetName} (${targetType})`);
+      // Format target description based on type
+      if (targetType === 'Body' && targetParent && targetParent !== 'NONE') {
+        const isSun = targetParent.toLowerCase() === 'sun' || targetParent.toLowerCase() === 'kerbol';
+        if (isSun) {
+          lines.push(`${targetName} (Planet)`);
+        } else {
+          lines.push(`${targetName} (A moon of ${targetParent})`);
+        }
+      } else {
+        lines.push(`${targetName} (${targetType})`);
+      }
       lines.push(`Distance: ${formatDistance(targetDist)}`);
     }
   }
@@ -449,7 +491,10 @@ export async function getShipTelemetry(
     const targets = await listTargets(conn);
 
     availableTargets.moons = targets.moons.map((m: { name: string }) => m.name);
-    availableTargets.planets = targets.planets.map((p: { name: string }) => p.name);
+    // Filter out the parent body from planets (it's shown separately as Parent Body)
+    availableTargets.planets = targets.planets
+      .map((p: { name: string }) => p.name)
+      .filter((name: string) => name.toLowerCase() !== soiParent.toLowerCase());
     availableTargets.vessels = targets.vessels.map((v: { name: string }) => v.name);
 
     lines.push('', '=== Available Targets ===');
@@ -461,6 +506,10 @@ export async function getShipTelemetry(
     }
     if (availableTargets.vessels.length > 0) {
       lines.push(`Vessels: ${availableTargets.vessels.join(', ')}`);
+    }
+    // Show parent body if we're at a moon (not in solar orbit)
+    if (isMoon) {
+      lines.push(`Parent Body: ${soiParent}`);
     }
   } catch {
     // Silently skip if listTargets fails
@@ -540,11 +589,11 @@ function _formatTargetEncounterInfo(info: TargetEncounterInfo): string {
     if (bodyInfo.periapsisInTargetSOI !== undefined) {
       const peKm = bodyInfo.periapsisInTargetSOI / 1000;
       if (isCrash) {
-        lines.push(`Periapsis: ${peKm.toFixed(1)} km (below surface!)`);
+        lines.push(`Periapsis: ${fmtNum(peKm)} km (below surface!)`);
       } else if (isReentry) {
-        lines.push(`Periapsis: ${peKm.toFixed(1)} km (in atmosphere)`);
+        lines.push(`Periapsis: ${fmtNum(peKm)} km (in atmosphere)`);
       } else {
-        lines.push(`Periapsis: ${peKm.toFixed(1)} km`);
+        lines.push(`Periapsis: ${fmtNum(peKm)} km`);
       }
     }
 
@@ -559,7 +608,7 @@ function _formatTargetEncounterInfo(info: TargetEncounterInfo): string {
     }
 
     if (bodyInfo.captureDeltaV !== undefined && !isCrash && !isReentry) {
-      lines.push(`Capture ΔV: ${bodyInfo.captureDeltaV.toFixed(1)} m/s`);
+      lines.push(`Capture ΔV: ${fmtNum(bodyInfo.captureDeltaV)} m/sec`);
     } else if (isCrash) {
       lines.push(`Capture ΔV: N/A (no safe orbit)`);
     } else if (isReentry) {
@@ -573,9 +622,9 @@ function _formatTargetEncounterInfo(info: TargetEncounterInfo): string {
     if (vesselInfo.closestApproachDistance !== undefined) {
       const distKm = vesselInfo.closestApproachDistance / 1000;
       if (distKm < 1) {
-        lines.push(`Closest approach: ${(vesselInfo.closestApproachDistance).toFixed(0)} m`);
+        lines.push(`Closest approach: ${fmtNum(vesselInfo.closestApproachDistance)} m`);
       } else {
-        lines.push(`Closest approach: ${distKm.toFixed(1)} km`);
+        lines.push(`Closest approach: ${fmtNum(distKm)} km`);
       }
     }
 
@@ -584,7 +633,7 @@ function _formatTargetEncounterInfo(info: TargetEncounterInfo): string {
     }
 
     if (vesselInfo.closestApproachRelVel !== undefined) {
-      lines.push(`Rel. velocity at CA: ${vesselInfo.closestApproachRelVel.toFixed(1)} m/s`);
+      lines.push(`Rel. velocity at CA: ${fmtNum(vesselInfo.closestApproachRelVel)} m/sec`);
     }
   }
 

@@ -8,7 +8,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtDist } from '../../utils/format.js';
 
 // ============================================================================
 // Types
@@ -119,7 +119,7 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
   }
   if (predictionReady) {
     formatted += `Predicted landing: ${predictedLat.toFixed(3)}°, ${predictedLng.toFixed(3)}°\n`;
-    formatted += `Predicted altitude: ${predictedAlt.toFixed(0)} m ASL\n`;
+    formatted += `Predicted altitude: ${fmtDist(predictedAlt)} ASL\n`;
     formatted += `Outcome: ${predictedOutcome}\n`;
     if (timeToLanding !== undefined) {
       formatted += `Time to landing: ${formatTime(timeToLanding)}`;
@@ -387,13 +387,13 @@ export async function getLandingPrediction(conn: KosConnection): Promise<Landing
   } else {
     formatted = `Landing prediction:\n`;
     formatted += `  Location: ${latitude.toFixed(3)}°, ${longitude.toFixed(3)}°\n`;
-    formatted += `  Altitude: ${altitude.toFixed(0)} m ASL\n`;
+    formatted += `  Altitude: ${fmtDist(altitude)} ASL\n`;
     formatted += `  Outcome: ${outcome}\n`;
     if (timeToLanding !== undefined) {
       formatted += `  Time to landing: ${formatTime(timeToLanding)}\n`;
     }
-    formatted += `  Max safe speed: ${maxAllowedSpeed.toFixed(1)} m/s\n`;
-    formatted += `  Decel end altitude: ${decelEndAltitude.toFixed(0)} m\n`;
+    formatted += `  Max safe speed: ${maxAllowedSpeed.toFixed(1)} m/sec\n`;
+    formatted += `  Decel end altitude: ${fmtDist(decelEndAltitude)}\n`;
     formatted += `  Using atmosphere: ${usingAtmosphere ? 'yes' : 'no'}\n`;
     formatted += `  Parachutes ready: ${chutesReady ? 'yes' : 'no'}`;
   }

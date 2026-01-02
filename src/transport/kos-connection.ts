@@ -114,6 +114,39 @@ export class KosConnection {
   }
 
   /**
+   * Wait for CPU menu, sending Enter key to wake it up if needed.
+   * Sometimes kOS needs a keypress before showing the menu.
+   */
+  private async waitForCpuMenu(timeoutMs: number): Promise<string> {
+    if (!this.transport) {
+      throw new Error('Transport not initialized');
+    }
+
+    // First try: wait for menu directly
+    try {
+      return await this.transport.waitFor('Choose a CPU', timeoutMs);
+    } catch {
+      // Menu didn't appear - try sending Enter to wake it up
+    }
+
+    // Clear any stale data
+    await this.transport.read();
+    await new Promise(r => setTimeout(r, 200));
+
+    // Send Enter key to wake up the menu
+    await this.transport.send('\r\n');
+    await new Promise(r => setTimeout(r, 300));
+
+    // Second try: wait for menu after Enter
+    try {
+      return await this.transport.waitFor('Choose a CPU', timeoutMs);
+    } catch {
+      // Still no menu - throw the original error
+      throw new Error('Timeout waiting for CPU menu');
+    }
+  }
+
+  /**
    * Connect to kOS terminal server and attach to a CPU.
    * @param cpuIdOrLabel - CPU ID (number) or label (string). Overrides constructor options.
    */
@@ -127,10 +160,10 @@ export class KosConnection {
       // Initialize transport (starts TCP connection)
       await this.transport.init();
 
-      // Wait for CPU menu to appear
+      // Wait for CPU menu to appear (tries Enter key to wake up if needed)
       let menuOutput: string;
       try {
-        menuOutput = await this.transport.waitFor('Choose a CPU', config.timeouts.cpuMenu);
+        menuOutput = await this.waitForCpuMenu(config.timeouts.cpuMenu);
       } catch {
         // No menu appeared - might already be connected to last CPU
         // Try sending REBOOT to verify connection
@@ -141,7 +174,7 @@ export class KosConnection {
 
         // If REBOOT works, we should see the menu appear after reboot
         try {
-          menuOutput = await this.transport.waitFor('Choose a CPU', config.timeouts.reboot);
+          menuOutput = await this.waitForCpuMenu(config.timeouts.reboot);
           // Menu appeared after reboot - we were connected!
           // Continue with normal flow below
         } catch {
@@ -345,9 +378,22 @@ export class KosConnection {
       }
 
       // Wait for menu to appear
-      const response = await this.transport.waitFor(/Choose a CPU/i, timeoutMs);
+      try {
+        const response = await this.transport.waitFor(/Choose a CPU/i, timeoutMs);
+        if (response.includes('Choose a CPU')) {
+          return true;
+        }
+      } catch {
+        // Menu didn't appear - try sending Enter to wake it up
+      }
 
-      // Got back to menu - vessel has power but CPU was unresponsive
+      // Sometimes menu needs Enter to appear
+      await this.transport.read(); // Clear buffer
+      await new Promise(r => setTimeout(r, 200));
+      await this.transport.send('\r\n');
+      await new Promise(r => setTimeout(r, 300));
+
+      const response = await this.transport.waitFor(/Choose a CPU/i, timeoutMs);
       return response.includes('Choose a CPU');
     } catch {
       // Timeout or error - couldn't detach, vessel likely crashed

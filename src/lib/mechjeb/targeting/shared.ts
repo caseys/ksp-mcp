@@ -443,7 +443,7 @@ export async function getTargetPositionInfo(conn: KosConnection): Promise<Target
 
   let formatted = `Target: ${targetInfo.name}\n`;
   formatted += `Distance: ${formatDistance(distance)}\n`;
-  formatted += `Relative velocity: ${relVelocityMag.toFixed(1)} m/s\n`;
+  formatted += `Relative velocity: ${relVelocityMag.toFixed(1)} m/sec\n`;
   if (canAlign) {
     formatted += `Docking alignment: available`;
   }

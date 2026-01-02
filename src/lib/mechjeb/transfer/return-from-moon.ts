@@ -8,7 +8,7 @@ import { validateVesselState } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtNum } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to return from a moon to its parent body.
@@ -41,7 +41,7 @@ export async function returnFromMoon(
 
 export const returnFromMoonTool: ToolDefinition = {
   name: 'return_from_moon',
-  description: 'Return from Mun/Minmus to Kerbin. Sets up reentry trajectory.',
+  description: 'Leave moon orbit to return home. ONLY works when already orbiting Mun or Minmus, NOT from Kerbin.',
   inputSchema: {
     targetPeriapsis: distanceSchema.optional().default(40_000).describe('Target periapsis at parent body in meters (default: 40km)'),
     execute: executeSchema,
@@ -66,7 +66,7 @@ export const returnFromMoonTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           // Show return trajectory info
           const trajInfo = await conn.execute(

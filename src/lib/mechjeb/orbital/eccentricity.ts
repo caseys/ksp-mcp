@@ -9,7 +9,7 @@ import { validateVesselState, CLEAN_ORBIT_REQUIREMENTS } from '../../kos/vessel/
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtNum } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to change orbital eccentricity.
@@ -76,7 +76,7 @@ export const changeEccentricityTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           const eccInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:ECCENTRICITY, 4).', 2000);
           const ecc = eccInfo.output.trim();

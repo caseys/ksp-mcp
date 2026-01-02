@@ -77,8 +77,18 @@ export async function handleListCpus(rawInput: z.input<typeof listCpusInputSchem
     // Initialize transport (connects to telnet)
     await transport.init();
 
-    // Wait for CPU selection menu
-    const menuOutput = await transport.waitFor('Choose a CPU', config.timeouts.reboot);
+    // Wait for CPU selection menu (try Enter to wake up if needed)
+    let menuOutput: string;
+    try {
+      menuOutput = await transport.waitFor('Choose a CPU', config.timeouts.reboot);
+    } catch {
+      // Menu didn't appear - try sending Enter to wake it up
+      await transport.read(); // Clear buffer
+      await new Promise(r => setTimeout(r, 200));
+      await transport.send('\r\n');
+      await new Promise(r => setTimeout(r, 300));
+      menuOutput = await transport.waitFor('Choose a CPU', config.timeouts.reboot);
+    }
 
     // Parse menu into structured CPU list
     const cpus = parseCpuMenu(menuOutput);

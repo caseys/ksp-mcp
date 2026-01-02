@@ -54,6 +54,22 @@ export const config = Object.freeze({
     scriptsFolder: process.env.KSP_SCRIPTS_FOLDER ?? 'Ships/Script',
   },
 
+  // Auto-warp configuration
+  warp: {
+    /**
+     * Maximum physics warp level during atmospheric flight (ascent, landing).
+     * 0 = disabled, 1 = 2x, 2 = 3x, 3 = 4x
+     * Default: 1 (2x warp)
+     */
+    physicsMax: Number.parseInt(process.env.AUTOWARP_PHYSICS_MAX ?? '1', 10),
+    /**
+     * Enable on-rails warp during orbital operations (execute_node).
+     * When enabled, uses kOS WARPTO to warp to 15s before maneuver nodes.
+     * Default: true
+     */
+    onRails: process.env.AUTOWARP_ONRAILS !== '0' && process.env.AUTOWARP_ONRAILS !== 'false',
+  },
+
   // Timeout defaults (milliseconds)
   timeouts: {
     /** Timeout for initial socket connection */

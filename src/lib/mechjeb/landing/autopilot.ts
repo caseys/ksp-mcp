@@ -9,6 +9,7 @@ import { setActiveOperation, clearActiveOperation } from '../../../utils/operati
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { formatTime } from '../../utils/format.js';
+import { config as appConfig } from '../../../config/index.js';
 import {
   getLandingStatus,
   setLandingConfig,
@@ -537,6 +538,12 @@ export const landTool: ToolDefinition = {
       // Check if we have a position target (either just set or previously set)
       const hasTarget = await hasLandingPositionTarget(conn);
 
+      // Enable MechJeb autowarp before starting landing (if physics warp is configured)
+      if (appConfig.warp.physicsMax > 0) {
+        logger.info('[Landing] Enabling MechJeb autowarp');
+        await conn.execute('SET ADDONS:MJ:LANDING:AUTOWARP TO TRUE.', 3000);
+      }
+
       let landResult: { success: boolean; error?: string };
       if (hasTarget) {
         logger.progress('[Landing] Starting targeted landing...');
@@ -563,7 +570,7 @@ export const landTool: ToolDefinition = {
           let landingDetails = '';
           try {
             const siteInfo = await conn.execute(
-              'PRINT SHIP:BODY:NAME + "|" + SHIP:GEOPOSITION:TERRAINHEIGHT + "|" + SHIP:BIOME.',
+              'PRINT SHIP:BODY:NAME + "|" + SHIP:GEOPOSITION:TERRAINHEIGHT + "|" + SHIP:GEOPOSITION:BIOME.',
               3000
             );
             const siteMatch = siteInfo.output.match(/([^|]+)\|([-\d.]+)\|(.+)/);

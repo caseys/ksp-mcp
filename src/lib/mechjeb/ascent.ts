@@ -13,10 +13,10 @@ import type {
   AscentResult
 } from '../types.js';
 import { delay } from '../utils/progress.js';
-import { formatOrbit } from '../utils/format.js';
+import { formatOrbit, fmtDist } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
-import { kickstartWarp } from '../kos/warp.js';
+import { config } from '../../config/index.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 /**
@@ -50,39 +50,43 @@ export class AscentHandle {
   /**
    * Get current progress of the ascent
    * Optimized: single atomic query instead of 5 sequential commands
+   * Uses MechJeb STATUS for accurate phase detection and dynamic atmosphere height
    */
   async getProgress(): Promise<AscentProgress> {
-    // Single atomic query for all progress values
+    // Single atomic query for all progress values including MechJeb status and atmosphere height
     const result = await this.conn.execute(
-      'PRINT "PROG|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ADDONS:MJ:ASCENT:ENABLED + "|" + SHIP:STATUS.',
+      'PRINT "PROG|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ' +
+      'ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:STATUS + "|" + ' +
+      'ROUND(SHIP:BODY:ATM:HEIGHT).',
       3000
     );
 
-    // Parse "PROG|alt|apo|per|enabled|status" format
-    const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|(.+?)(?:\s*>|$)/i);
+    // Parse "PROG|alt|apo|per|enabled|mjStatus|atmHeight" format
+    const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|([^|]*)\|(\d+)/i);
 
     const altitude = match ? Number.parseFloat(match[1]) : 0;
     const apoapsis = match ? Number.parseFloat(match[2]) : 0;
     const periapsis = match ? Number.parseFloat(match[3]) : 0;
     const enabled = match ? match[4].toLowerCase() === 'true' : false;
-    const shipStatus = match ? match[5].toLowerCase().trim() : 'unknown';
+    const mjStatus = match ? match[5].trim() : '';
+    const atmHeight = match ? Number.parseInt(match[6]) : 70_000;
 
-    // Determine phase
+    // Determine phase using MechJeb status strings
     let phase: AscentProgress['phase'];
-    if (shipStatus.includes('prelaunch') || shipStatus.includes('landed')) {
+    const statusLower = mjStatus.toLowerCase();
+
+    if (statusLower.includes('prelaunch') || statusLower.includes('landed') || (!enabled && mjStatus === '')) {
       phase = 'prelaunch';
-    } else if (periapsis > 70_000) {
+    } else if (periapsis >= atmHeight) {
       phase = 'complete';
-    } else if (apoapsis >= this.targetAltitude * 0.95 && altitude > 70_000) {
+    } else if (statusLower.includes('circulariz')) {
       phase = 'circularizing';
-    } else if (apoapsis >= this.targetAltitude * 0.9) {
+    } else if (statusLower.includes('coasting')) {
       phase = 'coasting';
-    } else if (altitude > 1000) {
+    } else if (statusLower.includes('gravity turn') || statusLower.includes('turn')) {
       phase = 'gravity_turn';
     } else if (altitude > 100) {
       phase = 'launching';
-    } else if (!enabled && shipStatus.includes('flying')) {
-      phase = 'unknown';
     } else {
       phase = 'prelaunch';
     }
@@ -93,7 +97,7 @@ export class AscentHandle {
       apoapsis,
       periapsis,
       enabled,
-      shipStatus: match ? match[5].trim() : 'Unknown'
+      shipStatus: mjStatus || 'Unknown'
     };
   }
 
@@ -116,8 +120,10 @@ export class AscentHandle {
     this.logger.info(`[Ascent] Target: periapsis >= ${Math.round(atmHeight/1000)}km (atmosphere height)`);
 
     let lastLogTime = 0;
-    let prevDeltaV: number | null = null;
+    let _prevDeltaV: number | null = null;
     let lastStatus = '';
+    let coastingWarpEnabled = false;
+    let coastingSettledAt: number | null = null;  // When we first saw coasting + settled
 
     interface AscentPollState {
       enabled: boolean;
@@ -128,6 +134,7 @@ export class AscentHandle {
       inOrbit: boolean;
       deltaV: number;
       throttle: number;
+      angularVel: number;
     }
 
     const result = await pollWithBlackoutResilience<AscentPollState>({
@@ -142,10 +149,11 @@ export class AscentHandle {
           'SET _B TO SHIP:BODY:NAME. ' +
           'SET _DV TO ROUND(SHIP:DELTAV:CURRENT, 1). ' +
           'SET _THR TO ROUND(THROTTLE, 2). ' +
-          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _DV + "|" + _THR.'
+          'SET _AV TO ROUND(SHIP:ANGULARVEL:MAG, 3). ' +
+          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _DV + "|" + _THR + "|" + _AV.'
         );
 
-        const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)\|([\d.]+)/i);
+        const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)\|([\d.]+)\|([\d.]+)/i);
         if (!statusMatch) {
           throw new Error('Failed to parse ascent status');
         }
@@ -157,9 +165,10 @@ export class AscentHandle {
         const body = statusMatch[5];
         const deltaV = Number.parseFloat(statusMatch[6]);
         const throttle = Number.parseFloat(statusMatch[7]);
+        const angularVel = Number.parseFloat(statusMatch[8]);
         const inOrbit = periapsis >= atmHeight;
 
-        return { enabled, status, apoapsis, periapsis, body, inOrbit, deltaV, throttle };
+        return { enabled, status, apoapsis, periapsis, body, inOrbit, deltaV, throttle, angularVel };
       },
 
       isDone: (state) => state.inOrbit || !state.enabled,
@@ -175,28 +184,49 @@ export class AscentHandle {
         // Log status changes
         const now = Date.now();
         if (state.status && state.status !== lastStatus) {
-          this.logger.progress(`[Ascent] ${state.status}  ${formatOrbit(state.apoapsis, state.periapsis)}`);
+          this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
           lastStatus = state.status;
           lastLogTime = now;
         }
 
         // Log progress every 20 seconds at least
         if (now - lastLogTime >= 20_000) {
-          this.logger.progress(`[Ascent] ${formatOrbit(state.apoapsis, state.periapsis)}`);
+          this.logger.progress(`[Ascent] at ${formatOrbit(state.apoapsis, state.periapsis)}`);
           lastLogTime = now;
         }
 
-        // Kickstart warp when coasting (not burning) and not yet in orbit
-        const isCoasting = state.throttle === 0;
-        const dvStable = prevDeltaV !== null && Math.abs(state.deltaV - prevDeltaV) < 1;
-        const notYetInOrbit = state.periapsis < this.targetAltitude*0.85;
-
-        if (notYetInOrbit && isCoasting && dvStable) {
-          await kickstartWarp(this.conn, this.logger, state);
+        // Enable warp when coasting to circularization AND ship attitude has settled for 10s
+        const isCoastingToCirc = state.status.toLowerCase().includes('coasting to circularization');
+        const isSettled = state.angularVel < 0.1;  // rad/s - ship has mostly stopped rotating
+        if (!coastingWarpEnabled && isCoastingToCirc && isSettled) {
+          const now = Date.now();
+          if (coastingSettledAt === null) {
+            coastingSettledAt = now;
+            this.logger.info(`[Ascent] Coasting detected, waiting for attitude to stabilize...`);
+          } else if (now - coastingSettledAt >= 10_000) {
+            // Ship has been settled for 10 seconds, safe to warp
+            coastingWarpEnabled = true;
+            if (config.warp.physicsMax > 0) {
+              await this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`);
+              this.logger.info(`[Ascent] Coasting - enabled ${config.warp.physicsMax + 1}x physics warp`);
+            }
+          }
+        } else if (!coastingWarpEnabled && coastingSettledAt !== null) {
+          // Ship started rotating again, reset the timer
+          coastingSettledAt = null;
         }
 
+        // Disabled: using env var control instead of kickstart pulses
+        // Kickstart warp when coasting (not burning) and not yet in orbit
+        // const isCoasting = state.throttle === 0;
+        // const dvStable = prevDeltaV !== null && Math.abs(state.deltaV - prevDeltaV) < 1;
+        // const notYetInOrbit = state.periapsis < this.targetAltitude*0.85;
+        // if (notYetInOrbit && isCoasting && dvStable) {
+        //   await kickstartWarp(this.conn, this.logger, state);
+        // }
+
         // Update previous delta-v for next poll
-        prevDeltaV = state.deltaV;
+        _prevDeltaV = state.deltaV;
       },
     });
 
@@ -266,7 +296,7 @@ export class AscentHandle {
 
       onPoll: (progress) => {
         if (progress.phase !== 'prelaunch' || progress.altitude > 100) {
-          this.logger.progress(`[Ascent] Liftoff confirmed! Altitude: ${Math.round(progress.altitude)}m, Phase: ${progress.phase}`);
+          this.logger.progress(`[Ascent] Liftoff confirmed! Altitude: ${fmtDist(progress.altitude)}, Phase: ${progress.phase}`);
         }
       },
     });
@@ -448,19 +478,20 @@ export class AscentProgram {
       inclination = 0,
       autoStage = true,
       circularize = true,
-      autoWarp = true
+      // autoWarp is now controlled by AUTOWARP_PHYSICS_MAX env var
     } = options;
 
     // Wait for MechJeb to be ready (critical after save reload)
     await this.waitForMechJebReady();
 
-    // Configure ascent
+    // Configure ascent - always enable MechJeb autowarp capability
+    // Actual physics warp level is controlled by AUTOWARP_PHYSICS_MAX env var
     await this.configure({
       desiredAltitude: altitude,
       desiredInclination: inclination,
       autostage: autoStage,
       skipCircularization: !circularize,
-      autowarp: autoWarp
+      autowarp: config.warp.physicsMax > 0  // Enable MechJeb autowarp if physics warp is enabled
     });
 
     // Let MechJeb process the configuration
@@ -522,14 +553,14 @@ export class AscentProgram {
       this.logger.progress('[Ascent] LAUNCHED');
     }
 
-    // Enable 2x warp after 15 seconds if autoWarp is enabled (helps during initial climb)
-    // Additional 4x warp is enabled in waitForCompletion() when APO stabilizes (coast phase)
-    if (autoWarp) {
+    // Enable physics warp after 20 seconds if configured via env var
+    // This replaces the old autoWarp parameter with global env var control
+    if (config.warp.physicsMax > 0) {
       setTimeout(async () => {
         try {
-          // Clear any existing warp state before enabling 2x warp
-          await this.conn.execute('SET WARP TO 0. WAIT 0.3. SET WARP TO 1.');
-          this.logger.info('[Ascent] Enabled 2x warp');
+          // Set physics warp mode and enable
+          await this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`);
+          this.logger.info(`[Ascent] Enabled ${config.warp.physicsMax + 1}x physics warp`);
         } catch {
           // Ignore warp errors - non-critical
         }
@@ -591,6 +622,7 @@ export const launchAscentTool: ToolDefinition = {
       }
 
       // Create ascent program and launch
+      // Note: autoWarp is now controlled by AUTOWARP_PHYSICS_MAX env var
       const program = new AscentProgram(conn, logger);
       const handle = await program.launchToOrbit({
         altitude,
@@ -598,7 +630,6 @@ export const launchAscentTool: ToolDefinition = {
         autoStage: true,
         // Note: Circularization is always enabled - disabling causes MechJeb issues
         circularize: true,
-        autoWarp: true,
       });
 
       const wait = args.wait as boolean | undefined ?? true;
@@ -609,8 +640,14 @@ export const launchAscentTool: ToolDefinition = {
 
         if (result.success) {
           const orbit = result.finalOrbit;
+          // Check eccentricity to tell LLM orbit is stable
+          const eccResult = await conn.execute('PRINT ROUND(ORBIT:ECCENTRICITY, 4).');
+          const ecc = Number.parseFloat(eccResult.output.match(/[\d.]+/)?.[0] ?? '0');
+          const orbitStatus = ecc < 0.05
+            ? 'Orbit is circular and stable.'
+            : `Orbit is stable (ecc=${ecc.toFixed(3)}).`;
           return ctx.successResponse('launch',
-            `Orbit achieved! ${formatOrbit(orbit.apoapsis, orbit.periapsis)}\nNext: set target for transfer`);
+            `Orbit achieved! ${formatOrbit(orbit.apoapsis, orbit.periapsis)}\n${orbitStatus}\nNext: set target for transfer`);
         } else {
           return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
         }

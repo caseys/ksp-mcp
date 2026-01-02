@@ -15,11 +15,36 @@ export function formatTime(seconds: number): string {
 }
 
 /**
- * Format a number, omitting decimal if it's .0
+ * Format a number: whole numbers if |n| >= 1, decimals if |n| < 1
  */
 function formatNum(n: number): string {
-  const fixed = n.toFixed(1);
-  return fixed.endsWith('.0') ? Math.round(n).toString() : fixed;
+  if (Math.abs(n) < 1) {
+    return n.toFixed(2);
+  }
+  return Math.round(n).toString();
+}
+
+/**
+ * Format a number for display: whole numbers if |n| >= 1, decimals if |n| < 1
+ * Examples: 45.3 → "45", 0.003 → "0.003", -0.5 → "-0.50"
+ */
+export function fmtNum(n: number): string {
+  if (Math.abs(n) < 1) {
+    // Keep 2 decimals for small values to preserve precision
+    return n.toFixed(2);
+  }
+  return Math.round(n).toString();
+}
+
+/**
+ * Format distance in meters: show km for values >= 10,000m
+ * Examples: 5000 → "5000m", 15000 → "15km", 2227598 → "2228km"
+ */
+export function fmtDist(meters: number): string {
+  if (Math.abs(meters) >= 10_000) {
+    return `${fmtNum(meters / 1000)}km`;
+  }
+  return `${fmtNum(meters)}m`;
 }
 
 /**

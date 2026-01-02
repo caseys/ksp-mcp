@@ -272,7 +272,32 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
       const canDetach = await freshConn.tryDetach(2000);
 
       if (canDetach) {
-        // Got back to menu - power loss (vessel exists but no power)
+        // Got back to menu - could be power loss OR transient issue
+        // Reconnect and retry health check before concluding power loss
+        const retryResult = await handleConnect({
+          cpuId: effectiveCpuId,
+          cpuLabel: effectiveCpuLabel,
+        });
+
+        if (retryResult.connected) {
+          await delay(POST_CONNECT_DELAY_MS);
+          const retryConn = getConnection();
+          const retryHealth = await checkConnectionHealth(retryConn);
+
+          if (retryHealth.healthy) {
+            // Transient issue - connection is fine now, continue normally
+            const connectedState = retryConn.getState();
+            if (connectedState.vesselName) {
+              lastConnectedVessel = {
+                name: connectedState.vesselName,
+                cpuTag: connectedState.cpuTag || '(unnamed)',
+              };
+            }
+            return retryConn;
+          }
+        }
+
+        // Still failing after retry - now we can conclude power loss
         await forceDisconnect();
         throw new Error(
           `Vessel '${vesselName}' appears to have no power - connection works but no response. ` +

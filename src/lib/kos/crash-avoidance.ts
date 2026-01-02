@@ -12,6 +12,7 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { queryNumber, unlockControls } from '../mechjeb/shared.js';
 import { delay } from '../utils/progress.js';
+import { fmtDist } from '../utils/format.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { executeNode } from '../mechjeb/execute-node.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
@@ -142,7 +143,7 @@ export async function crashAvoidance(
   let stagesUsed = 0;
 
   log.progress(`[CrashAvoidance] Initial Pe: ${initialPe.toFixed(0)}m, Target: ${targetPeriapsis}m`);
-  log.info(`[CrashAvoidance] Ship ΔV: ${initialDv.toFixed(0)} m/s`);
+  log.info(`[CrashAvoidance] Ship ΔV: ${initialDv.toFixed(0)} m/sec`);
 
   // Check if already safe
   if (initialPe > targetPeriapsis) {
@@ -190,11 +191,11 @@ export async function crashAvoidance(
     const { dvLand, dvOrbit, landingCheaper } = await checkLandingDeltaV(conn);
     if (landingCheaper === null) {
       // Suborbital trajectory - orbit params invalid, can't compare
-      log.info(`[CrashAvoidance] Delta-v to land: ${dvLand.toFixed(1)} m/s (orbit delta-v unavailable - suborbital trajectory)`);
+      log.info(`[CrashAvoidance] Delta-v to land: ${dvLand.toFixed(1)} m/sec (orbit delta-v unavailable - suborbital trajectory)`);
     } else if (landingCheaper) {
-      log.warn(`[CrashAvoidance] LANDING would have been less delta-v at ${dvLand.toFixed(1)} m/s (orbit: ${dvOrbit.toFixed(1)} m/s)`);
+      log.warn(`[CrashAvoidance] LANDING would have been less delta-v at ${dvLand.toFixed(1)} m/sec (orbit: ${dvOrbit.toFixed(1)} m/sec)`);
     } else {
-      log.info(`[CrashAvoidance] Delta-v comparison: Land=${dvLand.toFixed(1)} m/s, Orbit=${dvOrbit.toFixed(1)} m/s - orbiting is cheaper`);
+      log.info(`[CrashAvoidance] Delta-v comparison: Land=${dvLand.toFixed(1)} m/sec, Orbit=${dvOrbit.toFixed(1)} m/sec - orbiting is cheaper`);
     }
   }
 
@@ -239,7 +240,7 @@ export async function crashAvoidance(
       const vertSpeed = await queryNumber(conn, 'SHIP:VERTICALSPEED');
       if (vertSpeed >= MIN_VERTICAL_SPEED && currentAp > targetPeriapsis) {
         isSafe = true;
-        safetyLabel = `Vspd: ${vertSpeed.toFixed(0)}m/s, Ap: ${(currentAp / 1000).toFixed(1)}km`;
+        safetyLabel = `Vspd: ${vertSpeed.toFixed(0)}m/sec, Ap: ${(currentAp / 1000).toFixed(1)}km`;
       }
     } else {
       if (currentPe > targetPeriapsis) {
@@ -347,7 +348,7 @@ export async function crashAvoidance(
   const finalPe = await queryNumber(conn, 'PERIAPSIS');
   const finalAp = await queryNumber(conn, 'APOAPSIS');
 
-  log.progress(`[CrashAvoidance] Complete. Pe: ${initialPe.toFixed(0)}m → ${finalPe.toFixed(0)}m, Ap: ${(finalAp / 1000).toFixed(1)}km, ΔV used: ${deltaVUsed.toFixed(1)} m/s${circularized ? ' (circularized)' : ''}`);
+  log.progress(`[CrashAvoidance] Complete. Pe: ${fmtDist(initialPe)} → ${fmtDist(finalPe)}, Ap: ${fmtDist(finalAp)}, ΔV used: ${deltaVUsed.toFixed(1)} m/sec${circularized ? ' (circularized)' : ''}`);
 
   return {
     success: burnSuccess,
@@ -400,7 +401,7 @@ export const crashAvoidanceTool: ToolDefinition = {
       if (result.success) {
         let text = `Safe! Pe: ${result.initialPeriapsis?.toFixed(0)}m → ${result.finalPeriapsis?.toFixed(0)}m`;
         if (result.deltaVUsed) {
-          text += `, ΔV: ${result.deltaVUsed.toFixed(1)} m/s`;
+          text += `, ΔV: ${result.deltaVUsed.toFixed(1)} m/sec`;
         }
         if (result.circularized) {
           text += ' (circularized)';

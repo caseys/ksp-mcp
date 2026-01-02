@@ -9,7 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtNum } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to adjust periapsis.
@@ -76,7 +76,7 @@ export const adjustPeriapsisTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           text += await formatResultingOrbit(conn);
         }

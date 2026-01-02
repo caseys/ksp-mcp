@@ -406,9 +406,18 @@ export async function formatResultingOrbit(conn: KosConnection): Promise<string>
     const parts = orbitInfo.output.split('|').map(s => s.trim());
     if (parts.length >= 4) {
       const [body, apoKm, peKm, ecc] = parts;
+
+      // Validate parsed values are actual numbers, not command echo garbage
+      const apoNum = Number.parseFloat(apoKm);
+      const peNum = Number.parseFloat(peKm);
       const eccNum = Number.parseFloat(ecc);
+      if (isNaN(apoNum) || isNaN(peNum) || isNaN(eccNum)) {
+        console.log('[formatResultingOrbit] Invalid parsed values - possible command echo leak:', { body, apoKm, peKm, ecc });
+        return '';
+      }
+
       const isCircular = eccNum < 0.05;
-      return `\nOrbit: ${apoKm}km by ${peKm}km at ${body}${isCircular ? ' (circular)' : ''}`;
+      return `\nOrbit: ${apoNum}km by ${peNum}km at ${body}${isCircular ? ' (circular)' : ''}`;
     }
   } catch {
     // Ignore errors - best effort

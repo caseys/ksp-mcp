@@ -9,7 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtNum } from '../../utils/format.js';
 
 /**
  * Create a maneuver node for a Hohmann transfer to the target.
@@ -152,7 +152,7 @@ export const hohmannTransferTool: ToolDefinition = {
       if (result.success) {
         const nodeCount = result.nodesCreated ?? 1;
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `${nodeCount} node(s): ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `${nodeCount} node(s): ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Query current encounter info for guidance
         const { queryTargetEncounterInfo } = await import('../shared.js');

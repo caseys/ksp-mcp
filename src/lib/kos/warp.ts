@@ -9,7 +9,7 @@
 import { KosConnection } from '../../transport/kos-connection.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
-import { formatTime } from '../utils/format.js';
+import { formatTime, fmtDist } from '../utils/format.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -30,6 +30,140 @@ interface CrashCheck {
   etaToSOI?: number;
 }
 
+/**
+ * Current trajectory info for smart warp target detection
+ */
+interface TrajectoryInfo {
+  hasNode: boolean;
+  nodeEta?: number;
+  hasSOIChange: boolean;
+  soiBody?: string;
+  soiEta?: number;
+}
+
+/**
+ * Get current trajectory info for smart warp decisions
+ */
+async function getTrajectoryInfo(conn: KosConnection): Promise<TrajectoryInfo> {
+  // Query node and SOI info (close approach checked separately for vessels)
+  const result = await conn.execute(
+    'SET _hasNode TO HASNODE. ' +
+    'SET _nodeEta TO CHOOSE NEXTNODE:ETA IF _hasNode ELSE 0. ' +
+    'SET _hasPatch TO SHIP:ORBIT:HASNEXTPATCH. ' +
+    'SET _patchBody TO CHOOSE SHIP:ORBIT:NEXTPATCH:BODY:NAME IF _hasPatch ELSE "". ' +
+    'SET _patchEta TO CHOOSE ROUND(SHIP:ORBIT:NEXTPATCHETA) IF _hasPatch ELSE 0. ' +
+    'PRINT _hasNode + "|" + ROUND(_nodeEta) + "|" + _hasPatch + "|" + _patchBody + "|" + _patchEta.',
+    5000
+  );
+
+  // Parse: hasNode|nodeEta|hasPatch|patchBody|patchEta
+  const match = result.output.match(/(True|False)\|(-?\d+)\|(True|False)\|([^|]*)\|(-?\d+)/i);
+
+  if (!match) {
+    return { hasNode: false, hasSOIChange: false };
+  }
+
+  const hasNode = match[1].toLowerCase() === 'true';
+  const nodeEta = Number.parseInt(match[2]);
+  const hasSOIChange = match[3].toLowerCase() === 'true';
+  const soiBody = match[4].trim() || undefined;
+  const soiEta = Number.parseInt(match[5]);
+
+  return {
+    hasNode,
+    nodeEta: hasNode ? nodeEta : undefined,
+    hasSOIChange,
+    soiBody,
+    soiEta: hasSOIChange ? soiEta : undefined,
+  };
+}
+
+/**
+ * Build helpful error message when target name doesn't match trajectory
+ */
+function buildTrajectoryError(targetName: string, trajInfo: TrajectoryInfo): string {
+  let msg = `No encounter with "${targetName}" on current trajectory.`;
+
+  if (trajInfo.hasSOIChange) {
+    msg += `\nUpcoming: SOI change to ${trajInfo.soiBody} in ${formatTime(trajInfo.soiEta!)}.`;
+  }
+  if (trajInfo.hasNode) {
+    msg += `\nUpcoming: Maneuver node in ${formatTime(trajInfo.nodeEta!)}.`;
+  }
+  if (!trajInfo.hasSOIChange && !trajInfo.hasNode) {
+    msg += `\nNo upcoming events on current trajectory.`;
+  }
+
+  msg += `\nUse hohmann_transfer to create an encounter first.`;
+  return msg;
+}
+
+/**
+ * Resolve a body/vessel name to a warp target
+ */
+async function resolveTargetName(
+  conn: KosConnection,
+  targetName: string,
+  trajInfo: TrajectoryInfo,
+  logger: McpLogger
+): Promise<{ resolved: boolean; warpTarget?: WarpTarget | number; error?: string }> {
+  const lowerTarget = targetName.toLowerCase();
+
+  // Case 1: Target matches upcoming SOI body
+  if (trajInfo.hasSOIChange && trajInfo.soiBody?.toLowerCase() === lowerTarget) {
+    // Check if node exists before SOI - prefer node (likely course correction)
+    if (trajInfo.hasNode && trajInfo.nodeEta! < trajInfo.soiEta!) {
+      logger.info(`[Warp] "${targetName}" matches SOI, but node exists before - warping to node`);
+      return { resolved: true, warpTarget: 'node' };
+    }
+    logger.info(`[Warp] "${targetName}" matches upcoming SOI change`);
+    return { resolved: true, warpTarget: 'soi' };
+  }
+
+  // Case 2: Check if it's a vessel with close approach
+  // Try to set target and check for close approach
+  const vesselCheck = await conn.execute(
+    `IF EXISTS(VESSEL("${targetName}")) { ` +
+    `SET TARGET TO VESSEL("${targetName}"). WAIT 0.1. ` +
+    `IF HASTARGET { PRINT "OK|" + ROUND(TARGET:CLOSESTAPPROACHTIME) + "|" + ROUND(TARGET:CLOSESTAPPROACHDISTANCE). } ` +
+    `ELSE { PRINT "NOTARGET". } ` +
+    `} ELSE { PRINT "NOTFOUND". }`,
+    5000
+  );
+
+  const vesselMatch = vesselCheck.output.match(/OK\|(-?\d+)\|(-?\d+)/);
+  if (vesselMatch) {
+    const caTime = Number.parseInt(vesselMatch[1]);
+    const caDist = Number.parseInt(vesselMatch[2]);
+
+    // Valid close approach if time is reasonable
+    if (caTime > 0 && caTime < 1e8) {
+      // Check if node exists before close approach - prefer node
+      if (trajInfo.hasNode && trajInfo.nodeEta! < caTime) {
+        logger.info(`[Warp] "${targetName}" has close approach, but node exists before - warping to node`);
+        return { resolved: true, warpTarget: 'node' };
+      }
+      logger.info(`[Warp] "${targetName}" has close approach in ${formatTime(caTime)} (${Math.round(caDist / 1000)}km)`);
+      // Warp to close approach time (with lead time applied by caller)
+      return { resolved: true, warpTarget: caTime };
+    }
+  }
+
+  // Case 3: Check if it's a valid body but no encounter
+  const bodyCheck = await conn.execute(
+    `IF EXISTS(BODY("${targetName}")) { PRINT "BODY". } ELSE { PRINT "NO". }`,
+    3000
+  );
+
+  if (bodyCheck.output.includes('BODY')) {
+    // Valid body but no SOI encounter
+    return { resolved: false, error: buildTrajectoryError(targetName, trajInfo) };
+  }
+
+  // Case 4: Not a valid body or vessel
+  return { resolved: false, error: `"${targetName}" is not a valid body or vessel name.` };
+}
+
 
 /**
  * Kick-start MechJeb's warp handling with a brief warp pulse.
@@ -38,7 +172,7 @@ interface CrashCheck {
  * This works around a KSP/MechJeb quirk where warp doesn't start
  * reliably without a "kick" to get it going.
  */
-export async function kickstartWarp(conn: KosConnection, logger: McpLogger, _state?: unknown): Promise<boolean> {
+async function _kickstartWarp(conn: KosConnection, logger: McpLogger, _state?: unknown): Promise<boolean> {
   // Check warp and pulse in one kOS command to reduce round trips
   // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
   /*
@@ -195,6 +329,11 @@ async function warpToNode(
   // Check if node exists
   const nodeCheck = await conn.execute('PRINT HASNODE.');
   if (!nodeCheck.output.toLowerCase().includes('true')) {
+    // Check if SOI change exists to provide helpful suggestion
+    const soiCheck = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000);
+    if (soiCheck.output.toLowerCase().includes('true')) {
+      return { success: false, error: 'No maneuver node found. Use warp with target:"soi" to warp to upcoming SOI change.' };
+    }
     return { success: false, error: 'No maneuver node found' };
   }
 
@@ -309,9 +448,10 @@ async function warpToSOI(
       if (state.eta !== null && state.eta < 100_000) {
         log.progress(`[Warp] S.O.I. ETA: ${formatTime(state.eta)}`);
       }
-      if (state.eta !== null && state.eta > 15_000) {
-        kickstartWarp(conn, log)
-      }
+      // Disabled: using env var control instead of kickstart pulses
+      // if (state.eta !== null && state.eta > 15_000) {
+      //   kickstartWarp(conn, log)
+      // }
     },
   });
 
@@ -448,7 +588,7 @@ async function getSOIStatus(conn: KosConnection, body: string, logger?: McpLogge
   const periapsis = Number.parseInt(soiMatch[3]);
   const bodyRadius = Number.parseInt(soiMatch[4]);
 
-  log.info(`[Warp] In ${newBody} SOI: alt=${altitude}m, pe=${periapsis}m`);
+  log.info(`[Warp] In ${newBody} SOI: alt=${fmtDist(altitude)}, pe=${fmtDist(periapsis)}`);
 
   // Warn about crash trajectory (periapsis below surface) but don't auto-trigger avoidance
   // User can call crash_avoidance tool manually if needed
@@ -548,13 +688,14 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const warpTool: ToolDefinition = {
   name: 'warp',
-  description: 'Fast-forward time to maneuver, SOI change, or specific point.',
+  description: 'Fast-forward time. Auto-detects: warp to maneuver node if exists, otherwise warp to SOI change if exists.',
   inputSchema: {
     target: z.union([
       z.enum(['node', 'soi', 'periapsis', 'apoapsis']),
       z.number(),
-    ]).describe('Warp target: "node", "soi", "periapsis", "apoapsis", or a number of seconds to warp forward'),
-    leadTime: z.number().optional().default(10).describe('Seconds before target to stop warping (default: 15)'),
+      z.string(),
+    ]).optional().describe('Optional. "node" = warp to maneuver, "soi" = warp to body encounter (after transfer), "periapsis"/"apoapsis" = orbital point, number = seconds, or body/vessel name (e.g., "Mun"). If omitted, auto-detects node or SOI.'),
+    leadTime: z.number().optional().default(10).describe('Seconds before target to stop (default: 10)'),
   },
   annotations: {
     readOnlyHint: false,
@@ -568,8 +709,36 @@ export const warpTool: ToolDefinition = {
       const conn = await ctx.ensureConnected();
       const logger = ctx.createLogger(extra);
 
-      const target = args.target;
+      let target = args.target as WarpTarget | number | string | undefined;
       const leadTime = args.leadTime as number;
+      const knownTargets = ['node', 'soi', 'periapsis', 'apoapsis'];
+
+      // Get trajectory info for smart decisions
+      const trajInfo = await getTrajectoryInfo(conn);
+
+      // Auto-detect target if not specified
+      if (target === undefined) {
+        // Check for maneuver node first
+        if (trajInfo.hasNode) {
+          target = 'node';
+          logger.info('[Warp] Auto-detected: warping to maneuver node');
+        } else if (trajInfo.hasSOIChange) {
+          target = 'soi';
+          logger.info('[Warp] Auto-detected: warping to SOI change');
+        } else {
+          return ctx.errorResponse('warp', 'No maneuver node or SOI change found. Specify target: "periapsis", "apoapsis", or seconds to warp forward.');
+        }
+      }
+
+      // Handle string targets that might be body/vessel names
+      if (typeof target === 'string' && !knownTargets.includes(target)) {
+        const resolved = await resolveTargetName(conn, target, trajInfo, logger);
+        if (!resolved.resolved) {
+          return ctx.errorResponse('warp', resolved.error ?? `Unknown target: ${target}`);
+        }
+        target = resolved.warpTarget!;
+        logger.info(`[Warp] Resolved "${args.target}" to ${typeof target === 'number' ? `${target}s` : target}`);
+      }
 
       let result: WarpResult;
 
@@ -580,7 +749,7 @@ export const warpTool: ToolDefinition = {
       }
 
       if (result.success) {
-        let text = `Warp complete. Body: ${result.body}, Altitude: ${result.altitude}m`;
+        let text = `Warp complete. Body: ${result.body}, Altitude: ${fmtDist(result.altitude ?? 0)}`;
         if (result.warning) {
           text += '\n\n' + result.warning;
         }

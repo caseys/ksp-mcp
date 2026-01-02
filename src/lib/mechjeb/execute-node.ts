@@ -8,10 +8,11 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { queryNumber, unlockControls } from './shared.js';
 import { delay } from '../utils/progress.js';
-import { formatTime } from '../utils/format.js';
+import { formatTime, fmtNum } from '../utils/format.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
+import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
-import { kickstartWarp, stopWarp } from '../kos/warp.js';
+import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 export interface ExecuteNodeResult {
@@ -31,6 +32,10 @@ export interface ExecuteNodeProgress {
   etaToNode: number;
   throttle: number;
   executing: boolean;
+  /** MechJeb executor state: IDLE, WARPALIGN, LEAD, or BURN */
+  executorState?: string;
+  /** Whether MechJeb executor is enabled */
+  executorEnabled?: boolean;
 }
 
 // Configuration
@@ -70,7 +75,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
 
   // Check initial angle
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-  log.progress(`[AlignToNode] Initial angle: ${initialAngle.toFixed(1)}°`);
+  log.progress(`[AlignToNode] Initial angle: ${fmtNum(initialAngle)}°`);
 
   // Save RCS state
   const rcsState = await conn.execute('PRINT RCS.');
@@ -105,10 +110,10 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
     connection: conn,
 
     onPoll: async (state) => {
-      log.progress(`[AlignToNode] Angle: ${state.angle.toFixed(1)}°`);
+      log.progress(`[AlignToNode] Angle: ${fmtNum(state.angle)}°`);
 
       if (state.aligned) {
-        log.progress(`[AlignToNode] Aligned! (${state.angle.toFixed(2)}°)`);
+        log.progress(`[AlignToNode] Aligned! (${fmtNum(state.angle)}°)`);
         return;
       }
 
@@ -120,7 +125,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
         // No progress for 3s - enable RCS to help rotation
         try {
           await conn.execute('RCS ON.');
-          log.progress(`[AlignToNode] No progress, enabled RCS (${state.angle.toFixed(1)}°)`);
+          log.progress(`[AlignToNode] No progress, enabled RCS (${fmtNum(state.angle)}°)`);
           noProgressSince = Date.now(); // Reset timer after enabling RCS
         } catch {
           // Ignore RCS enable errors during blackout
@@ -142,7 +147,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
   // Final verification
   try {
     const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-    log.progress(`[AlignToNode] Final angle: ${finalAngle.toFixed(1)}°, aligned: ${result.success}`);
+    log.progress(`[AlignToNode] Final angle: ${fmtNum(finalAngle)}°, aligned: ${result.success}`);
     return finalAngle < ALIGN_THRESHOLD;
   } catch {
     // If we can't verify, trust the poll result
@@ -204,9 +209,9 @@ export async function executeNode(
   const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
 
   if (needsStaging) {
-    log.progress(`${logPrefix} Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s (will stage)`);
+    log.progress(`${logPrefix} Required: ${fmtNum(dvRequired)} m/sec, Current stage: ${fmtNum(dvCurrentStage)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec (will stage)`);
   } else {
-    log.progress(`${logPrefix} Required: ${dvRequired.toFixed(1)} m/s, Current stage: ${dvCurrentStage.toFixed(1)} m/s, Ship total: ${dvShipTotal.toFixed(1)} m/s`);
+    log.progress(`${logPrefix} Required: ${fmtNum(dvRequired)} m/sec, Current stage: ${fmtNum(dvCurrentStage)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec`);
   }
 
   if (dvShipTotal < dvRequired) {
@@ -214,7 +219,7 @@ export async function executeNode(
     return {
       success: false,
       nodesExecuted: 0,
-      error: `Insufficient delta-v: need ${dvRequired.toFixed(1)} m/s, have ${dvShipTotal.toFixed(1)} m/s (deficit: ${deficit.toFixed(1)} m/s). Consider adding more fuel or splitting the maneuver.`,
+      error: `Insufficient delta-v: need ${fmtNum(dvRequired)} m/sec, have ${fmtNum(dvShipTotal)} m/sec (deficit: ${fmtNum(deficit)} m/sec). Consider adding more fuel or splitting the maneuver.`,
       deltaV: { required: dvRequired, available: dvShipTotal }
     };
   }
@@ -238,15 +243,15 @@ export async function executeNode(
     return {
       success: false,
       nodesExecuted: 0,
-      error: `Failed to align ship to maneuver node. Current angle: ${angle.toFixed(1)}°`,
+      error: `Failed to align ship to maneuver node. Current angle: ${fmtNum(angle)}°`,
       deltaV: { required: dvRequired, available: dvShipTotal }
     };
   }
 
-  // Warp to node if it's far away (more than 60s)
+  // Warp to node if it's far away and warp is enabled
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
-  if (nodeEta > 20) {
-    const warpLeadTime = 10; // Stop warping 10s before node
+  if (nodeEta > 20 && config.warp.onRails) {
+    const warpLeadTime = 15; // Stop warping 15s before node (reliable with kOS WARPTO)
     log.progress(`${logPrefix} Node is ${formatTime(nodeEta)} away, warping to T-${formatTime(warpLeadTime)}`);
 
     // Clear any existing warp state before starting new warp
@@ -306,13 +311,14 @@ export async function executeNode(
     // Turn off SAS - MechJeb handles its own steering now
     await conn.execute('SAS OFF.');
 
+    // Disabled: using kOS WARPTO instead of kickstart pulses
     // Warp assist: if node > 15s away, kickstart MechJeb warp handling
-    const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 1500);
-    const nodeEtaForWarp = Number.parseFloat(warpCheckResult.output.match(/\d[\d.]*/)?.[0] || '0');
-    if (nodeEtaForWarp > 15) {
-      await delay(3000); // Let MechJeb take over steering first
-      await kickstartWarp(conn, log);
-    }
+    // const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 1500);
+    // const nodeEtaForWarp = Number.parseFloat(warpCheckResult.output.match(/\d[\d.]*/)?.[0] || '0');
+    // if (nodeEtaForWarp > 15) {
+    //   await delay(3000); // Let MechJeb take over steering first
+    //   await kickstartWarp(conn, log);
+    // }
 
     // In async mode, return immediately after starting executor
     if (asyncMode) {
@@ -380,7 +386,7 @@ export async function executeNode(
         const isCoasting = state.executorState.toUpperCase() === 'LEAD';
         const statusDetail = isCoasting
           ? `in ${formatTime(state.nodeEta)}`
-          : `${state.dvRemaining.toFixed(1)} m/s remaining`;
+          : `${fmtNum(state.dvRemaining)} m/sec remaining`;
 
         if (status !== lastStatus) {
           log.progress(`${logPrefix} ${status}, ${statusDetail}`);
@@ -392,10 +398,11 @@ export async function executeNode(
           lastLogTime = now;
         }
 
+        // Disabled: using kOS WARPTO instead of kickstart pulses
         // Kickstart warp if coasting to node (high dV = not burning yet)
-        if (state.dvRemaining > 10) {
-          await kickstartWarp(conn, log);
-        }
+        // if (state.dvRemaining > 10) {
+        //   await kickstartWarp(conn, log);
+        // }
       },
     });
 
@@ -406,7 +413,7 @@ export async function executeNode(
       if (state.noNode || state.burnComplete) {
         await stopWarp(conn);
         if (state.burnComplete && !state.noNode) {
-          log.progress(`${logPrefix} Burn complete! (${state.dvRemaining.toFixed(2)} m/s remaining < ${DV_THRESHOLD} m/s threshold)`);
+          log.progress(`${logPrefix} Burn complete! (${fmtNum(state.dvRemaining)} m/sec remaining < ${DV_THRESHOLD} m/sec threshold)`);
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
         }
@@ -420,7 +427,7 @@ export async function executeNode(
 
       // Executor stopped but burn incomplete - retry if possible
       if (state.executorStopped) {
-        log.progress(`${logPrefix} Executor stopped with ${state.dvRemaining.toFixed(1)} m/s remaining`);
+        log.progress(`${logPrefix} Executor stopped with ${fmtNum(state.dvRemaining)} m/sec remaining`);
         if (attempt < MAX_RETRIES) {
           log.progress(`${logPrefix} Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
           await delay(2000);
@@ -430,7 +437,7 @@ export async function executeNode(
           return {
             success: false,
             nodesExecuted: 0,
-            error: `Burn incomplete after ${MAX_RETRIES} attempts. ${state.dvRemaining.toFixed(1)} m/s remaining.`,
+            error: `Burn incomplete after ${MAX_RETRIES} attempts. ${fmtNum(state.dvRemaining)} m/sec remaining.`,
             deltaV: { required: dvRequired, available: dvShipTotal, remaining: state.dvRemaining },
             attempts: attempt
           };
@@ -471,37 +478,52 @@ export async function executeNode(
 
 /**
  * Get current node execution progress.
+ * Uses MechJeb NODE:STATE and NODE:ENABLED for accurate status.
  *
  * @param conn kOS connection
  * @returns ExecuteNodeProgress with current status
  */
 export async function getNodeProgress(conn: KosConnection): Promise<ExecuteNodeProgress> {
-  const countResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-  const nodesRemaining = Number.parseInt(countResult.output.match(/\d+/)?.[0] || '0');
+  // Single atomic query for all progress values including MechJeb state
+  const result = await conn.execute(
+    'PRINT "NODEPROG|" + ALLNODES:LENGTH + "|" + ' +
+    '(CHOOSE ROUND(NEXTNODE:ETA) IF HASNODE ELSE 0) + "|" + ' +
+    'ROUND(THROTTLE * 100) + "|" + ' +
+    'ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE.',
+    3000
+  );
 
-  if (nodesRemaining === 0) {
+  // Parse "NODEPROG|count|eta|throttle|enabled|state" format
+  const match = result.output.match(/NODEPROG\|(\d+)\|(-?\d+)\|(\d+)\|(True|False)\|(\w+)/i);
+
+  if (!match) {
+    // Fallback if parsing fails
     return {
       nodesRemaining: 0,
       etaToNode: 0,
       throttle: 0,
-      executing: false
+      executing: false,
+      executorState: 'IDLE',
+      executorEnabled: false,
     };
   }
 
-  // Get ETA and throttle
-  const statusResult = await conn.execute(
-    'PRINT "ETA:" + ROUND(NEXTNODE:ETA) + " THR:" + ROUND(THROTTLE * 100).',
-    2000
-  );
+  const nodesRemaining = Number.parseInt(match[1]);
+  const etaToNode = Number.parseInt(match[2]);
+  const throttle = Number.parseInt(match[3]);
+  const executorEnabled = match[4].toLowerCase() === 'true';
+  const executorState = match[5];
 
-  const etaMatch = statusResult.output.match(/ETA:(\d+)/);
-  const thrMatch = statusResult.output.match(/THR:(\d+)/);
+  // executing = MechJeb executor is enabled and not idle
+  const executing = executorEnabled && executorState !== 'IDLE';
 
   return {
     nodesRemaining,
-    etaToNode: etaMatch ? Number.parseInt(etaMatch[1]) : 0,
-    throttle: thrMatch ? Number.parseInt(thrMatch[1]) : 0,
-    executing: true
+    etaToNode,
+    throttle,
+    executing,
+    executorState,
+    executorEnabled,
   };
 }
 
@@ -571,7 +593,7 @@ export const executeNodeTool: ToolDefinition = {
       if (result.success) {
         let text = `Executed ${result.nodesExecuted} node(s)`;
         if (result.deltaV) {
-          text += `, ${result.deltaV.remaining?.toFixed(1) ?? '0'} m/s remaining`;
+          text += `, ${result.deltaV.remaining != null ? fmtNum(result.deltaV.remaining) : '0'} m/sec remaining`;
         }
 
         // Check for encounter to provide context-aware next step

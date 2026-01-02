@@ -12,7 +12,7 @@
 import { z } from 'zod';
 import type { ToolDefinition } from '../../tool-types.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtDist } from '../../utils/format.js';
 import { setLandingPositionTarget } from './shared.js';
 
 // ============================================================================
@@ -215,7 +215,7 @@ IF found {
 
     // Build formatted output
     let formatted = `Landing site found: ${latitude.toFixed(3)}°, ${longitude.toFixed(3)}°\n`;
-    formatted += `Terrain altitude: ${altitude} m\n`;
+    formatted += `Terrain altitude: ${fmtDist(altitude)}\n`;
     formatted += `Time to overflight: ${formatTime(timeFromNow)}\n`;
     formatted += `Sunlit: ${sunlit ? 'yes' : 'no'}\n`;
     formatted += `Radio contact: ${radioContact ? 'yes' : 'no'}`;

@@ -11,7 +11,7 @@ import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { executeSchema, distanceSchema, parseTarget } from '../../tool-types.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtNum } from '../../utils/format.js';
 
 /**
  * Create a maneuver node for course correction.
@@ -78,7 +78,7 @@ export async function courseCorrection(
 
 export const courseCorrectTool: ToolDefinition = {
   name: 'course_correct',
-  description: 'Fine-tune approach after transfer. Requires existing encounter - use hohmann_transfer first if none.',
+  description: 'Adjust periapsis at target AFTER hohmann_transfer created encounter. Only works mid-transfer with existing close approach.',
   inputSchema: {
     target: z.preprocess(parseTarget, z.string())
       .optional()
@@ -138,7 +138,7 @@ export const courseCorrectTool: ToolDefinition = {
       }
 
       const execInfo = result.executed ? ' (executed)' : '';
-      let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+      let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
       // Always show corrected trajectory - critical for LLM to know state
       const { queryTargetEncounterInfo } = await import('../shared.js');

@@ -9,7 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
-import { formatTime } from '../../utils/format.js';
+import { formatTime, fmtNum } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to circularize the orbit.
@@ -56,6 +56,25 @@ export const circularizeTool: ToolDefinition = {
       const conn = await ctx.ensureConnected();
       const logger = ctx.createLogger(extra);
 
+      // Check if already circular - return early to prevent loop
+      // Use both eccentricity AND altitude ratio to determine if circular
+      const orbitCheck = await conn.execute(
+        'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000).'
+      );
+      const parts = orbitCheck.output.split('|').map(s => s.trim());
+      const currentEcc = Number.parseFloat(parts[0]?.match(/[\d.]+/)?.[0] ?? '1');
+      const apoKm = Number.parseFloat(parts[1] ?? '0');
+      const peKm = Number.parseFloat(parts[2] ?? '0');
+
+      // Consider circular if: ecc < 0.02 OR (ecc < 0.1 AND altitudes within 15%)
+      const altRatio = peKm > 0 ? apoKm / peKm : 999;
+      const isCircular = currentEcc < 0.02 || (currentEcc < 0.1 && altRatio < 1.18 && altRatio > 0.85);
+
+      if (isCircular) {
+        return ctx.successResponse('circularize',
+          `Orbit is already circular (${apoKm}km x ${peKm}km, ecc=${currentEcc.toFixed(4)}). No circularization needed.`);
+      }
+
       // Auto-detect best timeRef if not specified
       let timeRef = args.timeRef as string | undefined;
       if (!timeRef) {
@@ -81,11 +100,26 @@ export const circularizeTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV?.toFixed(1)} m/s, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Show resulting orbit after execution
         if (result.executed) {
           text += await formatResultingOrbit(conn);
+
+          // Check if orbit is now circular enough - tell LLM explicitly
+          const orbitCheck = await conn.execute(
+            'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000).'
+          );
+          const parts = orbitCheck.output.split('|').map(s => s.trim());
+          const ecc = Number.parseFloat(parts[0]?.match(/[\d.]+/)?.[0] ?? '1');
+          const apoKm = Number.parseFloat(parts[1] ?? '0');
+          const peKm = Number.parseFloat(parts[2] ?? '0');
+          const altRatio = peKm > 0 ? apoKm / peKm : 999;
+          const isCircular = ecc < 0.02 || (ecc < 0.1 && altRatio < 1.18 && altRatio > 0.85);
+
+          if (isCircular) {
+            text += '\nOrbit is circular - no further circularization needed.';
+          }
         }
 
         return ctx.successResponse('circularize', text);

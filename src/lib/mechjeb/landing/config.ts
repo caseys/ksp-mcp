@@ -113,7 +113,7 @@ export const configureLandingTool: ToolDefinition = {
 
       let message = 'Landing configured:\n';
       if (targetMessage) message += targetMessage;
-      message += `Touchdown speed: ${currentConfig.touchdownSpeed.toFixed(1)} m/s\n`;
+      message += `Touchdown speed: ${currentConfig.touchdownSpeed.toFixed(1)} m/sec\n`;
       message += `Deploy gears: ${currentConfig.deployGears ? 'yes' : 'no'}\n`;
       message += `Deploy chutes: ${currentConfig.deployChutes ? 'yes' : 'no'}\n`;
       message += `Use RCS: ${currentConfig.useRCS ? 'yes' : 'no'}\n`;
