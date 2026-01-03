@@ -591,7 +591,7 @@ export const launchAscentTool: ToolDefinition = {
   description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent.',
   inputSchema: {
     altitude: distanceSchema.optional().describe('Optional target orbit altitude in meters, default above atmosphere.'),
-    inclination: z.number().optional().default(0).describe('Optional target inclination in degrees, equatorial=0, Polar=90.'),
+    inclination: z.number().optional().default(0).describe('Optional target inclination in degrees, equatorial=0'),
     // Note: Circularization is always enabled to make things simpler for LLMs
     // circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
     // Note: wait is hidden from MCP to simplify LLM usage - always waits for orbit
