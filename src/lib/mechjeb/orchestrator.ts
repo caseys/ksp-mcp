@@ -57,6 +57,8 @@ export interface ManeuverOptions {
   logger?: McpLogger;
   /** Name of the calling tool (for execution logging context). */
   callerTool?: string;
+  /** Rendezvous mode for Hohmann transfer (default true). False = simple transfer mode. */
+  rendezvous?: boolean;
 }
 
 /**
@@ -304,7 +306,7 @@ export class ManeuverOrchestrator {
     capture: boolean = false,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, rendezvous = true } = options ?? {};
 
     // Get the target name for post-execution validation
     // We need this before execution since TARGET might change
@@ -317,7 +319,7 @@ export class ManeuverOrchestrator {
 
     // Plan and optionally execute via standard flow
     const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      hohmannTransfer(this.conn, timeRef, capture),
+      hohmannTransfer(this.conn, timeRef, capture, rendezvous),
       logger,
       callerTool
     );

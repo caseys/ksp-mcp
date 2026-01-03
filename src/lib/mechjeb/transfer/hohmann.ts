@@ -4,12 +4,79 @@
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { clearNodes } from '../../kos/nodes.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
+import { z } from 'zod';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
 import { formatTime, fmtNum } from '../../utils/format.js';
+
+/**
+ * Result from a single transfer attempt (before retry logic)
+ */
+interface TransferAttemptResult {
+  success: boolean;
+  noEncounter?: boolean;  // true if failed specifically due to no encounter
+  wrongEncounter?: string;  // name of wrong body if encounter is with wrong target
+  error?: string;
+  deltaV?: number;
+  timeToNode?: number;
+  nodesCreated?: number;
+}
+
+/**
+ * Attempt a single Hohmann transfer with given mode.
+ * Does not include retry logic - just tries once and reports result.
+ */
+async function attemptHohmannTransfer(
+  conn: KosConnection,
+  timeRef: string,
+  capture: boolean,
+  rendezvous: boolean,
+  targetName: string
+): Promise<TransferAttemptResult> {
+  const captureStr = capture ? 'TRUE' : 'FALSE';
+  const rendezvousStr = rendezvous ? 'TRUE' : 'FALSE';
+  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. SET PLANNER:HOHMANNRENDEZVOUS TO ${rendezvousStr}. PRINT PLANNER:HOHMANN("${timeRef}", ${captureStr}).`;
+  const result = await conn.execute(cmd, 10_000);
+
+  const success = result.output.includes('True');
+  if (!success) {
+    return { success: false, error: sanitizeError(result.output, 'Hohmann transfer') };
+  }
+
+  // Query node info
+  const nodeInfo = await queryNodeInfo(conn);
+
+  // Verify encounter exists AND is with the correct target
+  const encounterCheck = await conn.execute(
+    'IF NEXTNODE:ORBIT:HASNEXTPATCH { PRINT NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NO_ENCOUNTER". }',
+    3000
+  );
+  const encounterBody = encounterCheck.output.trim();
+
+  if (encounterBody === 'NO_ENCOUNTER') {
+    return { success: false, noEncounter: true };
+  }
+
+  // Check if encounter is with the correct target (case-insensitive)
+  if (targetName && encounterBody.toLowerCase() !== targetName.toLowerCase()) {
+    return { success: false, wrongEncounter: encounterBody };
+  }
+
+  // Query actual node count
+  const nodeCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
+  const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+
+  return {
+    success: true,
+    deltaV: nodeInfo.deltaV,
+    timeToNode: nodeInfo.timeToNode,
+    nodesCreated,
+  };
+}
 
 /**
  * Create a maneuver node for a Hohmann transfer to the target.
@@ -19,15 +86,18 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  * - Checks target is set before planning
  * - Verifies encounter exists after node creation
  * - Confirms encounter is with correct target
+ * - Auto-retries with opposite mode if NO_ENCOUNTER on first attempt
  *
  * @param conn kOS connection
  * @param timeRef When to execute: 'COMPUTED', 'PERIAPSIS', 'APOAPSIS'
  * @param capture Include capture burn
+ * @param rendezvous true for rendezvous mode (optimizes encounter timing), false for simple transfer
  */
 export async function hohmannTransfer(
   conn: KosConnection,
   timeRef = 'COMPUTED',
-  capture = false
+  capture = false,
+  rendezvous = true
 ): Promise<ManeuverResult> {
   // Validate vessel state: must not be on ground
   const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'hohmann_transfer');
@@ -46,56 +116,54 @@ export async function hohmannTransfer(
   }
 
   const targetName = validation.targetInfo?.name ?? '';
+  const firstMode = rendezvous ? 'rendezvous' : 'transfer';
+  const secondMode = rendezvous ? 'transfer' : 'rendezvous';
 
-  // Create the maneuver node
-  const captureStr = capture ? 'TRUE' : 'FALSE';
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:HOHMANN("${timeRef}", ${captureStr}).`;
-  const result = await conn.execute(cmd, 10_000);
+  // First attempt with requested mode
+  let attempt = await attemptHohmannTransfer(conn, timeRef, capture, rendezvous, targetName);
 
-  const success = result.output.includes('True');
-  if (!success) {
-    return { success: false, error: sanitizeError(result.output, 'Hohmann transfer') };
+  // If NO_ENCOUNTER, retry with opposite mode
+  if (attempt.noEncounter) {
+    await clearNodes(conn);
+
+    // Retry with opposite mode
+    attempt = await attemptHohmannTransfer(conn, timeRef, capture, !rendezvous, targetName);
+
+    if (attempt.noEncounter) {
+      // Both modes failed - return error
+      await clearNodes(conn);
+      return {
+        success: false,
+        error: `❌ Hohmann transfer NO ENCOUNTER with both modes!\n` +
+               `Tried: ${firstMode}, then ${secondMode}\n` +
+               'The transfer trajectory does not intersect the target.\n' +
+               'Consider waiting for better phase angle.'
+      };
+    }
   }
 
-  // Query node info
-  const nodeInfo = await queryNodeInfo(conn);
-
-  // CRITICAL: Verify encounter exists AND is with the correct target
-  const encounterCheck = await conn.execute(
-    'IF NEXTNODE:ORBIT:HASNEXTPATCH { PRINT NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NO_ENCOUNTER". }',
-    3000
-  );
-  const encounterBody = encounterCheck.output.trim();
-
-  if (encounterBody === 'NO_ENCOUNTER') {
-    return {
-      success: false,
-      error: '❌ Hohmann transfer nodes created but NO ENCOUNTER detected!\n' +
-             'The transfer trajectory does not intersect the target.\n' +
-             'Consider waiting for better phase angle.'
-    };
-  }
-
-  // Check if encounter is with the correct target (case-insensitive)
-  if (targetName && encounterBody.toLowerCase() !== targetName.toLowerCase()) {
+  // Handle wrong encounter (don't retry - phase angle issue)
+  if (attempt.wrongEncounter) {
+    await clearNodes(conn);
     return {
       success: false,
       error: `❌ Hohmann transfer creates WRONG ENCOUNTER!\n` +
              `Target: ${targetName}\n` +
-             `Encounter: ${encounterBody}\n` +
+             `Encounter: ${attempt.wrongEncounter}\n` +
              'The phase angle may be wrong - wait for better timing or use interplanetary_transfer.'
     };
   }
 
-  // Query actual node count
-  const nodeCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-  const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+  // Handle other errors
+  if (!attempt.success) {
+    return { success: false, error: attempt.error ?? 'Hohmann transfer failed' };
+  }
 
   return {
     success: true,
-    deltaV: nodeInfo.deltaV,
-    timeToNode: nodeInfo.timeToNode,
-    nodesCreated,
+    deltaV: attempt.deltaV,
+    timeToNode: attempt.timeToNode,
+    nodesCreated: attempt.nodesCreated,
   };
 }
 
@@ -105,9 +173,13 @@ export async function hohmannTransfer(
 
 export const hohmannTransferTool: ToolDefinition = {
   name: 'hohmann_transfer',
-  description: 'Transfer to moon or vessel. Usually followed by course correction.',
+  description: 'Transfer to moon or vessel. Mode: "rendezvous" (default) optimizes encounter timing, "transfer" creates simple orbit change. Usually followed by course correction.',
   inputSchema: {
     target: autoTargetSchema,
+    mode: z.enum(['rendezvous', 'transfer'])
+      .optional()
+      .default('rendezvous')
+      .describe('Transfer mode: "rendezvous" (default) optimizes encounter timing, "transfer" for simple orbit change'),
     // Note: MechJeb does not have working capture logic - timeReference and capture temporarily disabled
     // timeReference: z.enum(['COMPUTED', 'PERIAPSIS', 'APOAPSIS'])
     //   .optional()
@@ -141,12 +213,17 @@ export const hohmannTransferTool: ToolDefinition = {
         }
       }
 
-      // Note: Using hardcoded defaults - MechJeb does not have working capture logic
+      // Convert mode to rendezvous boolean
+      const mode = (args.mode as string | undefined) ?? 'rendezvous';
+      const rendezvous = mode === 'rendezvous';
+
+      // Note: Using hardcoded defaults for timeRef/capture - MechJeb does not have working capture logic
       const result = await orchestrator.hohmannTransfer('COMPUTED', false, {
         target,
         execute: args.execute as boolean,
         logger,
         callerTool: 'hohmann_transfer',
+        rendezvous,
       });
 
       if (result.success) {
