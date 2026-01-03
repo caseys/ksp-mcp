@@ -7,7 +7,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition, ToolContext } from './tool-types.js';
-import { getActiveOperation, clearActiveOperation } from '../utils/operation-state.js';
+import { getActiveOperation } from '../utils/operation-state.js';
 
 // Import tool definitions from lib files
 
@@ -46,9 +46,7 @@ import {
 // MechJeb targeting tools
 import {
   setPositionTargetTool,
-  getRendezvousInfoTool,
-  getTargetOrbitTool,
-  getTargetPositionTool,
+  getTargetInfoTool,
 } from './mechjeb/targeting/index.js';
 
 // MechJeb landing tools
@@ -62,7 +60,6 @@ import {
 // kOS target tools (pure kOS, no MechJeb)
 import {
   setTargetTool,
-  getTargetTool,
   getTargetsTool,
   clearTargetTool,
 } from './kos/target/index.js';
@@ -87,36 +84,8 @@ import { runScriptTool } from './kos/run-script.js';
 import { commandTool, disconnectTool, switchCpuTool } from '../transport/connection-tools.js';
 import { listCpusTool } from '../transport/list-cpus.js';
 
-/**
- * Abort operation tool - cancels the currently running operation.
- */
-const abortOperationTool: ToolDefinition = {
-  name: 'abort_operation',
-  description: 'Cancel the currently running operation. Use if something goes wrong or you need to stop.',
-  inputSchema: {},
-  annotations: {
-    readOnlyHint: false,
-    destructiveHint: true,
-    idempotentHint: true,
-    openWorldHint: false,
-  },
-  tier: 3,
-  handler: async (_args, context) => {
-    const activeOp = getActiveOperation();
-    if (!activeOp) {
-      return context.successResponse('Abort', 'No operation is currently running.');
-    }
-
-    const toolName = activeOp.toolName;
-    const duration = Math.round((Date.now() - activeOp.startedAt) / 1000);
-
-    clearActiveOperation();
-
-    return context.successResponse('Abort',
-      `Aborted ${toolName} after ${duration}s. Note: KSP may still be executing - use SAS or manual control.`
-    );
-  },
-};
+// Abort operation tool
+import { abortOperationTool } from './abort-operation.js';
 
 /**
  * Tools that are exempt from the operation guard.
@@ -125,15 +94,11 @@ const abortOperationTool: ToolDefinition = {
  */
 const GUARD_EXEMPT_TOOLS = new Set([
   'status',
-  'get_target',
+  'get_target_info',
   'get_targets',
   'list_saves',
   'list_cpus',
   'abort_operation',
-  // MechJeb targeting (read-only)
-  'get_rendezvous_info',
-  'get_target_orbit',
-  'get_target_position',
   // MechJeb landing (read-only)
   'get_landing_prediction',
 ]);
@@ -143,59 +108,53 @@ const GUARD_EXEMPT_TOOLS = new Set([
  * Each tool file exports a toolDefinition that is imported and added here.
  */
 export const allTools: ToolDefinition[] = [
-  // Core/Status
-  statusTool,
-  abortOperationTool,
-
-  // Maneuver Planning (Tier 1 - Most Common)
+  // Tier 1 - Core Mission Operations
+  landTool,
   launchAscentTool,
   circularizeTool,
   hohmannTransferTool,
+  interplanetaryTransferTool,
   courseCorrectTool,
-  matchPlanesTool,
-  executeNodeTool,
-  crashAvoidanceTool,
-  landTool,
+  returnFromMoonTool,
+  warpTool,
 
-  // Maneuver Planning (Tier 2 - Common)
+  // Tier 2 - Orbital Adjustments
+  matchVelocitiesTool,
+  matchPlanesTool,
+  changeInclinationTool,
   adjustApoapsisTool,
   adjustPeriapsisTool,
   ellipticizeTool,
-  changeInclinationTool,
-  matchVelocitiesTool,
-  interplanetaryTransferTool,
-  returnFromMoonTool,
   resonantOrbitTool,
-  warpTool,
-  getTargetTool,
+
+  // Tier 3 - Status & Targeting
+  statusTool,
+  getTargetInfoTool,
   getTargetsTool,
+  executeNodeTool,
+  abortOperationTool,
+  setTargetTool,
+  setPositionTargetTool,
+
+  // Tier 4 - Advanced/Utility
+  crashAvoidanceTool,
   loadSaveTool,
   listSavesTool,
   quicksaveTool,
   listCpusTool,
-  // MechJeb targeting (Tier 2)
-  setPositionTargetTool,
-  getRendezvousInfoTool,
   findLandingSiteTool,
-  // MechJeb landing (Tier 2)
   configureLandingTool,
   getLandingPredictionTool,
-
-  // Advanced (Tier 3)
   changeAscendingNodeTool,
   changePeriapsisLongitudeTool,
   changeSemiMajorAxisTool,
   changeEccentricityTool,
-  setTargetTool,
   clearTargetTool,
   clearNodesTool,
   commandTool,
   disconnectTool,
   switchCpuTool,
   runScriptTool,
-  // MechJeb targeting (Tier 3)
-  getTargetOrbitTool,
-  getTargetPositionTool,
 ];
 
 /**

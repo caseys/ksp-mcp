@@ -132,7 +132,7 @@ export const listCpusTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (args, ctx) => {
     try {
       const cpus = await handleListCpus({

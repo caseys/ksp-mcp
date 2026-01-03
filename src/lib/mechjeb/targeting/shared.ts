@@ -476,3 +476,146 @@ export async function getTargetPositionInfo(conn: KosConnection): Promise<Target
     formatted,
   };
 }
+
+// ============================================================================
+// Unified Target Info
+// ============================================================================
+
+/**
+ * Comprehensive target information combining orbit, position, and rendezvous data
+ */
+export interface UnifiedTargetInfo {
+  hasTarget: boolean;
+  name?: string;
+  type?: 'body' | 'vessel';
+  // Orbit
+  apoapsis?: number;
+  periapsis?: number;
+  inclination?: number;
+  eccentricity?: number;
+  period?: number;
+  sma?: number;
+  lan?: number;
+  // Position/velocity
+  distance?: number;
+  relVelocityMag?: number;
+  canAlign?: boolean;
+  // Rendezvous
+  phaseAngle?: number;
+  relativeInclination?: number;
+  closestApproachTime?: number;
+  closestApproachDistance?: number;
+  timeToAN?: number | null;
+  timeToDN?: number | null;
+  formatted: string;
+}
+
+/**
+ * Query all target information in a single efficient call.
+ * Combines orbit, position, velocity, and rendezvous data.
+ */
+export async function getUnifiedTargetInfo(conn: KosConnection): Promise<UnifiedTargetInfo> {
+  // First check if we have a target
+  const targetInfo = await getMjTargetBasicInfo(conn);
+  if (!targetInfo || targetInfo.type === 'position' || targetInfo.type === 'none') {
+    return {
+      hasTarget: false,
+      formatted: targetInfo?.type === 'position'
+        ? 'Target is a position (lat/lng), not a body or vessel.'
+        : 'No target set. Use set_target to select a body or vessel.',
+    };
+  }
+
+  // Single query combining all target data for efficiency
+  const result = await conn.execute(
+    'SET TGT TO ADDONS:MJ:TARGET. ' +
+    'PRINT "UTGT|" + TGT:TARGETAPOAPSIS + "|" + TGT:TARGETPERIAPSIS + "|" + ' +
+    'TGT:TARGETINCLINATION + "|" + TGT:TARGETECCENTRICITY + "|" + ' +
+    'TGT:TARGETPERIOD + "|" + TGT:TARGETSMA + "|" + TGT:TARGETLAN + "|" + ' +
+    'TGT:DISTANCE + "|" + TGT:RELVELOCITY:MAG + "|" + TGT:CANALIGN + "|" + ' +
+    'TGT:PHASEANGLE + "|" + TGT:RELATIVEINCLINATION + "|" + ' +
+    'TGT:CLOSESTAPPROACHTIME + "|" + TGT:CLOSESTAPPROACHDISTANCE + "|" + ' +
+    'TGT:TIMETOAN + "|" + TGT:TIMETODN + "|" + TGT:ANEXISTS + "|" + TGT:DNEXISTS.',
+    5000
+  );
+
+  // Parse: ap|pe|inc|ecc|period|sma|lan|dist|relvel|canAlign|phase|relInc|caTime|caDist|toAN|toDN|anEx|dnEx
+  const match = result.output.match(
+    /UTGT\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.]+)\|([-\d.]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.]+)\|([-\d.E+]+)\|([-\d.E+]+)\|(True|False)\|([-\d.]+)\|([-\d.]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)\|(True|False)\|(True|False)/i
+  );
+
+  if (!match) {
+    console.log('[getUnifiedTargetInfo] Failed to parse result:', result.output);
+    return {
+      hasTarget: true,
+      name: targetInfo.name,
+      type: targetInfo.type as 'body' | 'vessel',
+      formatted: `Target: ${targetInfo.name}\n(Failed to query detailed info)`,
+    };
+  }
+
+  // Parse all values
+  const apoapsis = Number.parseFloat(match[1]);
+  const periapsis = Number.parseFloat(match[2]);
+  const inclination = Number.parseFloat(match[3]);
+  const eccentricity = Number.parseFloat(match[4]);
+  const period = Number.parseFloat(match[5]);
+  const sma = Number.parseFloat(match[6]);
+  const lan = Number.parseFloat(match[7]);
+  const distance = Number.parseFloat(match[8]);
+  const relVelocityMag = Number.parseFloat(match[9]);
+  const canAlign = match[10].toLowerCase() === 'true';
+  const phaseAngle = Number.parseFloat(match[11]);
+  const relativeInclination = Number.parseFloat(match[12]);
+  const closestApproachTime = Number.parseFloat(match[13]);
+  const closestApproachDistance = Number.parseFloat(match[14]);
+  const timeToAN = Number.parseFloat(match[15]);
+  const timeToDN = Number.parseFloat(match[16]);
+  const anExists = match[17].toLowerCase() === 'true';
+  const dnExists = match[18].toLowerCase() === 'true';
+
+  // Build formatted output
+  let formatted = `Target: ${targetInfo.name} (${targetInfo.type})\n`;
+  formatted += `Distance: ${formatDistance(distance)} | Rel vel: ${relVelocityMag.toFixed(1)} m/s\n`;
+  formatted += '\n';
+  formatted += 'Orbit:\n';
+  formatted += `  ${formatOrbit(apoapsis, periapsis)}\n`;
+  formatted += `  Inc: ${inclination.toFixed(2)}° | Ecc: ${eccentricity.toFixed(4)} | Period: ${formatPeriod(period)}\n`;
+  formatted += `  LAN: ${lan.toFixed(2)}°\n`;
+  formatted += '\n';
+  formatted += 'Rendezvous:\n';
+  formatted += `  Phase angle: ${phaseAngle.toFixed(1)}° | Rel inc: ${relativeInclination.toFixed(2)}°\n`;
+  formatted += `  Closest approach: ${formatDistance(closestApproachDistance)} in ${formatTime(closestApproachTime)}\n`;
+  if (anExists || dnExists) {
+    const parts: string[] = [];
+    if (anExists) parts.push(`AN: ${formatTime(timeToAN)}`);
+    if (dnExists) parts.push(`DN: ${formatTime(timeToDN)}`);
+    formatted += `  Time to ${parts.join(' | ')}`;
+  }
+  if (canAlign) {
+    formatted += '\n\nDocking alignment: available';
+  }
+
+  return {
+    hasTarget: true,
+    name: targetInfo.name,
+    type: targetInfo.type as 'body' | 'vessel',
+    apoapsis,
+    periapsis,
+    inclination,
+    eccentricity,
+    period,
+    sma,
+    lan,
+    distance,
+    relVelocityMag,
+    canAlign,
+    phaseAngle,
+    relativeInclination,
+    closestApproachTime,
+    closestApproachDistance,
+    timeToAN: anExists ? timeToAN : null,
+    timeToDN: dnExists ? timeToDN : null,
+    formatted,
+  };
+}

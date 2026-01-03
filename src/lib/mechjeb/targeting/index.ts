@@ -12,10 +12,8 @@ export * from './shared.js';
 
 // Tool definitions
 export { setPositionTargetTool, setPositionTargetOp } from './set-position-target.js';
-export { getRendezvousInfoTool, getRendezvousInfo } from './rendezvous-info.js';
-export {
-  getTargetOrbitTool,
-  getTargetPositionTool,
-  getTargetOrbitInfo,
-  getTargetPositionInfo,
-} from './target-info.js';
+export { getTargetInfoTool, getUnifiedTargetInfo } from './get-target-info.js';
+
+// Legacy exports for library use (queries still available)
+export { getRendezvousInfo } from './rendezvous-info.js';
+export { getTargetOrbitInfo, getTargetPositionInfo } from './target-info.js';

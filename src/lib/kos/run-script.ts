@@ -288,7 +288,7 @@ export const runScriptTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();

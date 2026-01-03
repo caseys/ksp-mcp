@@ -272,7 +272,7 @@ export const findLandingSiteTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

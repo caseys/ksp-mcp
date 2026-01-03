@@ -1,22 +1,23 @@
 /**
- * Get Rendezvous Info - Query phase angle, closest approach, and node times
+ * Get Target Info - Unified target information tool
+ *
+ * Combines orbit, position, velocity, and rendezvous data in one efficient query.
  */
 
 import type { ToolDefinition } from '../../tool-types.js';
 import { targetSchema } from '../../tool-types.js';
 import { setTarget } from '../../kos/target/set-target.js';
-import { getRendezvousInfo,  } from './shared.js';
+import { getUnifiedTargetInfo } from './shared.js';
 
 // ============================================================================
 // Tool Definition
 // ============================================================================
 
-// Tool replaced by unified get_target_info
-const _getRendezvousInfoTool: ToolDefinition = {
-  name: 'get_rendezvous_info',
+export const getTargetInfoTool: ToolDefinition = {
+  name: 'get_target_info',
   description:
-    'Get rendezvous data: phase angle, closest approach time/distance, relative inclination, ' +
-    'and time to orbital nodes. Optionally specify target, or uses current target.',
+    'Get comprehensive target information: orbit, position, velocity, and rendezvous data. ' +
+    'Optionally specify target, or uses current target.',
   inputSchema: {
     target: targetSchema,
   },
@@ -36,23 +37,20 @@ const _getRendezvousInfoTool: ToolDefinition = {
       if (target) {
         const setResult = await setTarget(conn, target);
         if (!setResult.success) {
-          return ctx.errorResponse('get_rendezvous_info', setResult.error ?? 'Failed to set target');
+          return ctx.errorResponse('get_target_info', setResult.error ?? 'Failed to set target');
         }
       }
 
-      const info = await getRendezvousInfo(conn);
+      const info = await getUnifiedTargetInfo(conn);
 
-      if (!info) {
-        return ctx.errorResponse(
-          'get_rendezvous_info',
-          'No target set or target is a position (not body/vessel). Specify target or use set_target first.'
-        );
+      if (!info.hasTarget) {
+        return ctx.errorResponse('get_target_info', info.formatted);
       }
 
-      return ctx.successResponse('get_rendezvous_info', info.formatted);
+      return ctx.successResponse('get_target_info', info.formatted);
     } catch (error) {
       return ctx.errorResponse(
-        'get_rendezvous_info',
+        'get_target_info',
         error instanceof Error ? error.message : String(error)
       );
     }
@@ -60,6 +58,4 @@ const _getRendezvousInfoTool: ToolDefinition = {
 };
 
 // Re-export for library use
-
-
-export {type RendezvousInfo, getRendezvousInfo} from './shared.js';
+export { type UnifiedTargetInfo, getUnifiedTargetInfo } from './shared.js';

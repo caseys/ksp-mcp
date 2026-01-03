@@ -16,7 +16,8 @@ import {
 // Get Target Orbit Tool
 // ============================================================================
 
-export const getTargetOrbitTool: ToolDefinition = {
+// Tool replaced by unified get_target_info
+const _getTargetOrbitTool: ToolDefinition = {
   name: 'get_target_orbit',
   description:
     'Get target orbital elements: apoapsis, periapsis, inclination, eccentricity, period, LAN. ' +
@@ -67,7 +68,8 @@ export const getTargetOrbitTool: ToolDefinition = {
 // Get Target Position Tool
 // ============================================================================
 
-export const getTargetPositionTool: ToolDefinition = {
+// Tool replaced by unified get_target_info
+const _getTargetPositionTool: ToolDefinition = {
   name: 'get_target_position',
   description:
     'Get relative position and velocity to target. Shows distance, approach speed, ' +

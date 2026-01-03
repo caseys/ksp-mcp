@@ -27,6 +27,7 @@ export interface LandingStatus {
   predictedAlt?: number;    // ASL meters
   predictedOutcome?: string; // LANDED, AEROBRAKED, NO_REENTRY, etc.
   timeToLanding?: number;   // seconds
+  speed?: number;           // Vertical speed in m/s (negative = descending)
   formatted: string;
 }
 
@@ -85,12 +86,13 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
     'SET LAND TO ADDONS:MJ:LANDING. ' +
     'PRINT "LSTAT|" + LAND:ENABLED + "|" + LAND:STATUS + "|" + LAND:LANDATTARGET + "|" + ' +
     'LAND:PREDICTIONREADY + "|" + LAND:PREDICTEDLAT + "|" + LAND:PREDICTEDLNG + "|" + ' +
-    'LAND:PREDICTEDALT + "|" + LAND:PREDICTEDOUTCOME + "|" + LAND:PREDICTEDUT + "|" + TIME:SECONDS.',
+    'LAND:PREDICTEDALT + "|" + LAND:PREDICTEDOUTCOME + "|" + LAND:PREDICTEDUT + "|" + TIME:SECONDS + "|" + ' +
+    'ROUND(SHIP:VERTICALSPEED).',
     5000
   );
 
   const match = result.output.match(
-    /LSTAT\|(True|False)\|([^|]*)\|(True|False)\|(True|False)\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|(\w+)\|([-\d.E+]+)\|([-\d.E+]+)/i
+    /LSTAT\|(True|False)\|([^|]*)\|(True|False)\|(True|False)\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|(\w+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d]+)/i
   );
 
   if (!match) {
@@ -109,6 +111,7 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
   const predictedOutcome = match[8];
   const predictedUT = Number.parseFloat(match[9]);
   const currentUT = Number.parseFloat(match[10]);
+  const speed = Number.parseInt(match[11]);
   const timeToLanding = predictionReady ? Math.max(0, predictedUT - currentUT) : undefined;
 
   // Build formatted output
@@ -138,6 +141,7 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
     predictedAlt: predictionReady ? predictedAlt : undefined,
     predictedOutcome: predictionReady ? predictedOutcome : undefined,
     timeToLanding,
+    speed,
     formatted,
   };
 }

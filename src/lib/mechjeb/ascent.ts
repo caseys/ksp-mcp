@@ -594,7 +594,8 @@ export const launchAscentTool: ToolDefinition = {
     inclination: z.number().optional().default(0).describe('Optional target inclination in degrees, equatorial=0, Polar=90.'),
     // Note: Circularization is always enabled to make things simpler for LLMs
     // circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
-    wait: z.boolean().optional().default(true).describe('Wait for orbit to be achieved (default: true). Set false to return immediately after launch.'),
+    // Note: wait is hidden from MCP to simplify LLM usage - always waits for orbit
+    // Library code can still pass wait=false via args for testing
   },
   annotations: {
     readOnlyHint: false,

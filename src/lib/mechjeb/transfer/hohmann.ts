@@ -72,7 +72,7 @@ export async function hohmannTransfer(
       success: false,
       error: '❌ Hohmann transfer nodes created but NO ENCOUNTER detected!\n' +
              'The transfer trajectory does not intersect the target.\n' +
-             'Consider waiting for better phase angle or use interplanetary_transfer.'
+             'Consider waiting for better phase angle.'
     };
   }
 
@@ -105,7 +105,7 @@ export async function hohmannTransfer(
 
 export const hohmannTransferTool: ToolDefinition = {
   name: 'hohmann_transfer',
-  description: 'Transfer to moon or vessel. Usually followed by course correction. NOT for planets - use interplanetary_transfer instead.',
+  description: 'Transfer to moon or vessel. Usually followed by course correction.',
   inputSchema: {
     target: autoTargetSchema,
     // Note: MechJeb does not have working capture logic - timeReference and capture temporarily disabled

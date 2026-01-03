@@ -659,7 +659,7 @@ export const statusTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 1,
+  tier: 3,
   handler: async (_args, ctx) => {
     try {
       const conn = ctx.getConnection();

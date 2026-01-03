@@ -8,7 +8,6 @@ import { nullLogger, parseTarget } from '../../tool-types.js';
 import { setActiveOperation, clearActiveOperation } from '../../../utils/operation-state.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { formatTime } from '../../utils/format.js';
 import { config as appConfig } from '../../../config/index.js';
 import {
   getLandingStatus,
@@ -119,7 +118,6 @@ async function monitorLanding(
 
   const log = logger ?? nullLogger;
   let lastStatusText = '';
-  let lastAltitudeLog = 0;
   let consecutiveDisabledCount = 0;
 
   const result = await pollWithBlackoutResilience<LandingPollState>({
@@ -163,17 +161,11 @@ async function monitorLanding(
     connection: conn,
 
     onPoll: (state) => {
-      // Log progress if status changed
+      // Log progress if status changed (include speed for context)
       if (state.status.status !== lastStatusText) {
-        log.progress(`[Landing] ${state.status.status}`);
+        const speedPart = state.status.speed !== undefined ? ` | ${Math.abs(state.status.speed)} m/s` : '';
+        log.progress(`[Landing] ${state.status.status}${speedPart}`);
         lastStatusText = state.status.status;
-      }
-
-      // Log altitude and velocity periodically (every 10 seconds)
-      const now = Date.now();
-      if (now - lastAltitudeLog >= 10_000 && state.status.enabled) {
-        lastAltitudeLog = now;
-        logAltitude(conn, state.status, log);
       }
 
       // Log touchdown
@@ -204,26 +196,6 @@ async function monitorLanding(
     finalStatus: result.result?.status ?? { enabled: false, status: 'Complete', landingAtTarget: false, predictionReady: false, formatted: '' },
   };
 }
-
-async function logAltitude(conn: KosConnection, status: LandingStatus, log: McpLogger): Promise<void> {
-  try {
-    const telemetry = await conn.execute(
-      'PRINT "TEL|" + ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
-      3000
-    );
-    const match = telemetry.output.match(/TEL\|([-\d]+)\|([-\d]+)/);
-    if (match) {
-      const altitude = Number.parseInt(match[1]);
-      const vSpeed = Number.parseInt(match[2]);
-      const altStr = altitude > 1000 ? `${(altitude / 1000).toFixed(1)}km` : `${altitude}m`;
-      const eta = status.timeToLanding !== undefined ? ` | E-T-A: ${formatTime(status.timeToLanding)}` : '';
-      log.progress(`[Landing] Altitude: ${altStr} | Speed: ${vSpeed} m/sec${eta}`);
-    }
-  } catch {
-    // Ignore errors during altitude logging
-  }
-}
-
 
 // ============================================================================
 // Tool Definition

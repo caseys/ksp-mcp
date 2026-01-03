@@ -457,7 +457,7 @@ export const commandTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: true,
   },
-  tier: 3,
+  tier: 4,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();
@@ -487,7 +487,7 @@ export const disconnectTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (_args, ctx) => {
     try {
       await handleDisconnect();
@@ -515,7 +515,7 @@ export const switchCpuTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (args, ctx) => {
     try {
       if (args.clear) {

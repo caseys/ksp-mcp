@@ -56,7 +56,7 @@ export const clearTargetTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (_args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

@@ -102,7 +102,8 @@ export async function getTargetInfo(conn: KosConnection): Promise<GetTargetInfo>
 // Tool Definition
 // ============================================================================
 
-export const getTargetTool: ToolDefinition = {
+// Tool replaced by unified get_target_info in mechjeb/targeting
+const _getTargetTool: ToolDefinition = {
   name: 'get_target',
   description: 'Show current navigation target.',
   inputSchema: {},
