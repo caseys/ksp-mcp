@@ -22,6 +22,8 @@ import {
   type LandingConfig,
 } from './shared.js';
 import { findLandingSite } from './find-site.js';
+import { getVesselStateInfo } from '../../kos/vessel/validate.js';
+import { circularize } from '../basic/circularize.js';
 
 // ============================================================================
 // Target Validation
@@ -308,6 +310,58 @@ export const landTool: ToolDefinition = {
         }
 
         return ctx.errorResponse('land', `Cannot start landing: ${errorDetail}`);
+      }
+
+      // Step 0.5: Check orbital safety - handle hyperbolic/unstable approaches
+      const stateInfo = await getVesselStateInfo(conn);
+      const { eccentricity, periapsis } = stateInfo;
+
+      // Determine orbit type
+      const isHyperbolic = eccentricity >= 1;
+      const isImpactTrajectory = periapsis < 0;
+      const SAFE_PERIAPSIS_M = 15_000; // 15km minimum for safe circularization
+
+      if (isHyperbolic) {
+        if (periapsis >= SAFE_PERIAPSIS_M) {
+          // Hyperbolic with safe periapsis - circularize first
+          logger.progress(`[Landing] Hyperbolic approach detected (ecc=${eccentricity.toFixed(2)}, Pe=${(periapsis/1000).toFixed(1)}km)`);
+          logger.progress(`[Landing] Planning circularization at periapsis...`);
+
+          const circResult = await circularize(conn, 'PERIAPSIS');
+          if (!circResult.success) {
+            clearActiveOperation();
+            return ctx.errorResponse('land',
+              `Cannot circularize before landing: ${circResult.error}\n` +
+              `Manual intervention required - use crash_avoidance if periapsis is unsafe.`);
+          }
+
+          // Execute the circularization node
+          logger.progress(`[Landing] Executing circularization burn (${circResult.deltaV?.toFixed(1) ?? '?'} m/s)...`);
+          const { executeNode } = await import('../execute-node.js');
+          const execResult = await executeNode(conn, { timeoutMs: 300_000 });
+          if (!execResult.success) {
+            clearActiveOperation();
+            return ctx.errorResponse('land',
+              `Circularization burn failed: ${execResult.error}\n` +
+              `Orbit may be unstable - check status before retrying.`);
+          }
+
+          logger.progress(`[Landing] Orbit circularized. Proceeding with landing...`);
+        } else {
+          // Hyperbolic with low periapsis - dangerous impact approach
+          logger.progress(`[Landing] ⚠️ DANGEROUS: Hyperbolic impact trajectory!`);
+          logger.progress(`[Landing] Periapsis ${(periapsis/1000).toFixed(1)}km is too low to circularize safely.`);
+          logger.progress(`[Landing] Proceeding with direct landing (high risk)...`);
+          // Continue with landing - MechJeb will handle the descent
+        }
+      } else if (isImpactTrajectory) {
+        // Suborbital/impact - warn but proceed
+        logger.progress(`[Landing] ⚠️ WARNING: Impact trajectory detected (Pe=${(periapsis/1000).toFixed(1)}km)`);
+        logger.progress(`[Landing] Landing without circularization - this is risky!`);
+        // Continue with landing
+      } else {
+        // Stable orbit - normal landing
+        logger.progress(`[Landing] Stable orbit confirmed (Pe=${(periapsis/1000).toFixed(1)}km, ecc=${eccentricity.toFixed(3)})`);
       }
 
       // Step 1: Resolve landing target
