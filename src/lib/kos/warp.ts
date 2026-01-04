@@ -10,6 +10,7 @@ import { KosConnection } from '../../transport/kos-connection.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { formatTime, fmtDist } from '../utils/format.js';
+import { hasTarget } from './target/shared.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -407,7 +408,24 @@ async function warpToSOI(
   // Check for SOI transition
   const soiCheck = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.');
   if (!soiCheck.output.toLowerCase().includes('true')) {
-    return { success: false, error: 'No SOI transition in current trajectory' };
+    const targetSet = await hasTarget(conn);
+    if (!targetSet) {
+      return {
+        success: false,
+        error: 'No SOI transition in current trajectory and no target set. Begin transfer to a target before warping.'
+      };
+    }
+    // Get target info to provide helpful error message
+    const targetInfo = await conn.execute(
+      'PRINT TARGET:NAME + "|" + (CHOOSE "planet" IF TARGET:BODY:NAME = "Sun" ELSE "moon").',
+      3000
+    );
+    const [targetName, targetType] = targetInfo.output.trim().split('|');
+    const transferTool = targetType === 'planet' ? 'interplanetary_transfer' : 'hohmann_transfer';
+    return {
+      success: false,
+      error: `No SOI transition in current trajectory. Use ${transferTool} to ${targetName} first.`
+    };
   }
 
   // Get current body and SOI transition ETA
