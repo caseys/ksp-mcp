@@ -197,7 +197,7 @@ export const hohmannTransferTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 1,
+  tier: 2,
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();

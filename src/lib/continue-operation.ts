@@ -23,10 +23,10 @@ export const continueOperationTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (_args, context, extra) => {
     const conn = context.getConnection();
-    if (!conn) {
+    if (!conn.isConnected()) {
       return context.successResponse('continue_operation',
         'Not connected - no operation to continue.');
     }

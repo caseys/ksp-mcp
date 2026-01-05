@@ -27,7 +27,7 @@ export const getLandingPredictionTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 4,
+  tier: 3,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

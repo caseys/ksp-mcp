@@ -101,6 +101,9 @@ function createBroadcastableLogger(
   // Create the broadcast logger singleton
   const broadcastLogger = createBroadcastLogger();
 
+  // Set initial client for progress notifications (must be before addSubscriber)
+  broadcastLogger.setInitialClient(extra);
+
   // Add the initial client as first subscriber
   broadcastLogger.addSubscriber(extra);
 
@@ -330,9 +333,10 @@ export function createServer(): McpServer {
     'ksp://status',
     async () => {
       const conn = getConnection();
-      const status = await getStatus(conn ?? undefined, FULL_TELEMETRY_OPTIONS);
-      // Add active operation info if any
-      if (conn && status.formatted) {
+      // Pass conn only if connected, otherwise let getStatus auto-connect
+      const status = await getStatus(conn.isConnected() ? conn : undefined, FULL_TELEMETRY_OPTIONS);
+      // Add active operation info if any (only if connected)
+      if (conn.isConnected() && status.formatted) {
         const opProgress = await getOperationProgress(conn);
         if (opProgress) {
           status.formatted = formatOperationProgress(opProgress) + '\n\n' + status.formatted;

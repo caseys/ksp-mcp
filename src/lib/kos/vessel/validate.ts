@@ -174,7 +174,7 @@ export async function validateVesselState(
   if (requirements.forbiddenStatuses?.includes(status)) {
     let suggestion = '';
     if (['prelaunch', 'landed', 'splashed'].includes(status)) {
-      suggestion = '\n\nUse launch_and_circularize to get into orbit first.';
+      suggestion = '\n\nUse launch to get into orbit first.';
     } else if (status === 'escaping') {
       suggestion = '\n\nUse circularize to establish a stable orbit first.';
     }

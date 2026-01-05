@@ -20,10 +20,10 @@ export const abortOperationTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 4,
   handler: async (_args, context) => {
     const conn = context.getConnection();
-    if (!conn) {
+    if (!conn.isConnected()) {
       return context.successResponse('Abort', 'Not connected - no operation to abort.');
     }
 

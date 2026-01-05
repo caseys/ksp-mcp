@@ -42,7 +42,7 @@ export interface ToolDefinition {
  */
 export interface ToolContext {
   ensureConnected: () => Promise<KosConnection>;
-  getConnection: () => KosConnection | null;
+  getConnection: () => KosConnection;
   createLogger: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => McpLogger;
   /** Create a logger that broadcasts to multiple subscribers (for long-running operations) */
   createBroadcastableLogger: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => McpLogger;

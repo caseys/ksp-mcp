@@ -43,6 +43,12 @@ import {
   interplanetaryTransferTool,
 } from './mechjeb/transfer/index.js';
 
+// Meta tools (smart routing wrappers)
+import {
+  transferTool,
+  inclinationTool,
+} from './mechjeb/meta/index.js';
+
 // MechJeb targeting tools
 import {
   setPositionTargetTool,
@@ -114,6 +120,7 @@ export const allTools: ToolDefinition[] = [
   landTool,
   launchAscentTool,
   circularizeTool,
+  transferTool,
   hohmannTransferTool,
   interplanetaryTransferTool,
   courseCorrectTool,
@@ -123,6 +130,7 @@ export const allTools: ToolDefinition[] = [
   // Tier 2 - Orbital Adjustments
   matchVelocitiesTool,
   matchPlanesTool,
+  inclinationTool,
   changeInclinationTool,
   adjustApoapsisTool,
   adjustPeriapsisTool,

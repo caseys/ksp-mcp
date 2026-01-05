@@ -600,7 +600,7 @@ export const executeNodeTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 2,
   handler: async (args, ctx, extra) => {
     const conn = await ctx.ensureConnected();
     const logger = ctx.createBroadcastableLogger(extra);

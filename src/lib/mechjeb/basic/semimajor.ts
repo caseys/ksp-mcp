@@ -48,7 +48,7 @@ export const changeSemiMajorAxisTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 4,
+  tier: 2,
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();

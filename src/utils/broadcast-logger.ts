@@ -20,10 +20,26 @@ interface Subscriber {
 /**
  * A logger that broadcasts to multiple subscribers.
  * Implements McpLogger interface so it can be used anywhere a logger is expected.
+ *
+ * Also supports progress notifications for the initial client that created the operation.
  */
 export class BroadcastLogger implements McpLogger {
   private subscribers: Map<string, Subscriber> = new Map();
   private subscriberCounter = 0;
+  // Track initial client for progress notifications
+  private initialExtra: RequestHandlerExtra<ServerRequest, ServerNotification> | null = null;
+  private progressToken: string | number | undefined;
+  private progressCount = 0;
+
+  /**
+   * Set the initial client that will receive progress notifications.
+   * Must be called before addSubscriber for proper progress token handling.
+   */
+  setInitialClient(extra: RequestHandlerExtra<ServerRequest, ServerNotification>): void {
+    this.initialExtra = extra;
+    // Extract progressToken from request metadata (same pattern as createLogger)
+    this.progressToken = extra._meta?.progressToken as string | number | undefined;
+  }
 
   /**
    * Add a subscriber to receive notifications.
@@ -95,7 +111,22 @@ export class BroadcastLogger implements McpLogger {
   }
 
   progress(message: string): void {
-    // Progress uses info level for broadcast (progressToken is per-request)
+    // Send proper progress notification to initial client (if they support it)
+    if (this.progressToken && this.initialExtra) {
+      this.progressCount++;
+      this.initialExtra.sendNotification({
+        method: 'notifications/progress',
+        params: {
+          progressToken: this.progressToken,
+          progress: this.progressCount,
+          message,
+        },
+      }).catch(() => {
+        // Fire and forget - client may have disconnected
+      });
+    }
+
+    // Also broadcast as info to all subscribers
     this.broadcast('info', message);
   }
 

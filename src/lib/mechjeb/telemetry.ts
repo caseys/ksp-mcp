@@ -974,13 +974,11 @@ export const statusTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 1,
   handler: async (_args, ctx) => {
     try {
-      const conn = ctx.getConnection();
-      if (!conn) {
-        return ctx.errorResponse('status', 'Not connected to kOS');
-      }
+      // Auto-connect if not connected (like other tools)
+      const conn = await ctx.ensureConnected();
 
       // Check for active operation first
       const opProgress = await getOperationProgress(conn);

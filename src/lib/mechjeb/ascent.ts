@@ -612,7 +612,7 @@ async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
  * Launch ascent tool definition
  */
 export const launchAscentTool: ToolDefinition = {
-  name: 'launch_and_circularize',
+  name: 'launch',
   description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent. Returns immediately by default - poll status for completion.',
   inputSchema: {
     altitude: z.union([distanceSchema, z.literal('auto')]).optional().default('auto')
@@ -633,7 +633,7 @@ export const launchAscentTool: ToolDefinition = {
     const logger = ctx.createBroadcastableLogger(extra);
 
     // Validate vessel state: must be landed or prelaunch
-    const validation = await validateVesselState(conn, LAUNCH_REQUIREMENTS, 'launch_and_circularize');
+    const validation = await validateVesselState(conn, LAUNCH_REQUIREMENTS, 'launch');
     if (!validation.valid) {
       return ctx.errorResponse('launch', validation.error ?? 'Invalid vessel state');
     }
@@ -643,7 +643,7 @@ export const launchAscentTool: ToolDefinition = {
     const altitude = altArg === 'auto' ? await getDefaultLaunchAltitude(conn) : altArg;
 
     // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor on completion)
-    await setKosOperation(conn, 'ascent', 'launch_and_circularize', String(altitude));
+    await setKosOperation(conn, 'ascent', 'launch', String(altitude));
 
     try {
       // Create ascent program and launch
