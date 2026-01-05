@@ -84,8 +84,9 @@ import { runScriptTool } from './kos/run-script.js';
 import { commandTool, disconnectTool, switchCpuTool } from '../transport/connection-tools.js';
 import { listCpusTool } from '../transport/list-cpus.js';
 
-// Abort operation tool
+// Abort and continue operation tools
 import { abortOperationTool } from './abort-operation.js';
+import { continueOperationTool } from './continue-operation.js';
 
 /**
  * Tools that are exempt from the operation guard.
@@ -99,6 +100,7 @@ const GUARD_EXEMPT_TOOLS = new Set([
   'list_saves',
   'list_cpus',
   'abort_operation',
+  'continue_operation',
   // MechJeb landing (read-only)
   'get_landing_prediction',
 ]);
@@ -133,6 +135,7 @@ export const allTools: ToolDefinition[] = [
   getTargetsTool,
   executeNodeTool,
   abortOperationTool,
+  continueOperationTool,
   setTargetTool,
   setPositionTargetTool,
 
@@ -181,7 +184,7 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
               isError: true,
               content: [{
                 type: 'text' as const,
-                text: `Cannot run ${tool.name}: ${activeOp.toolName} is currently executing (${duration}s). Wait for completion or use abort_operation.`,
+                text: `Cannot run ${tool.name}: ${activeOp.toolName} is currently executing (${duration}s). Use abort_operation to cancel, or continue_operation to subscribe to notifications.`,
               }],
             };
           }

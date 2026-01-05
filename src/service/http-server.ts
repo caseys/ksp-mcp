@@ -15,6 +15,7 @@ import { getStatus, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.j
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
 import { formatActiveOperationStatus } from '../utils/operation-state.js';
+import { createBroadcastLogger } from '../utils/broadcast-logger.js';
 import { listQuicksaves } from '../lib/kos/kuniverse.js';
 import { registerAllTools } from '../lib/tool-registry.js';
 import type { ToolContext, TargetSelectMode, OrbitInfo, McpLogger } from '../lib/tool-types.js';
@@ -83,6 +84,26 @@ function createLogger(
         }
       : (msg) => send('info', msg),
   };
+}
+
+/**
+ * Create a broadcast-enabled logger for long-running operations.
+ * The logger broadcasts to all subscribed clients, allowing multiple
+ * MCP clients to receive notifications from the same operation.
+ *
+ * @param extra The RequestHandlerExtra from the initial tool callback
+ * @returns An McpLogger that broadcasts to all subscribers
+ */
+function createBroadcastableLogger(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+): McpLogger {
+  // Create the broadcast logger singleton
+  const broadcastLogger = createBroadcastLogger();
+
+  // Add the initial client as first subscriber
+  broadcastLogger.addSubscriber(extra);
+
+  return broadcastLogger;
 }
 
 /**
@@ -159,6 +180,7 @@ export function createServer(): McpServer {
     ensureConnected,
     getConnection,
     createLogger,
+    createBroadcastableLogger,
     successResponse,
     errorResponse,
     selectTarget,

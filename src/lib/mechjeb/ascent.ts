@@ -16,6 +16,7 @@ import { delay } from '../utils/progress.js';
 import { formatOrbit, fmtDist } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
+import { clearBroadcastLogger } from '../../utils/broadcast-logger.js';
 import { ManeuverOrchestrator } from './orchestrator.js';
 import { config } from '../../config/index.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
@@ -632,7 +633,7 @@ export const launchAscentTool: ToolDefinition = {
     setActiveOperation('launch_and_circularize', 'Launching to orbit');
     try {
       const conn = await ctx.ensureConnected();
-      const logger = ctx.createLogger(extra);
+      const logger = ctx.createBroadcastableLogger(extra);
 
       // Validate vessel state: must be landed or prelaunch
       const validation = await validateVesselState(conn, LAUNCH_REQUIREMENTS, 'launch_and_circularize');
@@ -685,6 +686,7 @@ export const launchAscentTool: ToolDefinition = {
       return ctx.errorResponse('launch', error instanceof Error ? error.message : String(error));
     } finally {
       clearActiveOperation();
+      clearBroadcastLogger();
     }
   },
 };

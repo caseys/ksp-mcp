@@ -12,6 +12,7 @@ import { formatTime, fmtNum } from '../utils/format.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
+import { clearBroadcastLogger } from '../../utils/broadcast-logger.js';
 import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
@@ -601,7 +602,7 @@ export const executeNodeTool: ToolDefinition = {
     setActiveOperation('execute_node', 'Executing maneuver node');
     try {
       const conn = await ctx.ensureConnected();
-      const logger = ctx.createLogger(extra);
+      const logger = ctx.createBroadcastableLogger(extra);
 
       const result = await executeNode(conn, {
         async: args.async as boolean,
@@ -638,6 +639,7 @@ export const executeNodeTool: ToolDefinition = {
       return ctx.errorResponse('execute_node', error instanceof Error ? error.message : String(error));
     } finally {
       clearActiveOperation();
+      clearBroadcastLogger();
     }
   },
 };

@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { nullLogger, parseTarget } from '../../tool-types.js';
 import { setActiveOperation, clearActiveOperation } from '../../../utils/operation-state.js';
+import { clearBroadcastLogger } from '../../../utils/broadcast-logger.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { config as appConfig } from '../../../config/index.js';
@@ -286,7 +287,7 @@ export const landTool: ToolDefinition = {
 
     // Handle start action
     setActiveOperation('land', 'Landing in progress');
-    const logger = ctx.createLogger(extra);
+    const logger = ctx.createBroadcastableLogger(extra);
 
     try {
       // Step 0: Validate vessel state - must be in orbit or flying
@@ -633,6 +634,7 @@ export const landTool: ToolDefinition = {
       );
     } finally {
       clearActiveOperation();
+      clearBroadcastLogger();
     }
   },
 };
