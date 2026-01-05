@@ -5,7 +5,7 @@
  */
 
 import type { ToolDefinition } from './tool-types.js';
-import { getActiveOperation, clearActiveOperation } from '../utils/operation-state.js';
+import { getKosOperation, clearKosOperation } from '../utils/kos-operation-state.js';
 
 /**
  * Abort operation tool - cancels the currently running operation.
@@ -22,15 +22,20 @@ export const abortOperationTool: ToolDefinition = {
   },
   tier: 3,
   handler: async (_args, context) => {
-    const activeOp = getActiveOperation();
+    const conn = context.getConnection();
+    if (!conn) {
+      return context.successResponse('Abort', 'Not connected - no operation to abort.');
+    }
+
+    const activeOp = await getKosOperation(conn);
     if (!activeOp) {
       return context.successResponse('Abort', 'No operation is currently running.');
     }
 
     const toolName = activeOp.toolName;
-    const duration = Math.round((Date.now() - activeOp.startedAt) / 1000);
+    const duration = Math.round(activeOp.duration);
 
-    clearActiveOperation();
+    await clearKosOperation(conn);
 
     return context.successResponse('Abort',
       `Aborted ${toolName} after ${duration}s. Note: KSP may still be executing - use SAS or manual control.`

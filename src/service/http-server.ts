@@ -13,10 +13,9 @@ import {
   CPU_MENU_FORMAT,
   TRANSPORT_OPTIONS,
 } from '../config/mcp-resources.js';
-import { getStatus, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
+import { getStatus, getOperationProgress, formatOperationProgress, type ShipTelemetryOptions } from '../lib/mechjeb/telemetry.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
-import { formatActiveOperationStatus } from '../utils/operation-state.js';
 import { createBroadcastLogger } from '../utils/broadcast-logger.js';
 import { listQuicksaves } from '../lib/kos/kuniverse.js';
 import { registerAllTools } from '../lib/tool-registry.js';
@@ -330,11 +329,14 @@ export function createServer(): McpServer {
     'status',
     'ksp://status',
     async () => {
-      const status = await getStatus(undefined, FULL_TELEMETRY_OPTIONS);
+      const conn = getConnection();
+      const status = await getStatus(conn ?? undefined, FULL_TELEMETRY_OPTIONS);
       // Add active operation info if any
-      const operationStatus = formatActiveOperationStatus();
-      if (operationStatus && status.formatted) {
-        status.formatted = status.formatted + operationStatus;
+      if (conn && status.formatted) {
+        const opProgress = await getOperationProgress(conn);
+        if (opProgress) {
+          status.formatted = formatOperationProgress(opProgress) + '\n\n' + status.formatted;
+        }
       }
       return {
         contents: [{

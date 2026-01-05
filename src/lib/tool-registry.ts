@@ -7,7 +7,7 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition, ToolContext } from './tool-types.js';
-import { getActiveOperation } from '../utils/operation-state.js';
+import { getKosOperation } from '../utils/kos-operation-state.js';
 
 // Import tool definitions from lib files
 
@@ -174,19 +174,22 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
         annotations: tool.annotations,
         _meta: { tier: tool.tier },
       },
-      (args, extra) => {
+      async (args, extra) => {
         // Check operation guard (exempt certain tools)
         if (!GUARD_EXEMPT_TOOLS.has(tool.name)) {
-          const activeOp = getActiveOperation();
-          if (activeOp && activeOp.toolName !== tool.name) {
-            const duration = Math.round((Date.now() - activeOp.startedAt) / 1000);
-            return {
-              isError: true,
-              content: [{
-                type: 'text' as const,
-                text: `Cannot run ${tool.name}: ${activeOp.toolName} is currently executing (${duration}s). Use abort_operation to cancel, or continue_operation to subscribe to notifications.`,
-              }],
-            };
+          const conn = context.getConnection();
+          if (conn) {
+            const activeOp = await getKosOperation(conn);
+            if (activeOp && activeOp.toolName !== tool.name) {
+              const duration = Math.round(activeOp.duration);
+              return {
+                isError: true,
+                content: [{
+                  type: 'text' as const,
+                  text: `Cannot run ${tool.name}: ${activeOp.toolName} is currently executing (${duration}s). Use abort_operation to cancel, or continue_operation to subscribe to notifications.`,
+                }],
+              };
+            }
           }
         }
 

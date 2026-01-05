@@ -7,7 +7,7 @@
  */
 
 import type { ToolDefinition } from './tool-types.js';
-import { getActiveOperation } from '../utils/operation-state.js';
+import { getKosOperation } from '../utils/kos-operation-state.js';
 import { addBroadcastSubscriber, getActiveBroadcastLogger } from '../utils/broadcast-logger.js';
 
 /**
@@ -25,7 +25,13 @@ export const continueOperationTool: ToolDefinition = {
   },
   tier: 3,
   handler: async (_args, context, extra) => {
-    const activeOp = getActiveOperation();
+    const conn = context.getConnection();
+    if (!conn) {
+      return context.successResponse('continue_operation',
+        'Not connected - no operation to continue.');
+    }
+
+    const activeOp = await getKosOperation(conn);
 
     if (!activeOp) {
       return context.successResponse('continue_operation',
@@ -36,7 +42,7 @@ export const continueOperationTool: ToolDefinition = {
 
     if (!broadcastLogger) {
       // Operation exists but doesn't support broadcast (shouldn't happen with new code)
-      const duration = Math.round((Date.now() - activeOp.startedAt) / 1000);
+      const duration = Math.round(activeOp.duration);
       return context.successResponse('continue_operation',
         `${activeOp.toolName} is running (${duration}s) but does not support broadcast notifications.\n` +
         `Use status tool to check progress, or abort_operation to cancel.`);
@@ -50,12 +56,12 @@ export const continueOperationTool: ToolDefinition = {
         'Failed to subscribe to broadcast logger.');
     }
 
-    const duration = Math.round((Date.now() - activeOp.startedAt) / 1000);
+    const duration = Math.round(activeOp.duration);
     const subscriberCount = broadcastLogger.subscriberCount;
 
     return context.successResponse('continue_operation',
       `Subscribed to ${activeOp.toolName} (running for ${duration}s).\n` +
-      `${activeOp.description ?? ''}\n` +
+      `Target: ${activeOp.target || 'N/A'}\n` +
       `Active subscribers: ${subscriberCount}\n` +
       `You will receive notification updates as they occur.`);
   },
