@@ -141,8 +141,9 @@ export const circularizeTool: ToolDefinition = {
   name: 'circularize',
   description: 'Circularize orbit in current SOI. Warp to SOI or launch to orbit before use. Do NOT use if already near circular.',
   inputSchema: {
-    timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'])
+    timeRef: z.union([z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW']), z.literal('auto')])
       .optional()
+      .default('auto')
       .describe('When to circularize. If omitted, auto-picks based on orbit (periapsis for hyperbolic, nearest apse for elliptical)'),
     execute: executeSchema,
   },
@@ -177,9 +178,9 @@ export const circularizeTool: ToolDefinition = {
           `Orbit is already circular (${apoKm}km x ${peKm}km, ecc=${currentEcc.toFixed(4)}). No circularization needed.`);
       }
 
-      // Auto-detect best timeRef if not specified
-      let timeRef = args.timeRef as string | undefined;
-      if (!timeRef) {
+      // Auto-detect best timeRef if 'auto'
+      let timeRef = args.timeRef as string;
+      if (timeRef === 'auto') {
         const orbitInfo = await conn.execute(
           'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS.'
         );

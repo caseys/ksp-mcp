@@ -492,7 +492,7 @@ export class AscentProgram {
       desiredAltitude: altitude,
       desiredInclination: inclination,
       autostage: autoStage,
-      skipCircularization: true,  // We handle circularization ourselves for reliability
+      skipCircularization: false,  // Let MechJeb handle circularization
       autowarp: config.warp.physicsMax > 0  // Enable MechJeb autowarp if physics warp is enabled
     });
 
@@ -583,7 +583,7 @@ import { z } from 'zod';
 import type { ToolDefinition } from '../tool-types.js';
 import { distanceSchema } from '../tool-types.js';
 import { validateVesselState, LAUNCH_REQUIREMENTS } from '../kos/vessel/validate.js';
-import { setActiveOperation, clearActiveOperation } from '../../utils/operation-state.js';
+import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 
 /**
  * Get default launch altitude based on current body:
@@ -613,14 +613,13 @@ async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
  */
 export const launchAscentTool: ToolDefinition = {
   name: 'launch_and_circularize',
-  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent.',
+  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent. Returns immediately by default - poll status for completion.',
   inputSchema: {
-    altitude: distanceSchema.optional().describe('Optional target orbit altitude in meters, default above atmosphere.'),
+    altitude: z.union([distanceSchema, z.literal('auto')]).optional().default('auto')
+      .describe('Optional target orbit altitude in meters, default above atmosphere.'),
     inclination: z.number().optional().default(0).describe('Optional target inclination in degrees, equatorial=0'),
-    // Note: Circularization is always enabled to make things simpler for LLMs
-    // circularize: z.boolean().optional().default(true).describe('Circularize orbit after ascent (default: true)'),
-    // Note: wait is hidden from MCP to simplify LLM usage - always waits for orbit
-    // Library code can still pass wait=false via args for testing
+    wait: z.union([z.boolean(), z.literal('auto')]).optional().default('auto')
+      .describe('Wait for orbit and stream progress updates.'),
   },
   annotations: {
     readOnlyHint: false,
@@ -630,23 +629,23 @@ export const launchAscentTool: ToolDefinition = {
   },
   tier: 1,
   handler: async (args, ctx, extra) => {
-    setActiveOperation('launch_and_circularize', 'Launching to orbit');
+    const conn = await ctx.ensureConnected();
+    const logger = ctx.createBroadcastableLogger(extra);
+
+    // Validate vessel state: must be landed or prelaunch
+    const validation = await validateVesselState(conn, LAUNCH_REQUIREMENTS, 'launch_and_circularize');
+    if (!validation.valid) {
+      return ctx.errorResponse('launch', validation.error ?? 'Invalid vessel state');
+    }
+
+    // Resolve 'auto' altitude to default based on body's atmosphere
+    const altArg = args.altitude as number | 'auto';
+    const altitude = altArg === 'auto' ? await getDefaultLaunchAltitude(conn) : altArg;
+
+    // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor on completion)
+    await setKosOperation(conn, 'ascent', 'launch_and_circularize', String(altitude));
+
     try {
-      const conn = await ctx.ensureConnected();
-      const logger = ctx.createBroadcastableLogger(extra);
-
-      // Validate vessel state: must be landed or prelaunch
-      const validation = await validateVesselState(conn, LAUNCH_REQUIREMENTS, 'launch_and_circularize');
-      if (!validation.valid) {
-        return ctx.errorResponse('launch', validation.error ?? 'Invalid vessel state');
-      }
-
-      // Get default altitude based on body's atmosphere
-      let altitude = args.altitude as number | undefined;
-      if (altitude === undefined) {
-        altitude = await getDefaultLaunchAltitude(conn);
-      }
-
       // Create ascent program and launch
       // Note: autoWarp is now controlled by AUTOWARP_PHYSICS_MAX env var
       const program = new AscentProgram(conn, logger);
@@ -658,35 +657,46 @@ export const launchAscentTool: ToolDefinition = {
         circularize: true,
       });
 
-      const wait = args.wait as boolean | undefined ?? true;
+      // Resolve 'auto' to client-appropriate default
+      const waitArg = args.wait as boolean | 'auto';
+      const wait = waitArg === 'auto' ? ctx.supportsNotifications(extra) : waitArg;
 
       if (wait) {
         // Wait for completion (blocking call that monitors ascent)
-        const result = await handle.waitForCompletion();
+        try {
+          const result = await handle.waitForCompletion();
 
-        if (result.success) {
-          const orbit = result.finalOrbit;
-          // Check eccentricity to tell LLM orbit is stable
-          const eccResult = await conn.execute('PRINT ROUND(ORBIT:ECCENTRICITY, 4).');
-          const ecc = Number.parseFloat(eccResult.output.match(/[\d.]+/)?.[0] ?? '0');
-          const orbitStatus = ecc < 0.05
-            ? 'Orbit is circular and stable.'
-            : `Orbit is stable (ecc=${ecc.toFixed(3)}).`;
-          return ctx.successResponse('launch',
-            `Orbit achieved! ${formatOrbit(orbit.apoapsis, orbit.periapsis)}\n${orbitStatus}\nNext: set target for transfer`);
-        } else {
-          return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
+          if (result.success) {
+            const orbit = result.finalOrbit;
+            // Check eccentricity to tell LLM orbit is stable
+            const eccResult = await conn.execute('PRINT ROUND(ORBIT:ECCENTRICITY, 4).');
+            const ecc = Number.parseFloat(eccResult.output.match(/[\d.]+/)?.[0] ?? '0');
+            const orbitStatus = ecc < 0.05
+              ? 'Orbit is circular and stable.'
+              : `Orbit is stable (ecc=${ecc.toFixed(3)}).`;
+            return ctx.successResponse('launch',
+              `Orbit achieved! ${formatOrbit(orbit.apoapsis, orbit.periapsis)}\n${orbitStatus}\nNext: set target for transfer`);
+          } else {
+            return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
+          }
+        } finally {
+          // Clear operation state when waiting for completion
+          await clearKosOperation(conn);
+          clearBroadcastLogger();
         }
       } else {
-        // Return immediately after launch
+        // Return immediately - operation continues in background
+        // Safety monitor in kOS will auto-clear _MCP_OP when orbit is achieved
         return ctx.successResponse('launch',
-          `Launch started! Target: ${(altitude / 1000).toFixed(0)} km orbit.`);
+          `Launch started! Target: ${(altitude / 1000).toFixed(0)} km orbit.\nPoll status for progress. MechJeb is flying.`);
       }
     } catch (error) {
-      return ctx.errorResponse('launch', error instanceof Error ? error.message : String(error));
-    } finally {
-      clearActiveOperation();
+      // Clear operation state on error
+      try {
+        await clearKosOperation(conn);
+      } catch { /* ignore cleanup errors */ }
       clearBroadcastLogger();
+      return ctx.errorResponse('launch', error instanceof Error ? error.message : String(error));
     }
   },
 };

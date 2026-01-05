@@ -5,7 +5,7 @@
 import { z } from 'zod';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { nullLogger, parseTarget } from '../../tool-types.js';
-import { setActiveOperation, clearActiveOperation } from '../../../utils/operation-state.js';
+import { setKosOperation, clearKosOperation } from '../../../utils/kos-operation-state.js';
 import { clearBroadcastLogger } from '../../../utils/broadcast-logger.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
@@ -206,8 +206,7 @@ async function monitorLanding(
 
 export const landTool: ToolDefinition = {
   name: 'land',
-  description:
-    'Land on surface from orbit.',
+  description: 'Land on surface from orbit.',
   inputSchema: {
     action: z.enum(['start', 'abort', 'status'])
       .optional()
@@ -215,8 +214,9 @@ export const landTool: ToolDefinition = {
       .describe('start=begin landing (default), abort=cancel, status=check progress'),
 
     // Target (NEW - first optional param for targeting)
-    target: z.preprocess(parseTarget, z.string())
+    target: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
       .optional()
+      .default('auto')
       .describe('Landed vessel name to land near. If omitted, uses existing target (if valid surface/vessel) or auto-finds site.'),
 
     // Position override (only if target not specified)
@@ -239,22 +239,26 @@ export const landTool: ToolDefinition = {
       .min(0)
       .max(10)
       .optional()
+      .default(2)
       .describe('Target touchdown velocity in m/s (default ~2)'),
     deployGears: z.boolean()
       .optional()
+      .default(true)
       .describe('Auto-deploy landing gear'),
     deployChutes: z.boolean()
       .optional()
+      .default(true)
       .describe('Auto-deploy parachutes'),
     useRCS: z.boolean()
       .optional()
+      .default(false)
       .describe('Use RCS for fine position adjustments'),
 
     // Monitoring
-    wait: z.boolean()
+    wait: z.union([z.boolean(), z.literal('auto')])
       .optional()
-      .default(true)
-      .describe('Wait for landing to complete (default: true).'),
+      .default('auto')
+      .describe('If true, wait for touchdown and stream progress. If false, return immediately.'),
   },
   annotations: {
     readOnlyHint: false,
@@ -266,7 +270,9 @@ export const landTool: ToolDefinition = {
   handler: async (args, ctx, extra) => {
     const conn = await ctx.ensureConnected();
     const action = args.action as 'start' | 'abort' | 'status';
-    const wait = args.wait as boolean | undefined ?? true;
+    // Resolve 'auto' to client-appropriate default
+    const waitArg = args.wait as boolean | 'auto';
+    const wait = waitArg === 'auto' ? ctx.supportsNotifications(extra) : waitArg;
 
     // Handle status action first (simplest case) - no operation guard needed
     if (action === 'status') {
@@ -276,7 +282,7 @@ export const landTool: ToolDefinition = {
 
     // Handle abort action - clears active operation
     if (action === 'abort') {
-      clearActiveOperation();
+      await clearKosOperation(conn);
       const result = await stopLanding(conn);
       if (result.success) {
         return ctx.successResponse('land', 'Landing aborted. Vessel control returned to manual.');
@@ -286,32 +292,31 @@ export const landTool: ToolDefinition = {
     }
 
     // Handle start action
-    setActiveOperation('land', 'Landing in progress');
     const logger = ctx.createBroadcastableLogger(extra);
 
-    try {
-      // Step 0: Validate vessel state - must be in orbit or flying
-      const statusCheck = await conn.execute('PRINT SHIP:STATUS.', 2000);
-      const vesselStatus = statusCheck.output.trim().split('\n').pop()?.trim().toUpperCase() ?? '';
+    // Validate vessel state BEFORE setting operation state
+    // Step 0: Validate vessel state - must be in orbit or flying
+    const statusCheck = await conn.execute('PRINT SHIP:STATUS.', 2000);
+    const vesselStatus = statusCheck.output.trim().split('\n').pop()?.trim().toUpperCase() ?? '';
 
-      const validStatuses = ['FLYING', 'ORBITING', 'ESCAPING', 'SUB_ORBITAL'];
-      if (!validStatuses.some(s => vesselStatus.includes(s))) {
-        clearActiveOperation();
-
-        // Provide detailed error based on status
-        let errorDetail = '';
-        if (vesselStatus.includes('LANDED') || vesselStatus.includes('SPLASHED')) {
-          errorDetail = `Vessel is already ${vesselStatus.toLowerCase()}. Use launch tool to take off first.`;
-        } else if (vesselStatus.includes('PRELAUNCH')) {
-          errorDetail = 'Vessel is on the launchpad. Use launch tool to reach orbit first.';
-        } else if (vesselStatus.includes('DOCKED')) {
-          errorDetail = 'Vessel is docked. Undock first, then use land tool.';
-        } else {
-          errorDetail = `Current status: ${vesselStatus}. Must be in orbit or flying to land.`;
-        }
-
-        return ctx.errorResponse('land', `Cannot start landing: ${errorDetail}`);
+    const validStatuses = ['FLYING', 'ORBITING', 'ESCAPING', 'SUB_ORBITAL'];
+    if (!validStatuses.some(s => vesselStatus.includes(s))) {
+      // Provide detailed error based on status
+      let errorDetail = '';
+      if (vesselStatus.includes('LANDED') || vesselStatus.includes('SPLASHED')) {
+        errorDetail = `Vessel is already ${vesselStatus.toLowerCase()}. Use launch tool to take off first.`;
+      } else if (vesselStatus.includes('PRELAUNCH')) {
+        errorDetail = 'Vessel is on the launchpad. Use launch tool to reach orbit first.';
+      } else if (vesselStatus.includes('DOCKED')) {
+        errorDetail = 'Vessel is docked. Undock first, then use land tool.';
+      } else {
+        errorDetail = `Current status: ${vesselStatus}. Must be in orbit or flying to land.`;
       }
+
+      return ctx.errorResponse('land', `Cannot start landing: ${errorDetail}`);
+    }
+
+    try {
 
       // Step 0.5: Check orbital safety - handle hyperbolic/unstable approaches
       const stateInfo = await getVesselStateInfo(conn);
@@ -330,7 +335,6 @@ export const landTool: ToolDefinition = {
 
           const circResult = await circularize(conn, 'PERIAPSIS');
           if (!circResult.success) {
-            clearActiveOperation();
             return ctx.errorResponse('land',
               `Cannot circularize before landing: ${circResult.error}\n` +
               `Manual intervention required - use crash_avoidance if periapsis is unsafe.`);
@@ -341,7 +345,6 @@ export const landTool: ToolDefinition = {
           const { executeNode } = await import('../execute-node.js');
           const execResult = await executeNode(conn, { timeoutMs: 300_000 });
           if (!execResult.success) {
-            clearActiveOperation();
             return ctx.errorResponse('land',
               `Circularization burn failed: ${execResult.error}\n` +
               `Orbit may be unstable - check status before retrying.`);
@@ -366,7 +369,7 @@ export const landTool: ToolDefinition = {
       }
 
       // Step 1: Resolve landing target
-      const target = args.target as string | undefined;
+      const targetArg = args.target as string | 'auto';
       const latitude = args.latitude as number | undefined;
       const longitude = args.longitude as number | undefined;
       const namedPreset = args.named_preset as 'KSC' | undefined;
@@ -375,13 +378,13 @@ export const landTool: ToolDefinition = {
       let targetLat: number | undefined;
       let targetLng: number | undefined;
 
-      // Check if target is the current SOI body - if so, ignore it (use auto-land)
-      let effectiveTarget = target;
-      if (target) {
+      // Check if target is 'auto' or the current SOI body - if so, use auto-land
+      let effectiveTarget: string | undefined = targetArg === 'auto' ? undefined : targetArg;
+      if (effectiveTarget) {
         const bodyCheck = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
         const currentBody = bodyCheck.output.trim().split('\n').pop()?.trim() ?? '';
-        if (target.toLowerCase() === currentBody.toLowerCase()) {
-          logger.info(`[Landing] Target "${target}" is current SOI body, using auto-land`);
+        if (effectiveTarget.toLowerCase() === currentBody.toLowerCase()) {
+          logger.info(`[Landing] Target "${effectiveTarget}" is current SOI body, using auto-land`);
           effectiveTarget = undefined;
         }
       }
@@ -565,6 +568,12 @@ export const landTool: ToolDefinition = {
       // Check if we have a position target (either just set or previously set)
       const hasTarget = await hasLandingPositionTarget(conn);
 
+      // Set operation state in kOS RIGHT BEFORE starting (persists across restarts, auto-cleared by safety monitor)
+      const targetStr = targetLat !== undefined && targetLng !== undefined
+        ? `${targetLat.toFixed(2)},${targetLng.toFixed(2)}`
+        : '';
+      await setKosOperation(conn, 'landing', 'land', targetStr);
+
       // Enable MechJeb autowarp before starting landing (if physics warp is configured)
       if (appConfig.warp.physicsMax > 0) {
         logger.info('[Landing] Enabling MechJeb autowarp');
@@ -581,6 +590,7 @@ export const landTool: ToolDefinition = {
       }
 
       if (!landResult.success) {
+        await clearKosOperation(conn);
         return ctx.errorResponse('land', landResult.error ?? 'Failed to start landing');
       }
 
@@ -614,9 +624,12 @@ export const landTool: ToolDefinition = {
             // Ignore errors querying site details
           }
 
+          // Safety monitor should have already cleared _MCP_OP on landing
           return ctx.successResponse('land',
             `Landing complete!${landingDetails}\nVessel safely on surface.`);
         } else {
+          // Clear operation on failure (safety monitor only clears on success)
+          await clearKosOperation(conn);
           return ctx.errorResponse('land',
             monitorResult.error ?? `Landing failed: ${monitorResult.finalStatus.status}`);
         }
@@ -628,13 +641,15 @@ export const landTool: ToolDefinition = {
 
       return ctx.successResponse('land', message);
     } catch (error) {
+      // Clear operation state on error
+      try {
+        await clearKosOperation(conn);
+      } catch { /* ignore cleanup errors */ }
+      clearBroadcastLogger();
       return ctx.errorResponse(
         'land',
         error instanceof Error ? error.message : String(error)
       );
-    } finally {
-      clearActiveOperation();
-      clearBroadcastLogger();
     }
   },
 };

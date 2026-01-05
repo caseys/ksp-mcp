@@ -206,7 +206,7 @@ export const hohmannTransferTool: ToolDefinition = {
 
       // Auto-select target if not provided (use 2nd closest to avoid targeting current SOI body)
       let target = args.target as string | undefined;
-      if (!target) {
+      if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'second-closest');
         if (autoTarget) {
           target = autoTarget;

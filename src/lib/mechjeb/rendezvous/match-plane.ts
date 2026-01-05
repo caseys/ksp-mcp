@@ -79,7 +79,7 @@ export const matchPlanesTool: ToolDefinition = {
 
       // Auto-select closest vessel if not provided
       let target = args.target as string | undefined;
-      if (!target) {
+      if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'closest-vessel');
         if (autoTarget) {
           target = autoTarget;

@@ -32,9 +32,9 @@ export const getTargetInfoTool: ToolDefinition = {
     try {
       const conn = await ctx.ensureConnected();
 
-      // Set target if provided
-      const target = args.target as string | undefined;
-      if (target) {
+      // Set target if explicitly provided (not 'auto')
+      const target = args.target as string;
+      if (target !== 'auto') {
         const setResult = await setTarget(conn, target);
         if (!setResult.success) {
           return ctx.errorResponse('get_target_info', setResult.error ?? 'Failed to set target');

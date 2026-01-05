@@ -80,8 +80,9 @@ export const courseCorrectTool: ToolDefinition = {
   name: 'course_correct',
   description: 'Adjust periapsis at target AFTER hohmann_transfer created encounter. Only works mid-transfer with existing close approach.',
   inputSchema: {
-    target: z.preprocess(parseTarget, z.string())
+    target: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
       .optional()
+      .default('auto')
       .describe('Target name (body or vessel) set by previous tool. Use get_targets to list available names.'),
     targetDistance: distanceSchema.optional().default(50_000).describe('Target periapsis (bodies) or closest approach (vessels) in meters (default: 50km)'),
     execute: executeSchema,
@@ -101,7 +102,7 @@ export const courseCorrectTool: ToolDefinition = {
 
       // Auto-select 2nd closest body if no target provided
       let target = args.target as string | undefined;
-      if (!target) {
+      if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'second-closest');
         if (autoTarget) {
           target = autoTarget;

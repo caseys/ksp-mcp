@@ -41,7 +41,10 @@ export const adjustApoapsisTool: ToolDefinition = {
   name: 'adjust_apoapsis',
   description: 'Change orbit high point. Use to raise/lower orbit.',
   inputSchema: {
-    altitude: distanceSchema.optional().describe('Target apoapsis altitude in meters (default: current + 10km)'),
+    altitude: z.union([distanceSchema, z.literal('auto')])
+      .optional()
+      .default('auto')
+      .describe('Target apoapsis altitude in meters (default: current + 10km)'),
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
       .optional()
       .default('PERIAPSIS')
@@ -61,11 +64,14 @@ export const adjustApoapsisTool: ToolDefinition = {
       const orchestrator = new ManeuverOrchestrator(conn);
       const logger = ctx.createLogger(extra);
 
-      // Default altitude: current apoapsis + 10km
-      let altitude = args.altitude as number | undefined;
-      if (altitude === undefined) {
+      // Resolve 'auto' altitude: current apoapsis + 10km
+      const altArg = args.altitude as number | 'auto';
+      let altitude: number;
+      if (altArg === 'auto') {
         const orbitInfo = await ctx.getBasicOrbitInfo(conn);
         altitude = orbitInfo ? orbitInfo.apoapsis + 10_000 : 100_000;
+      } else {
+        altitude = altArg;
       }
 
       const result = await orchestrator.adjustApoapsis(altitude, args.timeRef as string, {

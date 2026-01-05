@@ -106,7 +106,10 @@ export const setTargetTool: ToolDefinition = {
   name: 'set_target',
   description: 'Set navigation target. Prefer target param on transfer tools.',
   inputSchema: {
-    name: z.preprocess(parseTarget, z.string()).optional().describe('Target name. Use get_targets to list available names. (default: 2nd closest body)'),
+    name: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
+      .optional()
+      .default('auto')
+      .describe('Target name. Use get_targets to list available names. (default: 2nd closest body)'),
     type: z.enum(['auto', 'body', 'vessel']).optional().default('auto')
       .describe('Target type: "auto" tries name directly, "body" for celestial bodies, "vessel" for ships'),
   },
@@ -121,9 +124,9 @@ export const setTargetTool: ToolDefinition = {
     try {
       const conn = await ctx.ensureConnected();
 
-      // Default to 2nd closest body if no name provided
-      let name = args.name as string | undefined;
-      if (!name) {
+      // Resolve 'auto' to 2nd closest body
+      let name = args.name as string;
+      if (name === 'auto') {
         // Import dynamically to avoid circular dependency
         const { ManeuverOrchestrator } = await import('../../mechjeb/orchestrator.js');
         const orchestrator = new ManeuverOrchestrator(conn);

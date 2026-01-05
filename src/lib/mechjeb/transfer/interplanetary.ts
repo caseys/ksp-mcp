@@ -98,7 +98,7 @@ export const interplanetaryTransferTool: ToolDefinition = {
 
       // Auto-select furthest body if not provided (interplanetary = distant planets)
       let target = args.target as string | undefined;
-      if (!target) {
+      if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'furthest-body');
         if (autoTarget) {
           target = autoTarget;

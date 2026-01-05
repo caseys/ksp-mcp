@@ -15,6 +15,7 @@ import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/broadcast-logger.js';
 import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
+import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 
 export interface ExecuteNodeResult {
   success: boolean;
@@ -236,9 +237,13 @@ export async function executeNode(
       error: `Insufficient delta-v: need ${fmtNum(dvRequired)} m/sec, have ${fmtNum(dvShipTotal)} m/sec (deficit: ${fmtNum(deficit)} m/sec). Consider adding more fuel or splitting the maneuver.`,
       deltaV: { required: dvRequired, available: dvShipTotal }
     };
-  } else {
-    log.progress(`${logPrefix} Delta V: ${fmtNum(dvRequired)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec`);
   }
+
+  log.progress(`${logPrefix} Delta V: ${fmtNum(dvRequired)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec`);
+
+  // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor)
+  // This enables status tracking even if MCP client times out
+  await setKosOperation(conn, 'node', callerTool ?? 'execute_node', `${dvRequired.toFixed(0)}m/s`);
 
   // Determine if staging will be needed during burn
   const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
@@ -252,18 +257,11 @@ export async function executeNode(
   const halfBurn = burnDuration / 2;
   log.progress(`${logPrefix} Estimated burn: ${formatTime(burnDuration)}, will shift node by ${formatTime(halfBurn)}`);
 
-  // Align ship to maneuver node BEFORE warping
-  const isAligned = await alignToNode(conn, logger);
-  if (!isAligned) {
-    await conn.execute('SAS OFF.');
-    const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-    return {
-      success: false,
-      nodesExecuted: 0,
-      error: `Failed to align ship to maneuver node. Current angle: ${fmtNum(angle)}°`,
-      deltaV: { required: dvRequired, available: dvShipTotal }
-    };
-  }
+  // Best-effort alignment before warp - MechJeb will handle final alignment
+  // We don't fail on alignment issues since MechJeb's executor has its own alignment phase
+  await alignToNode(conn, logger).catch(() => {
+    log.warn(`${logPrefix} Pre-alignment failed, MechJeb will align during execution`);
+  });
 
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
@@ -341,6 +339,7 @@ export async function executeNode(
     // }
 
     // In async mode, return immediately after starting executor
+    // Don't clear _MCP_OP - safety monitor will handle it when node completes
     if (asyncMode) {
       return {
         success: true,
@@ -437,6 +436,8 @@ export async function executeNode(
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
         }
+        // Clear operation state on success (safety monitor may have already cleared)
+        try { await clearKosOperation(conn); } catch { /* ignore */ }
         return {
           success: true,
           nodesExecuted: initialNodeCount,
@@ -454,6 +455,7 @@ export async function executeNode(
           continue; // Continue to next retry attempt
         } else {
           await unlockControls(conn);
+          try { await clearKosOperation(conn); } catch { /* ignore */ }
           return {
             success: false,
             nodesExecuted: 0,
@@ -471,6 +473,7 @@ export async function executeNode(
         // Disable executor on final timeout
         await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
         await unlockControls(conn);
+        try { await clearKosOperation(conn); } catch { /* ignore */ }
 
         const lastDvRemaining = result.result?.dvRemaining ?? dvRequired;
         return {
@@ -488,6 +491,7 @@ export async function executeNode(
 
   // Should not reach here, but just in case
   await unlockControls(conn);
+  try { await clearKosOperation(conn); } catch { /* ignore */ }
   return {
     success: false,
     nodesExecuted: 0,
@@ -573,7 +577,6 @@ export async function disableNodeExecutor(conn: KosConnection): Promise<void> {
 
 import { z } from 'zod';
 import type { ToolDefinition } from '../tool-types.js';
-import { setActiveOperation, clearActiveOperation } from '../../utils/operation-state.js';
 
 /**
  * Execute node tool definition
@@ -599,18 +602,27 @@ export const executeNodeTool: ToolDefinition = {
   },
   tier: 3,
   handler: async (args, ctx, extra) => {
-    setActiveOperation('execute_node', 'Executing maneuver node');
-    try {
-      const conn = await ctx.ensureConnected();
-      const logger = ctx.createBroadcastableLogger(extra);
+    const conn = await ctx.ensureConnected();
+    const logger = ctx.createBroadcastableLogger(extra);
+    const asyncMode = args.async as boolean;
 
+    try {
+      // executeNode() handles validation and operation state tracking internally
       const result = await executeNode(conn, {
-        async: args.async as boolean,
+        async: asyncMode,
         timeoutMs: (args.timeoutSeconds as number) * 1000,
         logger,
       });
 
       if (result.success) {
+        // For async mode, return simple message
+        if (asyncMode) {
+          return ctx.successResponse('execute_node',
+            `Node execution started. Poll status for progress.\n` +
+            `Delta-V required: ${result.deltaV?.required ? fmtNum(result.deltaV.required) : '?'} m/sec`);
+        }
+
+        // Sync mode - build detailed response
         let text = `Executed ${result.nodesExecuted} node(s)`;
         if (result.deltaV) {
           text += `, ${result.deltaV.remaining != null ? fmtNum(result.deltaV.remaining) : '0'} m/sec remaining`;
@@ -636,10 +648,8 @@ export const executeNodeTool: ToolDefinition = {
         return ctx.errorResponse('execute_node', result.error ?? 'Failed');
       }
     } catch (error) {
-      return ctx.errorResponse('execute_node', error instanceof Error ? error.message : String(error));
-    } finally {
-      clearActiveOperation();
       clearBroadcastLogger();
+      return ctx.errorResponse('execute_node', error instanceof Error ? error.message : String(error));
     }
   },
 };

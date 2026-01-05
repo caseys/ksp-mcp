@@ -44,8 +44,14 @@ export const ellipticizeTool: ToolDefinition = {
   name: 'ellipticize',
   description: 'Set both orbit high and low points in one maneuver.',
   inputSchema: {
-    periapsis: distanceSchema.optional().describe('Target periapsis altitude in meters (default: current periapsis)'),
-    apoapsis: distanceSchema.optional().describe('Target apoapsis altitude in meters (default: current apoapsis)'),
+    periapsis: z.union([distanceSchema, z.literal('auto')])
+      .optional()
+      .default('auto')
+      .describe('Target periapsis altitude in meters (default: current periapsis)'),
+    apoapsis: z.union([distanceSchema, z.literal('auto')])
+      .optional()
+      .default('auto')
+      .describe('Target apoapsis altitude in meters (default: current apoapsis)'),
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
       .optional()
       .default('APOAPSIS')
@@ -65,18 +71,18 @@ export const ellipticizeTool: ToolDefinition = {
       const orchestrator = new ManeuverOrchestrator(conn);
       const logger = ctx.createLogger(extra);
 
-      // Default to current orbital parameters
-      let periapsis = args.periapsis as number | undefined;
-      let apoapsis = args.apoapsis as number | undefined;
-      if (periapsis === undefined || apoapsis === undefined) {
+      // Resolve 'auto' to current orbital parameters
+      const peArg = args.periapsis as number | 'auto';
+      const apArg = args.apoapsis as number | 'auto';
+      let periapsis: number;
+      let apoapsis: number;
+      if (peArg === 'auto' || apArg === 'auto') {
         const orbitInfo = await ctx.getBasicOrbitInfo(conn);
-        if (orbitInfo) {
-          periapsis = periapsis ?? orbitInfo.periapsis;
-          apoapsis = apoapsis ?? orbitInfo.apoapsis;
-        } else {
-          periapsis = periapsis ?? 70_000;
-          apoapsis = apoapsis ?? 70_000;
-        }
+        periapsis = peArg === 'auto' ? (orbitInfo?.periapsis ?? 70_000) : peArg;
+        apoapsis = apArg === 'auto' ? (orbitInfo?.apoapsis ?? 70_000) : apArg;
+      } else {
+        periapsis = peArg;
+        apoapsis = apArg;
       }
 
       const result = await orchestrator.ellipticize(periapsis, apoapsis, args.timeRef as string, {

@@ -70,6 +70,20 @@ export const config = Object.freeze({
     onRails: process.env.AUTOWARP_ONRAILS !== '0' && process.env.AUTOWARP_ONRAILS !== 'false',
   },
 
+  // MCP client configuration
+  mcp: {
+    /**
+     * Override notification support detection.
+     * When MCP_NOTIFY is set:
+     * - 'true': Assume client supports notifications (wait=true default for long ops)
+     * - 'false': Assume no notification support (wait=false default)
+     * When unset, auto-detect based on client info.
+     */
+    notify: process.env.MCP_NOTIFY === 'true',
+    /** Whether MCP_NOTIFY was explicitly configured */
+    notifyConfigured: process.env.MCP_NOTIFY !== undefined,
+  },
+
   // Timeout defaults (milliseconds)
   timeouts: {
     /** Timeout for initial socket connection */

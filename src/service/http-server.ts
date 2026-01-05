@@ -6,6 +6,8 @@ import {
   getConnection,
   ensureConnected,
 } from '../transport/connection-tools.js';
+import { config } from '../config/index.js';
+import { isClaudeClient, type ClientInfo } from '../lib/tool-types.js';
 import {
   CONNECTION_GUIDE,
   CPU_MENU_FORMAT,
@@ -185,6 +187,43 @@ export function createServer(): McpServer {
     errorResponse,
     selectTarget,
     getBasicOrbitInfo,
+    /**
+     * Check if the MCP client supports notifications well.
+     * Detection priority:
+     * 1. MCP_NOTIFY env var (explicit override)
+     * 2. HTTP user-agent header (web clients)
+     * 3. MCP client info from initialize request (stdio clients)
+     * 4. Fallback to true (assume notification support)
+     */
+    supportsNotifications: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>): boolean => {
+      // 1. Check explicit config override
+      if (config.mcp.notifyConfigured) {
+        if (DEBUG) console.error(`[supportsNotifications] MCP_NOTIFY configured: ${config.mcp.notify}`);
+        return config.mcp.notify;
+      }
+
+      // 2. Check HTTP user-agent header (available for HTTP transport)
+      const userAgent = (extra as { requestInfo?: { headers?: Map<string, string> } }).requestInfo?.headers?.get?.('user-agent');
+      if (userAgent) {
+        const supports = !userAgent.toLowerCase().includes('claude');
+        if (DEBUG) console.error(`[supportsNotifications] HTTP user-agent "${userAgent}" -> ${supports}`);
+        return supports;
+      }
+
+      // 3. Check stdio client info from MCP SDK initialize request
+      // Use server.server to access the underlying Server class with getClientVersion
+      const clientInfo = server.server.getClientVersion?.() as ClientInfo | undefined;
+      if (DEBUG) console.error(`[supportsNotifications] clientInfo: ${JSON.stringify(clientInfo)}`);
+      if (clientInfo?.name) {
+        const supports = !isClaudeClient(clientInfo);
+        if (DEBUG) console.error(`[supportsNotifications] client "${clientInfo.name}" -> ${supports}`);
+        return supports;
+      }
+
+      // 4. Fallback - assume notification support
+      if (DEBUG) console.error(`[supportsNotifications] fallback -> true`);
+      return true;
+    },
   };
 
   // Register all tools from the tool registry

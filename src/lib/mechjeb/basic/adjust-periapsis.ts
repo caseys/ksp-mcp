@@ -41,7 +41,10 @@ export const adjustPeriapsisTool: ToolDefinition = {
   name: 'adjust_periapsis',
   description: 'Change orbit low point. Use for deorbit or orbit adjustments.',
   inputSchema: {
-    altitude: distanceSchema.optional().describe('Target periapsis altitude in meters (default: current - 10km)'),
+    altitude: z.union([distanceSchema, z.literal('auto')])
+      .optional()
+      .default('auto')
+      .describe('Target periapsis altitude in meters (default: current - 10km)'),
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
       .optional()
       .default('APOAPSIS')
@@ -61,11 +64,14 @@ export const adjustPeriapsisTool: ToolDefinition = {
       const orchestrator = new ManeuverOrchestrator(conn);
       const logger = ctx.createLogger(extra);
 
-      // Default altitude: current periapsis - 10km (minimum 0)
-      let altitude = args.altitude as number | undefined;
-      if (altitude === undefined) {
+      // Resolve 'auto' altitude: current periapsis - 10km (minimum 0)
+      const altArg = args.altitude as number | 'auto';
+      let altitude: number;
+      if (altArg === 'auto') {
         const orbitInfo = await ctx.getBasicOrbitInfo(conn);
         altitude = orbitInfo ? Math.max(0, orbitInfo.periapsis - 10_000) : 50_000;
+      } else {
+        altitude = altArg;
       }
 
       const result = await orchestrator.adjustPeriapsis(altitude, args.timeRef as string, {

@@ -5,29 +5,30 @@
  * - Auto-clear after 20 minutes (no operation should take that long)
  * - Simple clear function for use in finally blocks
  * - Getter auto-cleans stale state
+ *
+ * Operation types help status tool query the right MechJeb autopilot:
+ * - 'ascent': Check ADDONS:MJ:ASCENT:ENABLED/STATUS
+ * - 'landing': Check ADDONS:MJ:LANDING:ENABLED/STATUS
+ * - 'node': Check ADDONS:MJ:NODE:ENABLED/STATE
+ * - 'maneuver': Generic maneuver (check for nodes)
  */
+
+export type OperationType = 'ascent' | 'landing' | 'node' | 'maneuver' | 'other';
 
 export interface ActiveOperation {
   toolName: string;
   startedAt: number;
   description?: string;
+  /** Type of operation - helps status query the right MechJeb module */
+  operationType: OperationType;
+  /** Target altitude/orbit for ascent, target body for transfers, etc. */
+  target?: string;
 }
 
 const STALE_TIMEOUT_MS = 20 * 60 * 1000; // 20 minutes
 
 let activeOperation: ActiveOperation | null = null;
 
-/**
- * Set the currently active operation.
- * Call at the start of long-running tool handlers.
- */
-export function setActiveOperation(toolName: string, description?: string): void {
-  activeOperation = {
-    toolName,
-    startedAt: Date.now(),
-    description,
-  };
-}
 
 /**
  * Clear the active operation.

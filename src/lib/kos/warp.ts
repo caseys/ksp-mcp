@@ -709,10 +709,10 @@ export const warpTool: ToolDefinition = {
   description: 'Fast-forward time. Auto-detects: warp to maneuver node if exists, otherwise warp to SOI change if exists.',
   inputSchema: {
     target: z.union([
-      z.enum(['node', 'soi', 'periapsis', 'apoapsis']),
+      z.enum(['node', 'soi', 'periapsis', 'apoapsis', 'auto']),
       z.number(),
       z.string(),
-    ]).optional().describe('Optional. "node" = warp to maneuver, "soi" = warp to body encounter (after transfer), "periapsis"/"apoapsis" = orbital point, number = seconds, or body/vessel name (e.g., "Mun"). If omitted, auto-detects node or SOI.'),
+    ]).optional().default('auto').describe('Optional. "node" = warp to maneuver, "soi" = warp to body encounter (after transfer), "periapsis"/"apoapsis" = orbital point, number = seconds, or body/vessel name (e.g., "Mun"). If omitted, auto-detects node or SOI.'),
     leadTime: z.number().optional().default(10).describe('Seconds before target to stop (default: 10)'),
   },
   annotations: {
@@ -727,15 +727,15 @@ export const warpTool: ToolDefinition = {
       const conn = await ctx.ensureConnected();
       const logger = ctx.createLogger(extra);
 
-      let target = args.target as WarpTarget | number | string | undefined;
+      let target = args.target as WarpTarget | number | string;
       const leadTime = args.leadTime as number;
       const knownTargets = ['node', 'soi', 'periapsis', 'apoapsis'];
 
       // Get trajectory info for smart decisions
       const trajInfo = await getTrajectoryInfo(conn);
 
-      // Auto-detect target if not specified
-      if (target === undefined) {
+      // Auto-detect target if 'auto'
+      if (target === 'auto') {
         // Check for maneuver node first
         if (trajInfo.hasNode) {
           target = 'node';

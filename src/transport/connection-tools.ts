@@ -27,19 +27,26 @@ let cpuPreference: CpuPreference | null = null;
  * Safety monitor script - injected on connection to release controls on signal loss.
  * Idempotent: only initializes once per kOS session.
  *
- * Trigger: CommNet signal loss - fires when radio contact with KSC lost
+ * Features:
+ * - Releases controls on CommNet signal loss (unless MechJeb autopilot is active)
+ * - Auto-warps to signal when landed in blackout
+ * - Tracks operation state via _MCP_OP variable
+ * - Auto-clears _MCP_OP when operation completes
  */
 const SAFETY_MONITOR_SCRIPT = `
 IF NOT (DEFINED KSP_MCP_SAFETY_INIT) {
   GLOBAL KSP_MCP_SAFETY_INIT IS TRUE.
   GLOBAL KSP_MCP_SIGNAL_LOST IS FALSE.
   GLOBAL KSP_MCP_WARP_PENDING IS FALSE.
-  FUNCTION KSP_MCP_RELEASE { UNLOCK STEERING. UNLOCK THROTTLE. SET SHIP:CONTROL:NEUTRALIZE TO TRUE. IF NOT SAS { SAS ON. } }
+  GLOBAL _MCP_OP IS "".
+  FUNCTION KSP_MCP_MJ_ACTIVE { RETURN ADDONS:MJ:ASCENT:ENABLED OR ADDONS:MJ:LANDING:ENABLED OR ADDONS:MJ:NODE:ENABLED. }
+  FUNCTION KSP_MCP_RELEASE { IF _MCP_OP <> "" AND KSP_MCP_MJ_ACTIVE() { PRINT "[ksp-mcp] Signal lost but MechJeb active - not releasing.". RETURN. } UNLOCK STEERING. UNLOCK THROTTLE. SET SHIP:CONTROL:NEUTRALIZE TO TRUE. IF NOT SAS { SAS ON. } }
   FUNCTION KSP_MCP_TIDAL_LOCKED { LOCAL rt IS SHIP:BODY:ROTATIONPERIOD. LOCAL op IS SHIP:BODY:ORBIT:PERIOD. RETURN ABS(rt - op) / op < 1e-6. }
   FUNCTION KSP_MCP_WARP_TIME { LOCAL rt IS SHIP:BODY:ROTATIONPERIOD * 0.4. RETURN MAX(300, MIN(rt, 3600)). }
   WHEN NOT HOMECONNECTION:ISCONNECTED THEN { IF NOT KSP_MCP_SIGNAL_LOST { KSP_MCP_RELEASE(). SET KSP_MCP_SIGNAL_LOST TO TRUE. PRINT "[ksp-mcp] Signal lost - controls released.". } PRESERVE. }
   WHEN HOMECONNECTION:ISCONNECTED THEN { IF KSP_MCP_SIGNAL_LOST { SET KSP_MCP_SIGNAL_LOST TO FALSE. SET KSP_MCP_WARP_PENDING TO FALSE. PRINT "[ksp-mcp] Signal restored.". } PRESERVE. }
   WHEN (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") AND NOT HOMECONNECTION:ISCONNECTED AND NOT KSP_MCP_WARP_PENDING THEN { SET KSP_MCP_WARP_PENDING TO TRUE. IF KSP_MCP_TIDAL_LOCKED() { PRINT "[ksp-mcp] Tidally locked body - cannot warp to signal.". } ELSE { LOCAL wt IS KSP_MCP_WARP_TIME(). LOCAL i IS 0. PRINT "[ksp-mcp] Landed in blackout - warping " + ROUND(wt/60) + "m to signal...". UNTIL HOMECONNECTION:ISCONNECTED OR i >= 20 { KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + wt). WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED. WAIT 1. SET i TO i + 1. } IF HOMECONNECTION:ISCONNECTED { PRINT "[ksp-mcp] Signal restored after warp.". } ELSE { PRINT "[ksp-mcp] Max warp attempts - still no signal.". } SET KSP_MCP_WARP_PENDING TO FALSE. } PRESERVE. }
+  WHEN _MCP_OP <> "" THEN { LOCAL parts IS _MCP_OP:SPLIT("|"). LOCAL op IS parts[0]. LOCAL done IS FALSE. IF op = "ascent" AND PERIAPSIS > 0 AND SHIP:STATUS = "ORBITING" { SET done TO TRUE. } IF op = "landing" AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") { SET done TO TRUE. } IF op = "node" AND NOT ADDONS:MJ:NODE:ENABLED AND NOT HASNODE { SET done TO TRUE. } IF done { PRINT "[ksp-mcp] Operation complete: " + op. SET _MCP_OP TO "". } PRESERVE. }
   PRINT "[ksp-mcp] Safety monitor active.".
 }`.trim();
 

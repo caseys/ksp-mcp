@@ -50,6 +50,12 @@ export interface ToolContext {
   errorResponse: (prefix: string, error: string) => CallToolResult;
   selectTarget: (orchestrator: ManeuverOrchestrator, mode: TargetSelectMode, checkExisting?: boolean) => Promise<string | null>;
   getBasicOrbitInfo: (conn: KosConnection | null) => Promise<OrbitInfo | null>;
+  /**
+   * Check if the MCP client supports notifications well.
+   * Returns true if notifications are supported (e.g., web clients, Cline).
+   * Returns false for Claude Code (stdio) which doesn't display notifications well.
+   */
+  supportsNotifications: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => boolean;
 }
 
 /**
@@ -68,6 +74,24 @@ export interface OrbitInfo {
   periapsis: number;
   apoapsis: number;
   altitude: number;
+}
+
+/**
+ * MCP client info from the initialize request.
+ */
+export interface ClientInfo {
+  name: string;
+  version: string;
+}
+
+/**
+ * Check if a client is Claude Code based on client info or user-agent.
+ * Returns true if the client is likely Claude Code (which doesn't display notifications well).
+ */
+export function isClaudeClient(clientInfo?: ClientInfo, userAgent?: string): boolean {
+  if (clientInfo?.name?.toLowerCase().includes('claude')) return true;
+  if (userAgent?.toLowerCase().includes('claude')) return true;
+  return false;
 }
 
 // ============================================================================
@@ -228,23 +252,29 @@ function matchTargetName(input: string): string {
 
 /**
  * Preprocess target name to handle common misspellings and STT errors.
+ * Passes through 'auto' unchanged for dynamic resolution.
  */
 export function parseTarget(val: unknown): string | unknown {
   if (typeof val !== 'string') return val;
+  if (val === 'auto') return val;  // Pass through sentinel
   return matchTargetName(val);
 }
 
 /**
  * Common zod schema for the optional target parameter.
  * Preprocesses input to fuzzy-match against known KSP body names.
+ * Default 'auto' uses current target if set.
  */
-export const targetSchema = z.preprocess(parseTarget, z.string())
+export const targetSchema = z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
   .optional()
+  .default('auto')
   .describe('Target name (body or vessel). Use get_targets to list available names. If omitted, uses current target.');
 
 /**
  * Optional target schema with auto-selection capability.
+ * Default 'auto' auto-selects based on tool context.
  */
-export const autoTargetSchema = z.preprocess(parseTarget, z.string())
+export const autoTargetSchema = z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
   .optional()
+  .default('auto')
   .describe('Target name. Use get_targets to list available names. If omitted, auto-selects based on tool.');
