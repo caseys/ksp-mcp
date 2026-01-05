@@ -16,6 +16,7 @@ import { delay } from '../utils/progress.js';
 import { formatOrbit, fmtDist } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
+import { ManeuverOrchestrator } from './orchestrator.js';
 import { config } from '../../config/index.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
@@ -122,8 +123,7 @@ export class AscentHandle {
     let lastLogTime = 0;
     let _prevDeltaV: number | null = null;
     let lastStatus = '';
-    let coastingWarpEnabled = false;
-    let coastingSettledAt: number | null = null;  // When we first saw coasting + settled
+    let circularizationStarted = false;  // Track if we've started circularization
 
     interface AscentPollState {
       enabled: boolean;
@@ -171,7 +171,7 @@ export class AscentHandle {
         return { enabled, status, apoapsis, periapsis, body, inOrbit, deltaV, throttle, angularVel };
       },
 
-      isDone: (state) => state.inOrbit || !state.enabled,
+      isDone: (state) => state.inOrbit,  // Only done when actually in orbit
       isSuccess: (state) => state.inOrbit,
 
       timeoutMs: MAX_WAIT_MS,
@@ -195,25 +195,26 @@ export class AscentHandle {
           lastLogTime = now;
         }
 
-        // Enable warp when coasting to circularization AND ship attitude has settled for 10s
-        const isCoastingToCirc = state.status.toLowerCase().includes('coasting to circularization');
-        const isSettled = state.angularVel < 0.1;  // rad/s - ship has mostly stopped rotating
-        if (!coastingWarpEnabled && isCoastingToCirc && isSettled) {
-          const now = Date.now();
-          if (coastingSettledAt === null) {
-            coastingSettledAt = now;
-            this.logger.info(`[Ascent] Coasting detected, waiting for attitude to stabilize...`);
-          } else if (now - coastingSettledAt >= 10_000) {
-            // Ship has been settled for 10 seconds, safe to warp
-            coastingWarpEnabled = true;
-            if (config.warp.physicsMax > 0) {
-              await this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`);
-              this.logger.info(`[Ascent] Coasting - enabled ${config.warp.physicsMax + 1}x physics warp`);
-            }
+        // Detect when MechJeb ascent is disabled but we're suborbital (ready for circularization)
+        // This happens because we set skipCircularization=true
+        const isSuborbital = state.apoapsis > atmHeight && state.periapsis < atmHeight;
+        if (!circularizationStarted && !state.enabled && isSuborbital) {
+          circularizationStarted = true;
+          this.logger.info(`[Ascent] MechJeb ascent complete, starting circularization...`);
+
+          // Use the ManeuverOrchestrator for reliable circularization (handles warp + execution)
+          const orchestrator = new ManeuverOrchestrator(this.conn);
+          const circResult = await orchestrator.circularize('APOAPSIS', {
+            execute: true,
+            logger: this.logger,
+            callerTool: 'circularize_after_launch',
+          });
+
+          if (circResult.success) {
+            this.logger.info(`[Ascent] Circularization complete!`);
+          } else {
+            this.logger.warn(`[Ascent] Circularization issue: ${circResult.error ?? 'unknown'}`);
           }
-        } else if (!coastingWarpEnabled && coastingSettledAt !== null) {
-          // Ship started rotating again, reset the timer
-          coastingSettledAt = null;
         }
 
         // Disabled: using env var control instead of kickstart pulses
@@ -477,7 +478,7 @@ export class AscentProgram {
       altitude,
       inclination = 0,
       autoStage = true,
-      circularize = true,
+      // circularize option is ignored - we always handle circularization ourselves
       // autoWarp is now controlled by AUTOWARP_PHYSICS_MAX env var
     } = options;
 
@@ -490,7 +491,7 @@ export class AscentProgram {
       desiredAltitude: altitude,
       desiredInclination: inclination,
       autostage: autoStage,
-      skipCircularization: !circularize,
+      skipCircularization: true,  // We handle circularization ourselves for reliability
       autowarp: config.warp.physicsMax > 0  // Enable MechJeb autowarp if physics warp is enabled
     });
 
@@ -584,6 +585,29 @@ import { validateVesselState, LAUNCH_REQUIREMENTS } from '../kos/vessel/validate
 import { setActiveOperation, clearActiveOperation } from '../../utils/operation-state.js';
 
 /**
+ * Get default launch altitude based on current body:
+ * - With atmosphere: atmHeight * 1.5 (safe margin above atmosphere)
+ * - Without atmosphere: 50km
+ */
+async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
+  const NO_ATM_DEFAULT = 50_000; // 50km for bodies without atmosphere
+  try {
+    const result = await conn.execute(
+      'IF SHIP:BODY:ATM:EXISTS { PRINT SHIP:BODY:ATM:HEIGHT. } ELSE { PRINT 0. }',
+      3000
+    );
+    const match = result.output.match(/([\d.]+)/);
+    if (match) {
+      const atmHeight = parseFloat(match[1]);
+      return atmHeight > 0 ? Math.round(atmHeight * 1.5) : NO_ATM_DEFAULT;
+    }
+  } catch {
+    // Ignore errors
+  }
+  return NO_ATM_DEFAULT;
+}
+
+/**
  * Launch ascent tool definition
  */
 export const launchAscentTool: ToolDefinition = {
@@ -619,7 +643,7 @@ export const launchAscentTool: ToolDefinition = {
       // Get default altitude based on body's atmosphere
       let altitude = args.altitude as number | undefined;
       if (altitude === undefined) {
-        altitude = await ctx.getDefaultLaunchAltitude(conn);
+        altitude = await getDefaultLaunchAltitude(conn);
       }
 
       // Create ascent program and launch

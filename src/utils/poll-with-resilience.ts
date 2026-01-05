@@ -50,6 +50,9 @@ export interface PollOptions<T> {
 
   /** Optional: kOS connection for detailed failure classification */
   connection?: KosConnection;
+
+  /** Optional: AbortSignal to cancel the operation (e.g., from MCP client timeout) */
+  signal?: AbortSignal;
 }
 
 export interface PollResult<T> {

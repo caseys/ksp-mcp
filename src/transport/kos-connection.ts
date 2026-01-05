@@ -242,6 +242,43 @@ export class KosConnection {
   }
 
   /**
+   * Reset connection to clear any stuck state.
+   * Use when an operation is orphaned (e.g., MCP client timeout, save reload).
+   * This closes the transport (killing any pending I/O), clears the lock,
+   * and resets state so the next command triggers a fresh reconnect.
+   *
+   * Unlike forceReleaseLock(), this avoids garbled output by ensuring
+   * no in-flight commands can interfere with subsequent commands.
+   */
+  resetConnection(): void {
+    // Close transport to kill any pending I/O
+    if (this.transport) {
+      this.transport.close().catch(() => {});
+      this.transport = null;
+    }
+
+    // Clear the lock
+    this.commandLock = Promise.resolve();
+
+    // Reset state - next command will trigger reconnect
+    this.state = {
+      connected: false,
+      cpuId: this.state.cpuId, // Preserve CPU preference
+      vesselName: null,
+      cpuTag: this.state.cpuTag, // Preserve CPU preference
+      lastError: 'Connection reset to clear stuck state',
+    };
+  }
+
+  /**
+   * Force-release the command lock.
+   * @deprecated Use resetConnection() instead to avoid garbled output.
+   */
+  forceReleaseLock(): void {
+    this.commandLock = Promise.resolve();
+  }
+
+  /**
    * Acquire command lock to serialize commands.
    * Returns a release function that must be called when done.
    * Includes timeout to prevent deadlocks.
@@ -284,8 +321,10 @@ export class KosConnection {
     try {
       releaseLock = await this.acquireCommandLock(timeoutMs);
     } catch (error) {
-      // Lock acquisition failed (timeout) - reset lock state and fail
-      this.commandLock = Promise.resolve();
+      // Lock acquisition failed (timeout) - reset connection to clear stuck state
+      // This closes the transport, killing any pending I/O, so subsequent
+      // commands will trigger a fresh reconnect without garbled output.
+      this.resetConnection();
       return { success: false, output: '', error: error instanceof Error ? error.message : 'Lock acquisition failed' };
     }
 

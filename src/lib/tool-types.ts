@@ -47,7 +47,6 @@ export interface ToolContext {
   successResponse: (prefix: string, text: string) => CallToolResult;
   errorResponse: (prefix: string, error: string) => CallToolResult;
   selectTarget: (orchestrator: ManeuverOrchestrator, mode: TargetSelectMode, checkExisting?: boolean) => Promise<string | null>;
-  getDefaultLaunchAltitude: (conn: KosConnection | null) => Promise<number>;
   getBasicOrbitInfo: (conn: KosConnection | null) => Promise<OrbitInfo | null>;
 }
 

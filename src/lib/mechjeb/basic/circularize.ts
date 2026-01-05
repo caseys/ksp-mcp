@@ -31,6 +31,108 @@ export async function circularize(
   return executeManeuverCommand(conn, cmd, 10_000, 'circularize');
 }
 
+/**
+ * Optimize circularization node timing by sliding it earlier until Pe ≈ Ap.
+ * MechJeb sometimes places the node slightly late, causing periapsis to come up short.
+ *
+ * Algorithm: Binary search to find optimal timing where |Ap - Pe| is minimized.
+ *
+ * @param conn kOS connection
+ * @param logger Optional logger for progress
+ * @returns Object with success and adjustment made (seconds earlier)
+ */
+export async function optimizeCircularizationTiming(
+  conn: KosConnection,
+  logger?: { info: (msg: string) => void }
+): Promise<{ success: boolean; adjustment: number; finalGap: number }> {
+  const log = logger ?? { info: () => {} };
+
+  // Query initial state
+  const initialResult = await conn.execute(
+    'IF HASNODE { ' +
+    'PRINT "NODE|" + ROUND(NEXTNODE:ETA) + "|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(NEXTNODE:ORBIT:APOAPSIS). ' +
+    '} ELSE { PRINT "NONODE". }'
+  );
+
+  if (initialResult.output.includes('NONODE')) {
+    return { success: false, adjustment: 0, finalGap: 0 };
+  }
+
+  const initialMatch = initialResult.output.match(/NODE\|(\d+)\|(-?\d+)\|(-?\d+)/);
+  if (!initialMatch) {
+    return { success: false, adjustment: 0, finalGap: 0 };
+  }
+
+  const originalEta = parseInt(initialMatch[1]);
+  const initialPe = parseInt(initialMatch[2]);
+  const initialAp = parseInt(initialMatch[3]);
+  const initialGap = Math.abs(initialAp - initialPe);
+
+  log.info(`[OptimizeNode] Initial: ETA=${originalEta}s, Pe=${Math.round(initialPe/1000)}km, Ap=${Math.round(initialAp/1000)}km, gap=${Math.round(initialGap/1000)}km`);
+
+  // If already very circular, skip
+  if (initialGap < 1000) {
+    log.info(`[OptimizeNode] Already circular enough, skipping`);
+    return { success: true, adjustment: 0, finalGap: initialGap };
+  }
+
+  let bestEta = originalEta;
+  let bestGap = initialGap;
+  let totalAdjustment = 0;
+
+  // Try sliding earlier in steps: 5s, 2s, 1s
+  const steps = [5, 2, 1];
+
+  for (const step of steps) {
+    let improved = true;
+    let iterations = 0;
+    const maxIterations = 20; // Safety limit per step size
+
+    while (improved && iterations < maxIterations) {
+      iterations++;
+      const tryEta = bestEta - step;
+
+      // Don't go too early (need at least 30s for alignment)
+      if (tryEta < 30) break;
+
+      // Adjust node and check result
+      const checkResult = await conn.execute(
+        `SET NEXTNODE:ETA TO ${tryEta}. WAIT 0.1. ` +
+        'PRINT "CHECK|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(NEXTNODE:ORBIT:APOAPSIS).'
+      );
+
+      const checkMatch = checkResult.output.match(/CHECK\|(-?\d+)\|(-?\d+)/);
+      if (!checkMatch) {
+        improved = false;
+        break;
+      }
+
+      const newPe = parseInt(checkMatch[1]);
+      const newAp = parseInt(checkMatch[2]);
+      const newGap = Math.abs(newAp - newPe);
+
+      if (newGap < bestGap) {
+        bestGap = newGap;
+        bestEta = tryEta;
+        totalAdjustment = originalEta - tryEta;
+      } else {
+        // Went too far, restore best and try smaller step
+        await conn.execute(`SET NEXTNODE:ETA TO ${bestEta}.`);
+        improved = false;
+      }
+    }
+  }
+
+  // Ensure we're at the best ETA
+  if (bestEta !== originalEta) {
+    await conn.execute(`SET NEXTNODE:ETA TO ${bestEta}.`);
+  }
+
+  log.info(`[OptimizeNode] Optimized: shifted ${totalAdjustment}s earlier, gap now ${Math.round(bestGap/1000)}km`);
+
+  return { success: true, adjustment: totalAdjustment, finalGap: bestGap };
+}
+
 // ============================================================================
 // Tool Definition
 // ============================================================================

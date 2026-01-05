@@ -148,28 +148,6 @@ async function getBasicOrbitInfo(conn: ReturnType<typeof getConnection> | null):
   return null;
 }
 
-/**
- * Get default launch altitude: atmosphere height + 20km, or 20km if no atmosphere
- */
-async function getDefaultLaunchAltitude(conn: ReturnType<typeof getConnection> | null): Promise<number> {
-  const DEFAULT_ALTITUDE = 80_000; // 80km fallback (Kerbin-like)
-  if (!conn) return DEFAULT_ALTITUDE;
-  try {
-    const result = await conn.execute(
-      'IF SHIP:BODY:ATM:EXISTS { PRINT SHIP:BODY:ATM:HEIGHT. } ELSE { PRINT 0. }',
-      3000
-    );
-    const match = result.output.match(/([\d.]+)/);
-    if (match) {
-      const atmHeight = parseFloat(match[1]);
-      return atmHeight > 0 ? atmHeight + 20_000 : 20_000;
-    }
-  } catch {
-    // Ignore errors
-  }
-  return DEFAULT_ALTITUDE;
-}
-
 export function createServer(): McpServer {
   const server = new McpServer({
     name: 'ksp-mcp',
@@ -184,7 +162,6 @@ export function createServer(): McpServer {
     successResponse,
     errorResponse,
     selectTarget,
-    getDefaultLaunchAltitude,
     getBasicOrbitInfo,
   };
 

@@ -22,7 +22,7 @@ import {
   type ListTargetsResult,
 } from '../kos/target/index.js';
 // Basic operations
-import { circularize } from './basic/circularize.js';
+import { circularize, optimizeCircularizationTiming } from './basic/circularize.js';
 import { adjustPeriapsis } from './basic/adjust-periapsis.js';
 import { adjustApoapsis } from './basic/adjust-apoapsis.js';
 import { ellipticize } from './basic/ellipticize.js';
@@ -250,17 +250,56 @@ export class ManeuverOrchestrator {
 
   /**
    * Circularize orbit at apoapsis or periapsis.
+   * Includes node timing optimization to ensure Pe ≈ Ap.
    */
   async circularize(
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
     const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
-    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      circularize(this.conn, timeRef),
-      logger,
-      callerTool
-    );
+
+    // Handle target setting if provided
+    if (target !== undefined) {
+      const targetResult = await setTarget(this.conn, target, targetType);
+      if (!targetResult.success) {
+        return {
+          success: false,
+          error: targetResult.error ?? `Failed to set target "${target}"`,
+        };
+      }
+    }
+
+    // Plan the circularization node
+    const planResult = await circularize(this.conn, timeRef);
+    if (!planResult.success) {
+      return planResult;
+    }
+
+    // Optimize node timing - slide earlier until Pe ≈ Ap
+    await optimizeCircularizationTiming(this.conn, logger);
+
+    // Return early if not executing
+    if (!execute) {
+      return { ...planResult, executed: false };
+    }
+
+    // Execute the node
+    const execResult = await executeNode(this.conn, { logger, callerTool });
+
+    if (!execResult.success) {
+      return {
+        ...planResult,
+        success: false,
+        error: execResult.error ?? 'Node execution failed',
+        executed: false,
+      };
+    }
+
+    return {
+      ...planResult,
+      executed: true,
+      nodesExecuted: execResult.nodesExecuted,
+    };
   }
 
   /**

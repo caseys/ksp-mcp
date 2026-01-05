@@ -47,7 +47,7 @@ const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 // Alignment configuration
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
 const RCS_TRIGGER_TIME = 3000; // ms - enable RCS if no progress after this
-const MAX_ALIGN_TIME = 60_000; // ms - maximum time to wait for alignment
+const MAX_ALIGN_TIME = 300_000; // ms - 5 minutes, keep trying (warn after 30s)
 
 /**
  * Format MechJeb node executor state for display
@@ -73,6 +73,13 @@ function formatExecutorState(state: string): string {
 async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boolean> {
   const log = logger ?? nullLogger;
 
+  // Verify node exists before trying to align
+  const nodeCheck = await conn.execute('PRINT HASNODE.');
+  if (!nodeCheck.output.includes('True')) {
+    log.error('[AlignToNode] No maneuver node exists!');
+    return false;
+  }
+
   // Check initial angle
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
   log.progress(`[AlignToNode] Initial angle: ${fmtNum(initialAngle)}°`);
@@ -81,10 +88,13 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
   const rcsState = await conn.execute('PRINT RCS.');
   const wasRcsOn = rcsState.output.includes('True');
 
-  // Use SAS MANEUVER mode - handles node removal gracefully (unlike LOCK STEERING)
-  // Must wait for SAS to initialize before setting mode
-  await conn.execute('SAS ON. WAIT 1. SET SASMODE TO "MANEUVER". WAIT 0.5.');
-  log.progress('[AlignToNode] SAS set to MANEUVER mode, aligning...');
+  // Use LOCK STEERING - more reliable than SAS MANEUVER mode
+  // Keep SAS OFF to avoid conflicts, give kOS a moment to engage steering
+  await conn.execute('SAS OFF. UNLOCK STEERING. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
+  log.progress('[AlignToNode] Steering locked to node, aligning...');
+
+  const alignStartTime = Date.now();
+  let warnedSlow = false;
 
   let lastAngle = 180;
   let noProgressSince = Date.now();
@@ -117,6 +127,12 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
         return;
       }
 
+      // Warn if alignment is taking a long time (but don't fail)
+      if (!warnedSlow && Date.now() - alignStartTime > 30_000) {
+        log.warn(`[AlignToNode] Alignment is slow (30s+), angle: ${fmtNum(state.angle)}°`);
+        warnedSlow = true;
+      }
+
       // Check for progress (improvement of at least 0.5 degrees)
       if (state.angle < lastAngle - 0.5) {
         noProgressSince = Date.now();
@@ -134,8 +150,14 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
     },
   });
 
-  // Keep SAS in MANEUVER mode - MechJeb will take over when enabled
-  // Restore RCS state only
+  // Always unlock steering when done (MechJeb will take over)
+  try {
+    await conn.execute('UNLOCK STEERING.');
+  } catch {
+    // Ignore cleanup errors
+  }
+
+  // Restore RCS state
   try {
     if (!wasRcsOn) {
       await conn.execute('RCS OFF.');
@@ -189,7 +211,7 @@ export async function executeNode(
   } = options;
 
   const log = logger ?? nullLogger;
-  const logPrefix = callerTool ? `[ExecuteNode:${callerTool}]` : '[ExecuteNode]';
+  const logPrefix = callerTool ? `[Maneuver for:${callerTool}]` : '[Maneuver]';
   // Check if a node exists
   const nodeCheck = await conn.execute('PRINT HASNODE.', 2000);
   if (!nodeCheck.output.includes('True')) {
@@ -205,15 +227,6 @@ export async function executeNode(
   const dvShipTotal = await queryNumber(conn, 'SHIP:DELTAV:CURRENT');
   const dvCurrentStage = await queryNumber(conn, 'STAGE:DELTAV:CURRENT');
 
-  // Determine if staging will be needed during burn
-  const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
-
-  if (needsStaging) {
-    log.progress(`${logPrefix} Required: ${fmtNum(dvRequired)} m/sec, Current stage: ${fmtNum(dvCurrentStage)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec (will stage)`);
-  } else {
-    log.progress(`${logPrefix} Required: ${fmtNum(dvRequired)} m/sec, Current stage: ${fmtNum(dvCurrentStage)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec`);
-  }
-
   if (dvShipTotal < dvRequired) {
     const deficit = dvRequired - dvShipTotal;
     return {
@@ -222,18 +235,21 @@ export async function executeNode(
       error: `Insufficient delta-v: need ${fmtNum(dvRequired)} m/sec, have ${fmtNum(dvShipTotal)} m/sec (deficit: ${fmtNum(deficit)} m/sec). Consider adding more fuel or splitting the maneuver.`,
       deltaV: { required: dvRequired, available: dvShipTotal }
     };
+  } else {
+    log.progress(`${logPrefix} Delta V: ${fmtNum(dvRequired)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec`);
   }
+
+  // Determine if staging will be needed during burn
+  const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
+  if (needsStaging) {
+    log.progress(`${logPrefix} Current stage: ${fmtNum(dvCurrentStage)} m/sec, (staging will be automated)`);
+    await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
+  } 
 
   // Get estimated burn duration from MechJeb INFO wrapper
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
   log.progress(`${logPrefix} Estimated burn: ${formatTime(burnDuration)}, will shift node by ${formatTime(halfBurn)}`);
-
-  // Set up auto-staging if burn will require staging
-  if (needsStaging) {
-    log.progress(`${logPrefix} Setting up auto-staging trigger`);
-    await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
-  }
 
   // Align ship to maneuver node BEFORE warping
   const isAligned = await alignToNode(conn, logger);
@@ -249,10 +265,13 @@ export async function executeNode(
   }
 
   // Warp to node if it's far away and warp is enabled
+  // Warp target: node time - (burn time / 2) - 15 seconds for alignment
+  // This ensures we arrive 15s before the burn should START (not before node time)
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
-  if (nodeEta > 20 && config.warp.onRails) {
-    const warpLeadTime = 15; // Stop warping 15s before node (reliable with kOS WARPTO)
-    log.progress(`${logPrefix} Node is ${formatTime(nodeEta)} away, warping to T-${formatTime(warpLeadTime)}`);
+  const alignmentBuffer = 15; // Extra time for alignment before burn starts
+  const warpLeadTime = halfBurn + alignmentBuffer;
+  if (nodeEta > warpLeadTime + 10 && config.warp.onRails) {
+    log.progress(`${logPrefix} Node T-${formatTime(nodeEta)}, burn ~${formatTime(burnDuration)}, warping to T-${formatTime(warpLeadTime)}`);
 
     // Clear any existing warp state before starting new warp
     await stopWarp(conn);
@@ -293,7 +312,7 @@ export async function executeNode(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     lastAttempt = attempt;
-    log.progress(`${logPrefix} Attempt ${attempt}/${MAX_RETRIES}`);
+    log.progress(`${logPrefix} Attempt ${attempt} of ${MAX_RETRIES}`);
 
     // Workaround: Shift node time earlier by half burn duration
     // MechJeb fires at node time instead of centering the burn
@@ -305,11 +324,11 @@ export async function executeNode(
     // Stop any active warp before executing
     await stopWarp(conn);
 
-    // Enable MechJeb node executor
-    await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
-
     // Turn off SAS - MechJeb handles its own steering now
     await conn.execute('SAS OFF.');
+
+    // Enable MechJeb node executor
+    await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
 
     // Disabled: using kOS WARPTO instead of kickstart pulses
     // Warp assist: if node > 15s away, kickstart MechJeb warp handling
