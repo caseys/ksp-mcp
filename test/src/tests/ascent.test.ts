@@ -9,7 +9,7 @@
  * - Full mode (FULL_TEST=true): Waits for stable orbit to be achieved
  */
 
-import { ensureKspReady, getAscentProgram, recordTestSuccess, SAVES, TIMEOUTS } from '../helpers/test-setup.js';
+import { ensureKspReady, getAscentProgram, waitForLiftoff, recordTestSuccess, SAVES, TIMEOUTS } from '../helpers/test-setup.js';
 
 // Check for full test mode
 const runFullTests = process.env.FULL_TEST === 'true';
@@ -26,15 +26,15 @@ describe('ASCENT', () => {
       const ascent = await getAscentProgram();
 
       const handle = await ascent.launchToOrbit({
-        altitude: 100000,
+        altitude: 100_000,
         inclination: 0
       });
 
       expect(handle).toBeDefined();
-      expect(handle.targetAltitude).toBe(100000);
+      expect(handle.targetAltitude).toBe(100_000);
 
       // Quick mode: just verify liftoff (altitude > 100m or phase changes)
-      const result = await handle.waitForLiftoff();
+      const result = await waitForLiftoff(handle);
 
       expect(result.success).toBe(true);
 
@@ -50,12 +50,12 @@ describe('ASCENT', () => {
       const ascent = await getAscentProgram();
 
       const handle = await ascent.launchToOrbit({
-        altitude: 100000,
+        altitude: 100_000,
         inclination: 0
       });
 
       expect(handle).toBeDefined();
-      expect(handle.targetAltitude).toBe(100000);
+      expect(handle.targetAltitude).toBe(100_000);
 
       // Full mode: wait for orbit (periapsis > atmosphere + 10km)
       const result = await handle.waitForCompletion();

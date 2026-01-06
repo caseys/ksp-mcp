@@ -13,12 +13,12 @@ import type {
   AscentResult
 } from '../types.js';
 import { delay } from '../utils/progress.js';
-import { formatOrbit, fmtDist, formatTime } from '../utils/format.js';
+import { formatOrbit, formatTime, fmtNum } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/broadcast-logger.js';
-import { ManeuverOrchestrator } from './orchestrator.js';
 import { config } from '../../config/index.js';
+import { ManeuverOrchestrator } from './orchestrator.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 
 /**
@@ -37,7 +37,6 @@ function hasKosError(output: string): boolean {
  * Handle for monitoring an in-progress ascent
  */
 export class AscentHandle {
-  private aborted = false;
   private logger: McpLogger;
 
   constructor(
@@ -109,20 +108,18 @@ export class AscentHandle {
    */
   async waitForCompletion(pollIntervalMs = 5000): Promise<AscentResult> {
     const MAX_WAIT_MS = 900_000; // 15 minutes max
+    this.logger.info(`[Ascent] Target: ${Math.round(this.targetAltitude/1000)}km orbit`);
 
-    // Get atmosphere height for this body using labeled output
-    const atmResult = await this.conn.execute('PRINT "ATM:" + ROUND(SHIP:BODY:ATM:HEIGHT).');
-    const atmMatch = atmResult.output.match(/ATM:(-?\d+)/);
-    if (!atmMatch) {
-      throw new Error(`Failed to query atmosphere height. kOS output: ${atmResult.output.slice(0, 100)}`);
-    }
-    const atmHeight = Number.parseInt(atmMatch[1]);
-    this.logger.info(`[Ascent] Target: periapsis >= ${Math.round(atmHeight/1000)}km (atmosphere height)`);
+    // Query atmosphere height once (0 for bodies without atmosphere)
+    const atmResult = await this.conn.execute(
+      'IF SHIP:BODY:ATM:EXISTS { PRINT ROUND(SHIP:BODY:ATM:HEIGHT). } ELSE { PRINT 0. }',
+      3000
+    );
+    const atmMatch = atmResult.output.match(/(\d+)/);
+    const atmHeight = atmMatch ? Number.parseInt(atmMatch[1]) : 0;
 
     let lastLogTime = 0;
-    let _prevDeltaV: number | null = null;
     let lastStatus = '';
-    let circularizationStarted = false;  // Track if we've started circularization
 
     interface AscentPollState {
       enabled: boolean;
@@ -130,15 +127,17 @@ export class AscentHandle {
       apoapsis: number;
       periapsis: number;
       body: string;
-      inOrbit: boolean;
-      deltaV: number;
-      throttle: number;
-      angularVel: number;
+      eccentricity: number;
+      // Computed orbit quality tiers
+      survivable: boolean;  // periapsis >= atmHeight
+      successful: boolean;  // periapsis >= 95% target
+      goodOrbit: boolean;   // successful AND ecc < 0.01
     }
 
     const result = await pollWithBlackoutResilience<AscentPollState>({
       poll: async () => {
         // Use pipe delimiters for robust parsing (status may contain spaces/colons)
+        // Include eccentricity for orbit quality assessment
         const statusResult = await this.conn.execute(
           'SET _ASC TO ADDONS:MJ:ASCENT. ' +
           'SET _E TO _ASC:ENABLED. ' +
@@ -146,13 +145,11 @@ export class AscentHandle {
           'SET _A TO ROUND(APOAPSIS). ' +
           'SET _P TO ROUND(PERIAPSIS). ' +
           'SET _B TO SHIP:BODY:NAME. ' +
-          'SET _DV TO ROUND(SHIP:DELTAV:CURRENT, 1). ' +
-          'SET _THR TO ROUND(THROTTLE, 2). ' +
-          'SET _AV TO ROUND(SHIP:ANGULARVEL:MAG, 3). ' +
-          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _DV + "|" + _THR + "|" + _AV.'
+          'SET _EC TO ROUND(ORBIT:ECCENTRICITY, 4). ' +
+          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.'
         );
 
-        const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)\|([\d.]+)\|([\d.]+)/i);
+        const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
         if (!statusMatch) {
           throw new Error('Failed to parse ascent status');
         }
@@ -162,16 +159,18 @@ export class AscentHandle {
         const apoapsis = Number.parseInt(statusMatch[3]);
         const periapsis = Number.parseInt(statusMatch[4]);
         const body = statusMatch[5];
-        const deltaV = Number.parseFloat(statusMatch[6]);
-        const throttle = Number.parseFloat(statusMatch[7]);
-        const angularVel = Number.parseFloat(statusMatch[8]);
-        const inOrbit = periapsis >= atmHeight;
+        const eccentricity = Number.parseFloat(statusMatch[6]);
 
-        return { enabled, status, apoapsis, periapsis, body, inOrbit, deltaV, throttle, angularVel };
+        // Orbit quality tiers
+        const survivable = periapsis >= atmHeight;  // Above atmosphere
+        const successful = periapsis >= this.targetAltitude * 0.95;  // Within 95% of target
+        const goodOrbit = successful && eccentricity < 0.01;  // Successful AND nearly circular
+
+        return { enabled, status, apoapsis, periapsis, body, eccentricity, survivable, successful, goodOrbit };
       },
 
-      isDone: (state) => state.inOrbit,  // Only done when actually in orbit
-      isSuccess: (state) => state.inOrbit,
+      isDone: (state) => !state.enabled,  // Done when MechJeb ascent stops
+      isSuccess: (state) => state.survivable,  // Success if we're above atmosphere (can fix the rest)
 
       timeoutMs: MAX_WAIT_MS,
       pollIntervalMs,
@@ -183,7 +182,8 @@ export class AscentHandle {
         // Log status changes
         const now = Date.now();
         if (state.status && state.status !== lastStatus) {
-          this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
+          const status = state.status==='Off' && 'Ascent Complete' || state.status;
+          this.logger.progress(`[Ascent] ${status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
           lastStatus = state.status;
           lastLogTime = now;
         }
@@ -193,60 +193,14 @@ export class AscentHandle {
           this.logger.progress(`[Ascent] at ${formatOrbit(state.apoapsis, state.periapsis)}`);
           lastLogTime = now;
         }
-
-        // Detect when MechJeb ascent is disabled but we're suborbital (ready for circularization)
-        // This happens because we set skipCircularization=true
-        const isSuborbital = state.apoapsis > atmHeight && state.periapsis < atmHeight;
-        if (!circularizationStarted && !state.enabled && isSuborbital) {
-          circularizationStarted = true;
-          this.logger.info(`[Ascent] MechJeb ascent complete, starting circularization...`);
-
-          // Use the ManeuverOrchestrator for reliable circularization (handles warp + execution)
-          const orchestrator = new ManeuverOrchestrator(this.conn);
-          const circResult = await orchestrator.circularize('APOAPSIS', {
-            execute: true,
-            logger: this.logger,
-            callerTool: 'circularize_after_launch',
-          });
-
-          if (circResult.success) {
-            this.logger.info(`[Ascent] Circularization complete!`);
-          } else {
-            this.logger.warn(`[Ascent] Circularization issue: ${circResult.error ?? 'unknown'}`);
-          }
-        }
-
-        // Disabled: using env var control instead of kickstart pulses
-        // Kickstart warp when coasting (not burning) and not yet in orbit
-        // const isCoasting = state.throttle === 0;
-        // const dvStable = prevDeltaV !== null && Math.abs(state.deltaV - prevDeltaV) < 1;
-        // const notYetInOrbit = state.periapsis < this.targetAltitude*0.85;
-        // if (notYetInOrbit && isCoasting && dvStable) {
-        //   await kickstartWarp(this.conn, this.logger, state);
-        // }
-
-        // Update previous delta-v for next poll
-        _prevDeltaV = state.deltaV;
       },
     });
 
     // Handle completion
     if (result.result) {
-      const { enabled, apoapsis, periapsis, body, inOrbit } = result.result;
-
-      // Disable autopilot if we're in orbit but it's still enabled
-      if (inOrbit && enabled) {
-        try {
-          await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
-        } catch {
-          // Ignore - may still be in blackout
-        }
-      }
+      const { apoapsis, periapsis, eccentricity, survivable, successful, goodOrbit } = result.result;
 
       if (!result.timedOut) {
-        this.logger.progress(`[Ascent] Complete at ${body}! ATM: ${Math.round(atmHeight/1000)}km`);
-        this.logger.progress(`[Ascent] ${formatOrbit(apoapsis, periapsis)} - ${inOrbit ? 'ORBIT ACHIEVED' : 'ABORTED'}`);
-
         // Clear any leftover maneuver nodes
         try {
           await clearNodes(this.conn);
@@ -254,10 +208,54 @@ export class AscentHandle {
           // Ignore
         }
 
+        // Check if we need to auto-fix the orbit
+        // Survivable but not successful = above atmosphere but below target
+        if (survivable && !successful) {
+          this.logger.warn(`[Ascent] Orbit below target (${fmtNum(periapsis/1000)}km vs ${fmtNum(this.targetAltitude * 0.95 / 1000)}km) - circularizing...`);
+
+          const orchestrator = new ManeuverOrchestrator(this.conn);
+          const fixResult = await orchestrator.changeEccentricity(0, 'X_FROM_NOW', {
+            execute: true,
+            logger: this.logger,
+            callerTool: 'ascent_auto_fix',
+            xFromNowSeconds: 15,  // Create node 15 seconds from now
+          });
+
+          if (fixResult.success) {
+            // Re-query orbit state after fix
+            const postFix = await this.conn.execute(
+              'PRINT ROUND(APOAPSIS) + "|" + ROUND(PERIAPSIS) + "|" + ROUND(ORBIT:ECCENTRICITY, 4).',
+              3000
+            );
+            const postMatch = postFix.output.match(/(-?\d+)\|(-?\d+)\|([\d.]+)/);
+            if (postMatch) {
+              apoapsis = Number.parseInt(postMatch[1]);
+              periapsis = Number.parseInt(postMatch[2]);
+              eccentricity = Number.parseFloat(postMatch[3]);
+              successful = periapsis >= this.targetAltitude * 0.95;
+              goodOrbit = successful && eccentricity < 0.01;
+            }
+            this.logger.progress(`[Ascent] Orbit corrected to ${formatOrbit(apoapsis, periapsis)}, ecc=${eccentricity.toFixed(4)}`);
+          } else {
+            this.logger.warn(`[Ascent] Auto-fix failed: ${fixResult.error ?? 'unknown'}`);
+          }
+        }
+
+        // Final status message based on orbit quality
+        if (goodOrbit) {
+          this.logger.progress(`[Ascent] Complete! Circular orbit at ${formatOrbit(apoapsis, periapsis)} at ${body}`);
+        } else if (successful) {
+          this.logger.progress(`[Ascent] Complete! ${formatOrbit(apoapsis, periapsis)} at ${body} (ecc=${eccentricity.toFixed(3)})`);
+        } else if (survivable) {
+          this.logger.progress(`[Ascent] Complete but below target: ${formatOrbit(apoapsis, periapsis)} at ${body}`);
+        } else {
+          this.logger.error(`[Ascent] FAILED - periapsis below atmosphere: ${formatOrbit(apoapsis, periapsis)}`);
+        }
+
         return {
-          success: inOrbit,
+          success: survivable,  // We succeeded if we're above atmosphere
           finalOrbit: { apoapsis, periapsis },
-          aborted: !inOrbit,
+          aborted: false,  // We never abort - we either succeed or fail
         };
       }
     }
@@ -273,57 +271,6 @@ export class AscentHandle {
       finalOrbit: { apoapsis: finalApoapsis, periapsis: finalPeriapsis },
       aborted: false,
     };
-  }
-
-  /**
-   * Wait for the vessel to leave the launchpad (quick test mode)
-   * Returns as soon as altitude > 100m or phase is no longer 'prelaunch'
-   */
-  async waitForLiftoff(pollIntervalMs = 1000, timeoutMs = 60_000): Promise<AscentResult> {
-    this.logger.progress('[Ascent] Waiting for liftoff...');
-
-    const result = await pollWithBlackoutResilience<AscentProgress>({
-      poll: () => this.getProgress(),
-
-      isDone: (progress) => progress.phase !== 'prelaunch' || progress.altitude > 100,
-      isSuccess: (progress) => progress.phase !== 'prelaunch' || progress.altitude > 100,
-
-      timeoutMs,
-      pollIntervalMs,
-      logger: this.logger,
-      context: 'Liftoff',
-      connection: this.conn,
-
-      onPoll: (progress) => {
-        if (progress.phase !== 'prelaunch' || progress.altitude > 100) {
-          this.logger.progress(`[Ascent] Liftoff confirmed! Altitude: ${fmtDist(progress.altitude)}, Phase: ${progress.phase}`);
-        }
-      },
-    });
-
-    if (result.success && result.result) {
-      return {
-        success: true,
-        finalOrbit: { apoapsis: result.result.apoapsis, periapsis: result.result.periapsis },
-        aborted: false,
-      };
-    }
-
-    // Timeout
-    this.logger.error('[Ascent] Liftoff timeout - ship did not leave the pad');
-    return {
-      success: false,
-      finalOrbit: { apoapsis: 0, periapsis: 0 },
-      aborted: false,
-    };
-  }
-
-  /**
-   * Abort the ascent
-   */
-  async abort(): Promise<void> {
-    this.aborted = true;
-    await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO FALSE.');
   }
 }
 
@@ -477,8 +424,6 @@ export class AscentProgram {
       altitude,
       inclination = 0,
       autoStage = true,
-      // circularize option is ignored - we always handle circularization ourselves
-      // autoWarp is now controlled by AUTOWARP_PHYSICS_MAX env var
     } = options;
 
     // Wait for MechJeb to be ready (critical after save reload)
@@ -638,15 +583,11 @@ export const launchAscentTool: ToolDefinition = {
     await setKosOperation(conn, 'ascent', 'launch', String(altitude));
 
     try {
-      // Create ascent program and launch
-      // Note: autoWarp is now controlled by AUTOWARP_PHYSICS_MAX env var
       const program = new AscentProgram(conn, logger);
       const handle = await program.launchToOrbit({
         altitude,
         inclination: args.inclination as number,
         autoStage: true,
-        // Note: Circularization is always enabled - disabling causes MechJeb issues
-        circularize: true,
       });
 
       // Resolve 'auto' to client-appropriate default
@@ -691,7 +632,7 @@ export const launchAscentTool: ToolDefinition = {
 
             return ctx.successResponse('launch', lines.join('\n'));
           } else {
-            return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
+            return ctx.errorResponse('launch', 'Ascent failed - periapsis below atmosphere');
           }
         } finally {
           // Clear operation state when waiting for completion

@@ -59,6 +59,8 @@ export interface ManeuverOptions {
   callerTool?: string;
   /** Rendezvous mode for Hohmann transfer (default true). False = simple transfer mode. */
   rendezvous?: boolean;
+  /** Time in seconds for X_FROM_NOW timeRef. Used by operations that support X_FROM_NOW. */
+  xFromNowSeconds?: number;
 }
 
 /**
@@ -558,9 +560,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      changeEccentricity(this.conn, eccentricity, timeRef),
+      changeEccentricity(this.conn, eccentricity, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );

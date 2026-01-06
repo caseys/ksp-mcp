@@ -167,7 +167,8 @@ async function monitorLanding(
       // Log progress if status changed (include speed for context)
       if (state.status.status !== lastStatusText) {
         const speedPart = state.status.speed !== undefined ? ` | ${Math.abs(state.status.speed)} m/sec` : '';
-        log.progress(`[Landing] ${state.status.status}${speedPart}`);
+        const statusText = state.status.status === 'off' ? 'Contact light, Descent engine command override, off.' : state.status.status;
+        log.progress(`[Landing] ${statusText}${speedPart}`);
         lastStatusText = state.status.status;
       }
 

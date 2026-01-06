@@ -18,11 +18,13 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  * @param conn kOS connection
  * @param newEcc Target eccentricity (0 to <1)
  * @param timeRef When to execute: 'APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'
+ * @param xFromNowSeconds When using X_FROM_NOW, the time in seconds from now (default: 30)
  */
 export async function changeEccentricity(
   conn: KosConnection,
   newEcc: number,
-  timeRef = 'APOAPSIS'
+  timeRef = 'APOAPSIS',
+  xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
   // Validate vessel state: must be in orbit with no encounters
   const validation = await validateVesselState(conn, CLEAN_ORBIT_REQUIREMENTS, 'change_eccentricity');
@@ -37,7 +39,13 @@ export async function changeEccentricity(
     };
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ECCENTRICITY(${newEcc}, "${timeRef}").`;
+  // Build command - use SETXFROMNOWTIME prefix if X_FROM_NOW with custom time
+  let cmd: string;
+  if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PLANNER:SETXFROMNOWTIME(${xFromNowSeconds}). PRINT PLANNER:ECCENTRICITY(${newEcc}, "${timeRef}").`;
+  } else {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ECCENTRICITY(${newEcc}, "${timeRef}").`;
+  }
   return executeManeuverCommand(conn, cmd, 10_000, 'change_eccentricity');
 }
 
