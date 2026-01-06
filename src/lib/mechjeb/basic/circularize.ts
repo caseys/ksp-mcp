@@ -139,12 +139,12 @@ export async function optimizeCircularizationTiming(
 
 export const circularizeTool: ToolDefinition = {
   name: 'circularize',
-  description: 'Circularize orbit in current SOI. Warp to SOI or launch to orbit before use. Do NOT use if already near circular.',
+  description: 'Circularize to a stable orbit in current SOI.  Used after warp to SOI or launch to orbit.  Do NOT use if orbit near circular.',
   inputSchema: {
     timeRef: z.union([z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW']), z.literal('auto')])
       .optional()
       .default('auto')
-      .describe('When to circularize. If omitted, auto-picks based on orbit (periapsis for hyperbolic, nearest apse for elliptical)'),
+      .describe('When to circularize. If omitted, auto-picks based on orbit (periapsis for hyperbolic, nearest node for elliptical)'),
     execute: executeSchema,
   },
   annotations: {

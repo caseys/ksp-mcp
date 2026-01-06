@@ -13,7 +13,7 @@ import type {
   AscentResult
 } from '../types.js';
 import { delay } from '../utils/progress.js';
-import { formatOrbit, fmtDist } from '../utils/format.js';
+import { formatOrbit, fmtDist, formatTime } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/broadcast-logger.js';
@@ -108,8 +108,6 @@ export class AscentHandle {
    * More reliable than blocking kOS UNTIL loop - handles connection recovery
    */
   async waitForCompletion(pollIntervalMs = 5000): Promise<AscentResult> {
-    this.logger.progress('[Ascent] Waiting to complete...');
-
     const MAX_WAIT_MS = 900_000; // 15 minutes max
 
     // Get atmosphere height for this body using labeled output
@@ -511,7 +509,7 @@ export class AscentProgram {
         const verifyResult = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
         if (verifyResult.output.toLowerCase().includes('true')) {
           autopilotEngaged = true;
-          this.logger.progress(`[Ascent] Autopilot engaged (attempt ${attempt})`);
+          this.logger.progress(`[Ascent] Autopilot engaged`);
           break;
         }
         if (verifyResult.output.toLowerCase().includes('false')) {
@@ -550,7 +548,7 @@ export class AscentProgram {
       // Not moving - need to stage to start
       await this.conn.execute('STAGE.');
       await delay(500);
-      this.logger.progress('[Ascent] STAGED');
+      this.logger.progress('[Ascent] STAGED FOR LAUNCH');
     } else {
       this.logger.progress('[Ascent] LAUNCHED');
     }
@@ -559,13 +557,7 @@ export class AscentProgram {
     // This replaces the old autoWarp parameter with global env var control
     if (config.warp.physicsMax > 0) {
       setTimeout(async () => {
-        try {
-          // Set physics warp mode and enable
           await this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`);
-          this.logger.info(`[Ascent] Enabled ${config.warp.physicsMax + 1}x physics warp`);
-        } catch {
-          // Ignore warp errors - non-critical
-        }
       }, 20_000);
     }
 
@@ -668,14 +660,36 @@ export const launchAscentTool: ToolDefinition = {
 
           if (result.success) {
             const orbit = result.finalOrbit;
-            // Check eccentricity to tell LLM orbit is stable
-            const eccResult = await conn.execute('PRINT ROUND(ORBIT:ECCENTRICITY, 4).');
-            const ecc = Number.parseFloat(eccResult.output.match(/[\d.]+/)?.[0] ?? '0');
-            const orbitStatus = ecc < 0.05
-              ? 'Orbit is circular and stable.'
-              : `Orbit is stable (ecc=${ecc.toFixed(3)}).`;
-            return ctx.successResponse('launch',
-              `Orbit achieved! ${formatOrbit(orbit.apoapsis, orbit.periapsis)}\n${orbitStatus}\nNext: set target for transfer`);
+            // Query orbit details for comprehensive status
+            const orbitQuery = await conn.execute(
+              'PRINT SHIP:BODY:NAME + "|" + ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(ORBIT:INCLINATION, 1) + "|" + ROUND(ORBIT:PERIOD).',
+              3000
+            );
+            const match = orbitQuery.output.match(/([^|]+)\|([\d.]+)\|([\d.]+)\|([\d.]+)/);
+            const bodyName = match?.[1]?.trim() ?? 'Unknown';
+            const ecc = Number.parseFloat(match?.[2] ?? '0');
+            const inc = Number.parseFloat(match?.[3] ?? '0');
+            const period = Number.parseFloat(match?.[4] ?? '0');
+
+            // Build comprehensive completion message
+            const lines: string[] = [
+              `Launch complete - in stable ${bodyName} orbit`,
+              `Orbit: ${formatOrbit(orbit.apoapsis, orbit.periapsis)}`,
+              `Inclination: ${inc.toFixed(1)}° | Eccentricity: ${ecc.toFixed(4)} | Period: ${formatTime(period)}`,
+            ];
+
+            // Add guidance based on orbit quality
+            if (ecc < 0.01) {
+              lines.push('Orbit is nearly circular - ready for maneuvers.');
+            } else if (ecc < 0.05) {
+              lines.push('Orbit is circular and stable.');
+            } else {
+              lines.push(`Orbit is elliptical (ecc=${ecc.toFixed(3)}) - consider circularizing if needed.`);
+            }
+
+            lines.push('Next: Use transfer tool to go to a moon or planet, or status to see available targets.');
+
+            return ctx.successResponse('launch', lines.join('\n'));
           } else {
             return ctx.errorResponse('launch', result.aborted ? 'Ascent aborted' : 'Ascent failed');
           }

@@ -11,7 +11,7 @@ import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
 import { delay } from '../utils/progress.js';
-import { formatTime, formatOrbit, fmtNum } from '../utils/format.js';
+import { formatTime, formatOrbit, fmtNum, fmtDist } from '../utils/format.js';
 
 const TELEMETRY_DELAY_MS = 100;
 
@@ -432,6 +432,39 @@ export async function getShipTelemetry(
     // Ignore query failures - non-critical
   }
 
+  // Query ETA info for "Next:" line
+  let etaPeriapsis = 0;
+  let etaNextPatch = 0;
+  let hasNextPatch = false;
+  try {
+    const etaResult = await conn.execute(
+      `PRINT "ETA|" + ROUND(ETA:PERIAPSIS) + "${SEP}" + ` +
+      `(CHOOSE ROUND(SHIP:ORBIT:NEXTPATCHETA) IF SHIP:ORBIT:HASNEXTPATCH ELSE 0) + "${SEP}" + ` +
+      `SHIP:ORBIT:HASNEXTPATCH.`,
+      timeoutMs
+    );
+    const etaMatch = etaResult.output.match(/ETA\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
+    if (etaMatch) {
+      etaPeriapsis = parseNumber(etaMatch[1]);
+      etaNextPatch = parseNumber(etaMatch[2]);
+      hasNextPatch = parseBool(etaMatch[3]);
+    }
+  } catch {
+    // Optional - continue without timing
+  }
+
+  // Query orbital speed
+  let orbitalSpeed = 0;
+  try {
+    const speedResult = await conn.execute('PRINT ROUND(SHIP:VELOCITY:ORBIT:MAG).', timeoutMs);
+    const speedMatch = speedResult.output.match(/(\d+)/);
+    if (speedMatch) {
+      orbitalSpeed = parseInt(speedMatch[1]);
+    }
+  } catch {
+    // Optional
+  }
+
   // Check if on surface (LANDED, SPLASHED, PRELAUNCH)
   const isSurface = ['LANDED', 'SPLASHED', 'PRELAUNCH'].includes(vesselStatus.toUpperCase());
 
@@ -452,23 +485,35 @@ export async function getShipTelemetry(
       lines.push(`Delta-V: ${shipDeltaV} m/s`);
     }
   } else {
-    // Orbit status format
-    lines.push(`Ship: ${vesselStatus.toUpperCase()}`);
-    lines.push(`SOI Body: ${soiDisplay}`);
-    // Orbit display (Ap by Pe format)
-    if (isEscapeTrajectory || isImpactTrajectory) {
-      const fmtAlt = (m: number) => { const km = m / 1000; return (km % 1 === 0 ? km.toFixed(0) : km.toFixed(1)) + 'km'; };
-      const apoStr = isEscapeTrajectory ? 'Escape' : fmtAlt(apo);
-      const peStr = isImpactTrajectory ? 'Impact' : fmtAlt(per);
-      lines.push(`Orbit: ${apoStr} by ${peStr}`);
+    // Orbit status format (non-surface)
+
+    // Line 1: SOI with status
+    lines.push(`SOI: ${soiDisplay} (${vesselStatus.toUpperCase()})`);
+
+    // Line 2: Next events (timing info)
+    if (etaPeriapsis > 0) {
+      const nextEvents = [`${soi} Periapsis in ${formatTime(etaPeriapsis)}`];
+      if (hasNextPatch && etaNextPatch > 0) {
+        nextEvents.push(`Escape in ${formatTime(etaNextPatch)}`);
+      }
+      lines.push(`Next: ${nextEvents.join(', ')}.`);
+    }
+
+    // Line 3: Orbit summary
+    if (isEscapeTrajectory) {
+      lines.push(`Orbit: Hyperbolic, Periapsis: ${fmtDist(per)}, Inclination: ${inc.toFixed(1)}°`);
+    } else if (isImpactTrajectory) {
+      lines.push(`Orbit: Impact trajectory, Periapsis: ${fmtDist(per)}, Inclination: ${inc.toFixed(1)}°`);
     } else {
-      lines.push(`Orbit: ${formatOrbit(apo, per)}`);
+      const orbitType = (apo - per) < 5000 ? 'Circular' : 'Elliptical';
+      lines.push(`Orbit: ${orbitType}, ${formatOrbit(apo, per)}, Inclination: ${inc.toFixed(1)}°`);
     }
-    lines.push(`Period: ${isEscapeTrajectory ? 'N/A' : formatTime(period)} | Inc: ${inc.toFixed(1)}° | Ecc: ${ecc.toFixed(4)} | LAN: ${lan.toFixed(1)}°`);
-    if (shipDeltaV > 0) {
-      lines.push(`Delta-V: ${shipDeltaV} m/s`);
-    }
-    lines.push(`Vessel: ${vesselName}`);
+
+    // Line 4: Ship info with speed and delta-v
+    const speedInfo = orbitalSpeed > 0 ? `speed: ${orbitalSpeed}m/sec` : '';
+    const dvInfo = shipDeltaV > 0 ? `delta-v: ${shipDeltaV}m/sec` : '';
+    const shipDetails = [speedInfo, dvInfo].filter(Boolean).join(', ');
+    lines.push(`Ship: ${vesselName}${shipDetails ? ` (${shipDetails})` : ''}`);
   }
 
   if (hasNode) {

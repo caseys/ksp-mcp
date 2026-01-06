@@ -166,7 +166,7 @@ async function monitorLanding(
     onPoll: (state) => {
       // Log progress if status changed (include speed for context)
       if (state.status.status !== lastStatusText) {
-        const speedPart = state.status.speed !== undefined ? ` | ${Math.abs(state.status.speed)} m/s` : '';
+        const speedPart = state.status.speed !== undefined ? ` | ${Math.abs(state.status.speed)} m/sec` : '';
         log.progress(`[Landing] ${state.status.status}${speedPart}`);
         lastStatusText = state.status.status;
       }
