@@ -432,26 +432,80 @@ export async function getShipTelemetry(
     // Ignore query failures - non-critical
   }
 
-  // Query ETA info for "Next:" line
-  let etaPeriapsis = 0;
-  let etaNextPatch = 0;
+  // Query orbital events for "Next:" line
+  // Events: apoapsis, periapsis, SOI transition, atmosphere entry, impact
+  interface OrbitalEvent {
+    name: string;
+    eta: number;  // seconds
+  }
+  const orbitalEvents: OrbitalEvent[] = [];
+  let atmHeight = 0;
   let hasNextPatch = false;
+
   try {
+    // Query all ETA values in one go
     const etaResult = await conn.execute(
-      `PRINT "ETA|" + ROUND(ETA:PERIAPSIS) + "${SEP}" + ` +
-      `(CHOOSE ROUND(SHIP:ORBIT:NEXTPATCHETA) IF SHIP:ORBIT:HASNEXTPATCH ELSE 0) + "${SEP}" + ` +
-      `SHIP:ORBIT:HASNEXTPATCH.`,
+      `PRINT "ETA|" + ROUND(ETA:APOAPSIS) + "${SEP}" + ROUND(ETA:PERIAPSIS) + "${SEP}" + ` +
+      `ROUND(ETA:TRANSITION) + "${SEP}" + SHIP:ORBIT:HASNEXTPATCH + "${SEP}" + ` +
+      `ROUND(SHIP:BODY:ATM:HEIGHT) + "${SEP}" + SHIP:BODY:ATM:EXISTS.`,
       timeoutMs
     );
-    const etaMatch = etaResult.output.match(/ETA\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
+    const etaMatch = etaResult.output.match(/ETA\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
     if (etaMatch) {
-      etaPeriapsis = parseNumber(etaMatch[1]);
-      etaNextPatch = parseNumber(etaMatch[2]);
-      hasNextPatch = parseBool(etaMatch[3]);
+      const etaApoapsis = parseNumber(etaMatch[1]);
+      const etaPeriapsis = parseNumber(etaMatch[2]);
+      const etaTransition = parseNumber(etaMatch[3]);
+      hasNextPatch = parseBool(etaMatch[4]);
+      atmHeight = parseNumber(etaMatch[5]);
+      const hasAtmosphere = parseBool(etaMatch[6]);
+
+      // Add apoapsis (only for elliptical orbits - ecc < 1)
+      // kOS returns huge values (~3.4e38) for escape trajectories
+      if (etaApoapsis > 0 && etaApoapsis < 1e10 && !isEscapeTrajectory) {
+        orbitalEvents.push({ name: 'Apoapsis', eta: etaApoapsis });
+      }
+
+      // Add periapsis
+      if (etaPeriapsis > 0 && etaPeriapsis < 1e10) {
+        orbitalEvents.push({ name: `${soi} Periapsis`, eta: etaPeriapsis });
+      }
+
+      // Add SOI transition (escape/encounter)
+      if (hasNextPatch && etaTransition > 0 && etaTransition < 1e10) {
+        // Determine if escape or encounter based on trajectory
+        const transitionType = isEscapeTrajectory ? 'SOI Escape' : 'SOI Change';
+        orbitalEvents.push({ name: transitionType, eta: etaTransition });
+      }
+
+      // Check for atmosphere entry (periapsis below atm height, currently above)
+      if (hasAtmosphere && atmHeight > 0 && per < atmHeight && altitude > atmHeight) {
+        // Roughly estimate: atmosphere entry happens before periapsis
+        // This is approximate - actual entry depends on orbit geometry
+        const atmEntryEta = Math.max(0, etaPeriapsis * 0.7); // ~70% of time to periapsis
+        orbitalEvents.push({ name: 'Atmosphere Entry', eta: atmEntryEta });
+      }
     }
   } catch {
     // Optional - continue without timing
   }
+
+  // Query MechJeb for time to impact (more accurate than orbit math)
+  try {
+    const impactResult = await conn.execute('PRINT ROUND(ADDONS:MJ:INFO:TIMETOIMPACT).', 2000);
+    const impactMatch = impactResult.output.match(/(\d+)/);
+    if (impactMatch) {
+      const timeToImpact = parseInt(impactMatch[1]);
+      if (timeToImpact > 0 && timeToImpact < 1e10) {
+        orbitalEvents.push({ name: '⚠️ IMPACT', eta: timeToImpact });
+      }
+    }
+  } catch {
+    // Impact query is optional
+  }
+
+  // Sort events by ETA and take top 2
+  orbitalEvents.sort((a, b) => a.eta - b.eta);
+  const nextEvents = orbitalEvents.slice(0, 2);
 
   // Query orbital speed
   let orbitalSpeed = 0;
@@ -490,13 +544,10 @@ export async function getShipTelemetry(
     // Line 1: SOI with status
     lines.push(`SOI: ${soiDisplay} (${vesselStatus.toUpperCase()})`);
 
-    // Line 2: Next events (timing info)
-    if (etaPeriapsis > 0) {
-      const nextEvents = [`${soi} Periapsis in ${formatTime(etaPeriapsis)}`];
-      if (hasNextPatch && etaNextPatch > 0) {
-        nextEvents.push(`Escape in ${formatTime(etaNextPatch)}`);
-      }
-      lines.push(`Next: ${nextEvents.join(', ')}.`);
+    // Line 2: Next events (timing info) - show top 2 orbital events
+    if (nextEvents.length > 0) {
+      const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
+      lines.push(`Next: ${eventStrs.join(', ')}`);
     }
 
     // Line 3: Orbit summary
@@ -598,6 +649,53 @@ export async function getShipTelemetry(
         lines.push(`${targetName} (${targetType})`);
       }
       lines.push(`Distance: ${formatDistance(targetDist)}`);
+
+      // Query MechJeb for rendezvous info (AN/DN, close approach)
+      try {
+        const rdvResult = await conn.execute(
+          'SET TGT TO ADDONS:MJ:TGT. ' +
+          `PRINT "RDV|" + TGT:CLOSESTAPPROACHTIME + "${SEP}" + TGT:CLOSESTAPPROACHDISTANCE + "${SEP}" + ` +
+          `TGT:TIMETOAN + "${SEP}" + TGT:TIMETODN + "${SEP}" + TGT:ANEXISTS + "${SEP}" + TGT:DNEXISTS + "${SEP}" + ` +
+          `TGT:RELATIVEINCLINATION.`,
+          timeoutMs
+        );
+        const rdvMatch = rdvResult.output.match(/RDV\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(True|False)\|~\|(-?[\d.e+]+)/i);
+        if (rdvMatch) {
+          const closeApproachTime = parseNumber(rdvMatch[1]);
+          const closeApproachDist = parseNumber(rdvMatch[2]);
+          const timeToAN = parseNumber(rdvMatch[3]);
+          const timeToDN = parseNumber(rdvMatch[4]);
+          const anExists = parseBool(rdvMatch[5]);
+          const dnExists = parseBool(rdvMatch[6]);
+          const relInc = parseNumber(rdvMatch[7]);
+
+          // Show close approach if reasonable (within 10 days and < 1e9 meters)
+          if (closeApproachTime > 0 && closeApproachTime < 864_000 && closeApproachDist < 1e9) {
+            lines.push(`Close approach: ${formatDistance(closeApproachDist)} in ${formatTime(closeApproachTime)}`);
+          }
+
+          // Show relative inclination if significant
+          if (relInc > 0.1) {
+            lines.push(`Relative inclination: ${relInc.toFixed(1)}°`);
+          }
+
+          // Show AN/DN nodes (only for non-trivial relative inclinations)
+          if (relInc > 0.1) {
+            const nodeInfo: string[] = [];
+            if (anExists && timeToAN > 0 && timeToAN < 1e10) {
+              nodeInfo.push(`AN: ${formatTime(timeToAN)}`);
+            }
+            if (dnExists && timeToDN > 0 && timeToDN < 1e10) {
+              nodeInfo.push(`DN: ${formatTime(timeToDN)}`);
+            }
+            if (nodeInfo.length > 0) {
+              lines.push(`Nodes: ${nodeInfo.join(', ')}`);
+            }
+          }
+        }
+      } catch {
+        // Rendezvous info is optional
+      }
     }
   }
 
