@@ -490,9 +490,13 @@ export async function getShipTelemetry(
   }
 
   // Query MechJeb for time to impact (more accurate than orbit math)
+  // Note: TIMETOIMPACT returns "N/A" string when no impact - must check type first
   try {
-    const impactResult = await conn.execute('PRINT ROUND(ADDONS:MJ:INFO:TIMETOIMPACT).', 2000);
-    const impactMatch = impactResult.output.match(/(\d+)/);
+    const impactResult = await conn.execute(
+      'SET _tti TO ADDONS:MJ:INFO:TIMETOIMPACT. IF _tti:TYPENAME = "Scalar" { PRINT "TTI|" + ROUND(_tti). } ELSE { PRINT "TTI|NO". }',
+      2000
+    );
+    const impactMatch = impactResult.output.match(/TTI\|(\d+)/);
     if (impactMatch) {
       const timeToImpact = parseInt(impactMatch[1]);
       if (timeToImpact > 0 && timeToImpact < 1e10) {
