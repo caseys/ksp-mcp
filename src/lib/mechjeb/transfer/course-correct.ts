@@ -4,20 +4,85 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, type ManeuverResult } from '../shared.js';
 import { getTargetValidationInfo } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
-import { areWorkaroundsEnabled } from '../../../config/workarounds.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { executeSchema, distanceSchema, parseTarget } from '../../tool-types.js';
 import { formatTime, fmtNum } from '../../utils/format.js';
 
+// ============================================================================
+// Helper Functions
+// ============================================================================
+
 /**
- * Create a maneuver node for course correction.
- * Adjusts trajectory to achieve desired periapsis at target.
+ * Query the periapsis that the current maneuver node would produce at the target.
+ * Uses NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS to get the periapsis in the target's SOI.
+ */
+async function queryNodePeriapsis(conn: KosConnection): Promise<{ hasEncounter: boolean; periapsis: number }> {
+  const result = await conn.execute(
+    'IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { ' +
+    'PRINT "ENC|" + ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). ' +
+    '} ELSE IF HASNODE { PRINT "NOENC". } ELSE { PRINT "NONODE". }',
+    3000
+  );
+
+  if (result.output.includes('NONODE') || result.output.includes('NOENC')) {
+    return { hasEncounter: false, periapsis: 0 };
+  }
+
+  const match = result.output.match(/ENC\|(-?[\d.]+)/);
+  return { hasEncounter: true, periapsis: match ? parseFloat(match[1]) : 0 };
+}
+
+/**
+ * Calculate the next input value using interpolation from previous attempts.
+ * Uses secant method when we have 2+ data points, simple scaling otherwise.
+ */
+function calculateNextInput(target: number, history: Array<{ input: number; result: number }>): number {
+  if (history.length < 2) {
+    // Not enough data - use simple scaling
+    const last = history.at(-1);
+    if (!last) return target; // Shouldn't happen, but fallback to target
+    if (last.result === Infinity) return last.input * 2; // No encounter
+    const ratio = target / last.result;
+    return last.input * ratio;
+  }
+
+  // Use secant method with last two points
+  const [p1, p2] = history.slice(-2);
+
+  // Handle no-encounter cases
+  if (p2.result === Infinity) return p2.input * 2;
+  if (p1.result === Infinity) {
+    // Interpolate between p2 and infinity
+    return p2.input + (p2.input - p1.input) * 0.5;
+  }
+
+  // Secant method: find input that would give target result
+  const slope = (p2.input - p1.input) / (p2.result - p1.result);
+  const newInput = p2.input + (target - p2.result) * slope;
+
+  // Clamp to reasonable range (0.1x to 10x of target)
+  return Math.max(target * 0.1, Math.min(target * 10, newInput));
+}
+
+// Extended result type with iteration info
+export interface IterativeCourseResult extends ManeuverResult {
+  attempts: number;
+  finalPeriapsis: number;
+}
+
+/**
+ * Create a maneuver node for course correction using iterative refinement.
+ * Adjusts trajectory to achieve desired periapsis at target within 15% tolerance.
  *
- * Includes workaround for MechJeb's imprecise course correction algorithm.
+ * The function iteratively:
+ * 1. Creates a course correction node with current input
+ * 2. Checks the resulting periapsis via NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS
+ * 3. If not within tolerance, clears the node and adjusts input using interpolation
+ * 4. Repeats until within tolerance or max attempts reached
  *
  * @param conn kOS connection
  * @param targetPeriapsis Target periapsis in meters
@@ -27,11 +92,14 @@ export async function courseCorrection(
   conn: KosConnection,
   targetPeriapsis: number,
   logger?: McpLogger
-): Promise<ManeuverResult> {
+): Promise<IterativeCourseResult> {
+  const MAX_ATTEMPTS = 10;
+  const TOLERANCE = 0.15; // 15%
+
   // Validate vessel state: must not be on ground
   const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'course_correct');
   if (!vesselValidation.valid) {
-    return { success: false, error: vesselValidation.error };
+    return { success: false, error: vesselValidation.error, attempts: 0, finalPeriapsis: 0 };
   }
 
   // Check target exists and has encounter
@@ -40,6 +108,8 @@ export async function courseCorrection(
     return {
       success: false,
       error: 'No target set. Use set_target first, then hohmann_transfer to establish an encounter.',
+      attempts: 0,
+      finalPeriapsis: 0,
     };
   }
 
@@ -47,29 +117,94 @@ export async function courseCorrection(
     return {
       success: false,
       error: `No encounter with ${targetInfo.name}.\ncourse_correct requires an existing encounter (trajectory through target's SOI).\n\nUse hohmann_transfer first to establish an encounter.`,
+      attempts: 0,
+      finalPeriapsis: 0,
     };
   }
 
-  let adjustedPeA = targetPeriapsis;
+  // Track attempts for interpolation: [inputValue, resultingPeriapsis]
+  const history: Array<{ input: number; result: number }> = [];
+  let currentInput = targetPeriapsis;
+  let bestResult: { input: number; result: number; error: number } | null = null;
 
-  if (areWorkaroundsEnabled()) {
-    // WORKAROUND: MechJeb's course correction algorithm produces results that vary
-    // with trajectory geometry. Using 3x multiplier to err on the safe side
-    // (higher periapsis than requested, avoiding surface impact).
-    adjustedPeA = targetPeriapsis * 3;
-    logger?.warn(`[CourseCorrection] WORKAROUND: Requested ${targetPeriapsis}m, using ${adjustedPeA}m (3x safe margin)`);
+  logger?.info(`[CourseCorrect] Target: ${(targetPeriapsis / 1000).toFixed(1)}km, tolerance: ${TOLERANCE * 100}%`);
+
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    // Clear any existing node
+    await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+
+    // Create node with current input
+    const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${currentInput}).`;
+    const result = await conn.execute(cmd, 10_000);
+
+    if (!result.output.includes('True')) {
+      logger?.warn(`[CourseCorrect] Attempt ${attempt}: Failed to create node`);
+      continue;
+    }
+
+    // Check resulting periapsis
+    const nodeResult = await queryNodePeriapsis(conn);
+    if (!nodeResult.hasEncounter) {
+      // No encounter - need higher input to get closer
+      logger?.info(`[CourseCorrect] Attempt ${attempt}: No encounter, increasing input`);
+      history.push({ input: currentInput, result: Infinity });
+      currentInput *= 2; // Double if no encounter
+      continue;
+    }
+
+    const resultPe = nodeResult.periapsis;
+    const error = (resultPe - targetPeriapsis) / targetPeriapsis;
+
+    logger?.info(`[CourseCorrect] Attempt ${attempt}: input=${(currentInput / 1000).toFixed(1)}km → result=${(resultPe / 1000).toFixed(1)}km (error=${(error * 100).toFixed(1)}%)`);
+
+    history.push({ input: currentInput, result: resultPe });
+
+    // Track best result
+    if (!bestResult || Math.abs(error) < Math.abs(bestResult.error)) {
+      bestResult = { input: currentInput, result: resultPe, error };
+    }
+
+    // Check if within tolerance
+    if (Math.abs(error) <= TOLERANCE) {
+      const nodeInfo = await queryNodeInfo(conn);
+      logger?.info(`[CourseCorrect] Success! Achieved ${(resultPe / 1000).toFixed(1)}km in ${attempt} attempt(s)`);
+      return {
+        success: true,
+        deltaV: nodeInfo.deltaV,
+        timeToNode: nodeInfo.timeToNode,
+        attempts: attempt,
+        finalPeriapsis: resultPe,
+      };
+    }
+
+    // Adjust input using interpolation/secant method
+    currentInput = calculateNextInput(targetPeriapsis, history);
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${adjustedPeA}).`;
-  const result = await conn.execute(cmd, 10_000);
+  // All attempts exhausted - use best result if reasonable
+  if (bestResult && Math.abs(bestResult.error) < 0.5) {
+    // Within 50% - acceptable with warning
+    logger?.warn(`[CourseCorrect] Max attempts reached. Using best result: ${(bestResult.result / 1000).toFixed(1)}km (${(bestResult.error * 100).toFixed(1)}% error)`);
 
-  const success = result.output.includes('True');
-  if (!success) {
-    return { success: false, error: sanitizeError(result.output, 'Course correction') };
+    // Re-create with best input
+    await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+    await conn.execute(`SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PLANNER:COURSECORRECTION(${bestResult.input}).`, 10_000);
+    const nodeInfo = await queryNodeInfo(conn);
+    return {
+      success: true,
+      deltaV: nodeInfo.deltaV,
+      timeToNode: nodeInfo.timeToNode,
+      attempts: MAX_ATTEMPTS,
+      finalPeriapsis: bestResult.result,
+    };
   }
 
-  const nodeInfo = await queryNodeInfo(conn);
-  return { success: true, deltaV: nodeInfo.deltaV, timeToNode: nodeInfo.timeToNode };
+  return {
+    success: false,
+    error: `Could not achieve target periapsis after ${MAX_ATTEMPTS} attempts. Best result: ${bestResult ? (bestResult.result / 1000).toFixed(1) + 'km' : 'none'}`,
+    attempts: MAX_ATTEMPTS,
+    finalPeriapsis: bestResult?.result ?? 0,
+  };
 }
 
 // ============================================================================
@@ -139,13 +274,18 @@ export const courseCorrectTool: ToolDefinition = {
       }
 
       const execInfo = result.executed ? ' (executed)' : '';
-      let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+      const targetDistance = args.targetDistance as number;
+      const attempts = (result as { attempts?: number }).attempts ?? 1;
+      const finalPe = (result as { finalPeriapsis?: number }).finalPeriapsis ?? 0;
 
-      // Always show corrected trajectory - critical for LLM to know state
+      let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+      text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(finalPe / 1000).toFixed(0)}km (${attempts} attempt${attempts !== 1 ? 's' : ''})`;
+
+      // Show trajectory status - critical for LLM to know state
       const { queryTargetEncounterInfo } = await import('../shared.js');
       const encounterInfo = await queryTargetEncounterInfo(conn);
       if (encounterInfo && encounterInfo.targetType === 'body') {
-        const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+        const peAlt = encounterInfo.periapsisInTargetSOI ?? finalPe;
         const encPeKm = (peAlt / 1000).toFixed(0);
         if (peAlt >= 10_000) {
           text += `\nTrajectory corrected! Encounter: ${encounterInfo.targetName} at ${encPeKm}km (safe)`;
