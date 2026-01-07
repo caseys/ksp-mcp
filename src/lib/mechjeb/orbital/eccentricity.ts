@@ -39,11 +39,13 @@ export async function changeEccentricity(
     };
   }
 
-  // Build command - use SETXFROMNOWTIME prefix if X_FROM_NOW with custom time
+  // Build command - use ECCENTRICITYTIMED for X_FROM_NOW (thread-safe, no shared state)
   let cmd: string;
   if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
-    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PLANNER:SETXFROMNOWTIME(${xFromNowSeconds}). PRINT PLANNER:ECCENTRICITY(${newEcc}, "${timeRef}").`;
+    // ECCENTRICITYTIMED: 3-arg form that passes seconds directly (thread-safe)
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ECCENTRICITYTIMED(${newEcc}, "${timeRef}", ${xFromNowSeconds}).`;
   } else {
+    // ECCENTRICITY: standard 2-arg form
     cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ECCENTRICITY(${newEcc}, "${timeRef}").`;
   }
   return executeManeuverCommand(conn, cmd, 10_000, 'change_eccentricity');

@@ -198,7 +198,8 @@ export class AscentHandle {
 
     // Handle completion
     if (result.result) {
-      const { apoapsis, periapsis, eccentricity, survivable, successful, goodOrbit } = result.result;
+      let { apoapsis, periapsis, eccentricity, successful, goodOrbit } = result.result;
+      const { body, survivable } = result.result;
 
       if (!result.timedOut) {
         // Clear any leftover maneuver nodes
