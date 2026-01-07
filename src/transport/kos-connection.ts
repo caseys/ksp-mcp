@@ -479,6 +479,25 @@ export class KosConnection {
   }
 
   /**
+   * Flush any stale data from the transport buffer.
+   * Waits briefly for any in-flight data to arrive, then clears the buffer.
+   * Use before critical multi-query operations (like status) to ensure clean state.
+   */
+  async flushStaleData(waitMs: number = 50): Promise<void> {
+    if (!this.transport) return;
+
+    // Check if transport has flushStaleData method (SocketTransport does)
+    const socketTransport = this.transport as { flushStaleData?: (ms: number) => Promise<void> };
+    if (socketTransport.flushStaleData) {
+      await socketTransport.flushStaleData(waitMs);
+    } else {
+      // Fallback: just read and discard
+      await new Promise(r => setTimeout(r, waitMs));
+      await this.transport.read();
+    }
+  }
+
+  /**
    * Parse connection info from kOS menu output
    * Example line: "[1]   no    1     stick 1 (RC-L01(guidance))"
    */

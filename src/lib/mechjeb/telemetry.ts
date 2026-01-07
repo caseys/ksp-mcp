@@ -289,6 +289,10 @@ export async function getShipTelemetry(
   const { timeoutMs = 2500 } = options;
   const lines: string[] = [];
 
+  // Flush any stale data from previous operations to ensure clean state
+  // This prevents old output from mixing with our queries
+  await conn.flushStaleData(100);
+
   // Split into smaller queries for robustness - each can fail independently
   // But if critical queries fail, we throw an error rather than showing misleading defaults
   let soi = '';
@@ -931,22 +935,13 @@ async function queryMechJebAutopilotStatus(
           const enabled = match[1].toLowerCase() === 'true';
           const state = match[2].trim();
           const dvRemaining = parseNumber(match[3]);
-          // Translate MechJeb states
+          // Translate MechJeb states to plain English
           let status = state;
-          switch (state) {
-          case 'WARPALIGN': {
-          status = 'Aligning';
-          break;
-          }
-          case 'LEAD': {
-          status = 'Coasting to burn';
-          break;
-          }
-          case 'BURN': {
-          status = 'Burning';
-          // No default
-          }
-          break;
+          switch (state.toUpperCase()) {
+            case 'WARPALIGN': status = 'Aligning'; break;
+            case 'LEAD': status = 'Coasting to burn'; break;
+            case 'BURN': status = 'Burning'; break;
+            case 'IDLE': status = 'Idle'; break;
           }
           const detail = dvRemaining > 0 ? `ΔV remaining: ${dvRemaining.toFixed(1)} m/s` : undefined;
           return { enabled, status, detail };
@@ -1007,35 +1002,23 @@ async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: Ko
 
   // Check node executor
   try {
-    const nodeResult = await conn.execute('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
-    if (nodeResult.output.toLowerCase().includes('true')) {
-      const statusResult = await conn.execute(
-        'PRINT ADDONS:MJ:NODE:STATE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0).',
-        2000
-      );
-      const match = statusResult.output.match(/(\w+)\|([\d.]+)/);
-      if (match) {
-        const state = match[1].trim();
-        const dvRemaining = parseNumber(match[2]);
-        let status = state;
-        switch (state) {
-        case 'WARPALIGN': {
-        status = 'Aligning';
-        break;
-        }
-        case 'LEAD': {
-        status = 'Coasting to burn';
-        break;
-        }
-        case 'BURN': {
-        status = 'Burning';
-        // No default
-        }
-        break;
-        }
-        return { opType: 'node', status, detail: dvRemaining > 0 ? `ΔV remaining: ${dvRemaining.toFixed(1)} m/s` : undefined };
+    const nodeResult = await conn.execute(
+      'PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0).',
+      2000
+    );
+    const match = nodeResult.output.match(/(True|False)\|(\w+)\|([\d.]+)/i);
+    if (match && match[1].toLowerCase() === 'true') {
+      const state = match[2].trim();
+      const dvRemaining = parseNumber(match[3]);
+      // Translate MechJeb states to plain English
+      let status = state;
+      switch (state.toUpperCase()) {
+        case 'WARPALIGN': status = 'Aligning'; break;
+        case 'LEAD': status = 'Coasting to burn'; break;
+        case 'BURN': status = 'Burning'; break;
+        case 'IDLE': status = 'Idle'; break;
       }
-      return { opType: 'node', status: 'Executing node' };
+      return { opType: 'node', status, detail: dvRemaining > 0 ? `ΔV remaining: ${dvRemaining.toFixed(1)} m/s` : undefined };
     }
   } catch { /* ignore */ }
 

@@ -52,8 +52,8 @@ const RCS_TRIGGER_TIME = 3000; // ms - enable RCS if no progress after this
 const MAX_ALIGN_TIME = 300_000; // ms - 5 minutes, keep trying (warn after 30s)
 
 /**
- * Format MechJeb node executor state for display
- * States: IDLE, WARPALIGN, LEAD, BURN
+ * Format executor state for display.
+ * MechJeb states: WARPALIGN, LEAD, BURN, IDLE
  */
 function formatExecutorState(state: string): string {
   switch (state.toUpperCase()) {
@@ -71,20 +71,21 @@ function formatExecutorState(state: string): string {
  *
  * @param conn kOS connection
  * @param logger Optional MCP logger for progress updates
+ * @param logPrefix Prefix for log messages (e.g., '[Maneuver]')
  */
-async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boolean> {
+async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]'): Promise<boolean> {
   const log = logger ?? nullLogger;
 
   // Verify node exists before trying to align
   const nodeCheck = await conn.execute('PRINT HASNODE.');
   if (!nodeCheck.output.includes('True')) {
-    log.error('[AlignToNode] No maneuver node exists!');
+    log.error(`${logPrefix} No maneuver node exists!`);
     return false;
   }
 
   // Check initial angle
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-  log.progress(`[AlignToNode] Initial angle: ${fmtNum(initialAngle)}°`);
+  log.progress(`${logPrefix} Align: initial angle ${fmtNum(initialAngle)}°`);
 
   // Save RCS state
   const rcsState = await conn.execute('PRINT RCS.');
@@ -93,7 +94,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
   // Use LOCK STEERING - more reliable than SAS MANEUVER mode
   // Keep SAS OFF to avoid conflicts, give kOS a moment to engage steering
   await conn.execute('SAS OFF. UNLOCK STEERING. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
-  log.progress('[AlignToNode] Steering locked to node, aligning...');
+  log.progress(`${logPrefix} Aligning for maneuver...`);
 
   const alignStartTime = Date.now();
   let warnedSlow = false;
@@ -122,16 +123,16 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
     connection: conn,
 
     onPoll: async (state) => {
-      log.progress(`[AlignToNode] Angle: ${fmtNum(state.angle)}°`);
+      log.progress(`${logPrefix} Align: ${fmtNum(state.angle)}°`);
 
       if (state.aligned) {
-        log.progress(`[AlignToNode] Aligned! (${fmtNum(state.angle)}°)`);
+        log.progress(`${logPrefix} Aligned! (${fmtNum(state.angle)}°)`);
         return;
       }
 
       // Warn if alignment is taking a long time (but don't fail)
       if (!warnedSlow && Date.now() - alignStartTime > 30_000) {
-        log.warn(`[AlignToNode] Alignment is slow (30s+), angle: ${fmtNum(state.angle)}°`);
+        log.warn(`${logPrefix} Alignment is slow (30s+), angle: ${fmtNum(state.angle)}°`);
         warnedSlow = true;
       }
 
@@ -143,7 +144,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
         // No progress for 3s - enable RCS to help rotation
         try {
           await conn.execute('RCS ON.');
-          log.progress(`[AlignToNode] No progress, enabled RCS (${fmtNum(state.angle)}°)`);
+          log.progress(`${logPrefix} No progress, enabled RCS (${fmtNum(state.angle)}°)`);
           noProgressSince = Date.now(); // Reset timer after enabling RCS
         } catch {
           // Ignore RCS enable errors during blackout
@@ -171,7 +172,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger): Promise<boo
   // Final verification
   try {
     const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-    log.progress(`[AlignToNode] Final angle: ${fmtNum(finalAngle)}°, aligned: ${result.success}`);
+    log.progress(`${logPrefix} Align complete: ${fmtNum(finalAngle)}°, aligned: ${result.success}`);
     return finalAngle < ALIGN_THRESHOLD;
   } catch {
     // If we can't verify, trust the poll result
@@ -213,7 +214,7 @@ export async function executeNode(
   } = options;
 
   const log = logger ?? nullLogger;
-  const logPrefix = callerTool ? `[Maneuver for:${callerTool}]` : '[Maneuver]';
+  const logPrefix = callerTool ? `[${callerTool} Maneuver]` : '[Maneuver]';
   // Check if a node exists
   const nodeCheck = await conn.execute('PRINT HASNODE.', 2000);
   if (!nodeCheck.output.includes('True')) {
@@ -259,7 +260,7 @@ export async function executeNode(
 
   // Best-effort alignment before warp - MechJeb will handle final alignment
   // We don't fail on alignment issues since MechJeb's executor has its own alignment phase
-  await alignToNode(conn, logger).catch(() => {
+  await alignToNode(conn, logger, logPrefix).catch(() => {
     log.warn(`${logPrefix} Pre-alignment failed, MechJeb will align during execution`);
   });
 
@@ -353,7 +354,6 @@ export async function executeNode(
     const result = await pollWithBlackoutResilience<BurnPollState>({
       poll: async () => {
         // Query progress - when MechJeb completes the burn, it removes the node
-        // Include ETA for coasting status display
         const progressResult = await conn.execute(
           'IF HASNODE { PRINT NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + ROUND(NEXTNODE:ETA). } ELSE { PRINT "NONODE". }',
           3000
@@ -405,7 +405,7 @@ export async function executeNode(
         const isCoasting = state.executorState.toUpperCase() === 'LEAD';
         const statusDetail = isCoasting
           ? `in ${formatTime(state.nodeEta)}`
-          : `${fmtNum(state.dvRemaining)} m/sec remaining`;
+          : `with ${fmtNum(state.dvRemaining)} m/sec remaining`;
 
         if (status !== lastStatus) {
           log.progress(`${logPrefix} ${status}, ${statusDetail}`);

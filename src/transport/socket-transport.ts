@@ -54,6 +54,8 @@ export class SocketTransport extends BaseTransport {
         // Enable TCP keepalive to prevent connection death during long operations
         // Send keepalive probes every 30 seconds
         this.socket!.setKeepAlive(true, 30_000);
+        // Clear any stale data in buffer from previous sessions
+        this.outputBuffer = '';
         // Small delay to let kOS send initial data
         setTimeout(() => resolve(), config.timeouts.connectDelay);
       });
@@ -155,6 +157,20 @@ export class SocketTransport extends BaseTransport {
    */
   clearBuffer(): void {
     this.outputBuffer = '';
+  }
+
+  /**
+   * Flush any stale data from the buffer.
+   * Waits briefly for any in-flight data to arrive, then clears the buffer.
+   * Use before critical queries to ensure clean state.
+   */
+  async flushStaleData(waitMs: number = 50): Promise<void> {
+    await this.delay(waitMs);
+    const staleData = this.outputBuffer;
+    this.outputBuffer = '';
+    if (staleData.length > 0) {
+      this.trace.logInfo(`flushed ${staleData.length} bytes of stale data`);
+    }
   }
 
   async close(): Promise<void> {

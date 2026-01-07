@@ -166,7 +166,7 @@ async function monitorLanding(
     onPoll: (state) => {
       // Log progress if status changed (include speed for context)
       if (state.status.status !== lastStatusText) {
-        const speedPart = state.status.speed !== undefined ? ` | ${Math.abs(state.status.speed)} m/sec` : '';
+        const speedPart = state.status.speed !== undefined ? ` at ${Math.abs(state.status.speed)} m/sec` : '';
         const statusText = state.status.status === 'off' ? 'Contact light, Descent engine command override, off.' : state.status.status;
         log.progress(`[Landing] ${statusText}${speedPart}`);
         lastStatusText = state.status.status;
@@ -342,7 +342,7 @@ export const landTool: ToolDefinition = {
           }
 
           // Execute the circularization node
-          logger.progress(`[Landing] Executing circularization burn (${circResult.deltaV?.toFixed(1) ?? '?'} m/s)...`);
+          logger.progress(`[Landing] Executing circularization burn: (${circResult.deltaV?.toFixed(1) ?? '?'} m/sec)...`);
           const { executeNode } = await import('../execute-node.js');
           const execResult = await executeNode(conn, { timeoutMs: 300_000 });
           if (!execResult.success) {
