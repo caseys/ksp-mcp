@@ -8,7 +8,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { formatTime, fmtDist } from '../../utils/format.js';
+import { formatTime, fmtDist, fmtVel } from '../../utils/format.js';
 
 // ============================================================================
 // Types
@@ -396,7 +396,7 @@ export async function getLandingPrediction(conn: KosConnection): Promise<Landing
     if (timeToLanding !== undefined) {
       formatted += `  Time to landing: ${formatTime(timeToLanding)}\n`;
     }
-    formatted += `  Max safe speed: ${maxAllowedSpeed.toFixed(1)} m/sec\n`;
+    formatted += `  Max safe speed: ${fmtVel(maxAllowedSpeed)}\n`;
     formatted += `  Decel end altitude: ${fmtDist(decelEndAltitude)}\n`;
     formatted += `  Using atmosphere: ${usingAtmosphere ? 'yes' : 'no'}\n`;
     formatted += `  Parachutes ready: ${chutesReady ? 'yes' : 'no'}`;

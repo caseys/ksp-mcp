@@ -139,25 +139,25 @@ export class AscentHandle {
     const result = await pollWithBlackoutResilience<AscentPollState>({
       poll: async () => {
         // Use pipe delimiters for robust parsing
-        // Note: STATUS suffix doesn't exist in kOS.MechJeb2.Addon, use SHIP:STATUS instead
+        // Query MechJeb ascent status for phase tracking (e.g., "Gravity turn")
         const statusResult = await this.conn.execute(
           'SET _ASC TO ADDONS:MJ:ASCENT. ' +
           'SET _E TO _ASC:ENABLED. ' +
+          'SET _S TO _ASC:STATUS. ' +  // MechJeb ascent status (e.g., "Gravity turn", "Coasting to edge of atmosphere")
           'SET _A TO ROUND(APOAPSIS). ' +
           'SET _P TO ROUND(PERIAPSIS). ' +
           'SET _B TO SHIP:BODY:NAME. ' +
           'SET _EC TO ROUND(ORBIT:ECCENTRICITY, 4). ' +
-          'SET _SS TO SHIP:STATUS. ' +
-          'PRINT _E + "|" + _SS + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.'
+          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.'
         );
 
-        const statusMatch = statusResult.output.match(/(True|False)\|(\w+)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
+        const statusMatch = statusResult.output.match(/(True|False)\|([^|]+)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
         if (!statusMatch) {
           throw new Error('Failed to parse ascent status');
         }
 
         const enabled = statusMatch[1].toLowerCase() === 'true';
-        const status = statusMatch[2].trim();  // Now SHIP:STATUS (FLYING, ORBITING, etc.)
+        const status = statusMatch[2].trim();  // MechJeb status (e.g., "Gravity turn", "Off")
         const apoapsis = Number.parseInt(statusMatch[3]);
         const periapsis = Number.parseInt(statusMatch[4]);
         const body = statusMatch[5];

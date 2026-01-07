@@ -10,7 +10,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
-import { formatTime, fmtNum } from '../../utils/format.js';
+import { formatTime,  fmtVel } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to kill relative velocity with the target.
@@ -111,11 +111,11 @@ export const matchVelocitiesTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           const relVelInfo = await conn.execute('PRINT ROUND((TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT):MAG, 1).', 2000);
-          const relVel = relVelInfo.output.trim();
-          text += `\nRelative velocity: ${relVel} m/sec`;
+          const relVel = parseFloat(relVelInfo.output.trim()) || 0;
+          text += `\nRelative velocity: ${fmtVel(relVel)}`;
         }
         return ctx.successResponse('match_velocities', text);
       } else {

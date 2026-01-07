@@ -8,10 +8,10 @@
  */
 export function formatTime(seconds: number): string {
   const s = Math.abs(seconds);
-  if (s < 60) return `${s.toFixed(0)} seconds`;
-  if (s < 3600) return `${Math.floor(s / 60)} minutes ${Math.floor(s % 60)} seconds`;
-  if (s < 86_400) return `${Math.floor(s / 3600)} hours ${Math.floor((s % 3600) / 60)} minutes`;
-  return `${Math.floor(s / 86_400)} days ${Math.floor((s % 86_400) / 3600)} hours`;
+  if (s < 60) return `${s.toFixed(0)}sec`;
+  if (s < 3600) return `${Math.floor(s / 60)}min ${Math.floor(s % 60)}sec`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}hrs ${Math.floor((s % 3600) / 60)}min`;
+  return `${Math.floor(s / 86_400)}days ${Math.floor((s % 86_400) / 3600)}hrs`;
 }
 
 /**
@@ -60,4 +60,12 @@ export function formatOrbit(apoapsisM: number, periapsisM: number): string {
     return `${formatNum(apoapsisM / 1_000_000)}Mm by ${formatNum(periapsisM / 1_000_000)}Mm`;
   }
   return `${formatNum(apoapsisM / 1000)}km by ${formatNum(periapsisM / 1000)}km`;
+}
+
+/**
+ * Format velocity for TTS: @20m/sec or @-20m/sec
+ * Note: number touches 'm' with no space for TTS clarity
+ */
+export function fmtVel(metersPerSecond: number): string {
+  return `${Math.round(metersPerSecond)}_m/sec`;
 }

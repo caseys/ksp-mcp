@@ -5,6 +5,7 @@
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import type { GetTargetInfo } from './types.js';
+import { fmtVel } from '../../utils/format.js';
 
 /**
  * Get detailed information about the current target.
@@ -87,7 +88,7 @@ export async function getTargetInfo(conn: KosConnection): Promise<GetTargetInfo>
   if (distanceKm !== undefined) detailLines.push(`Distance: ${distanceKm} km`);
   if (radiusKm) detailLines.push(`Radius: ${radiusKm} km`);
   if (altKm) detailLines.push(`Orbital altitude: ${altKm} km`);
-  if (velocity) detailLines.push(`Relative velocity: ${velocity} m/sec`);
+  if (velocity) detailLines.push(`Relative velocity: ${fmtVel(Number.parseFloat(velocity))}`);
 
   return {
     hasTarget: true,

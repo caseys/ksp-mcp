@@ -13,7 +13,7 @@ import { ManeuverOrchestrator } from '../orchestrator.js';
 import { hasTarget } from '../../kos/target/index.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
-import { formatTime, fmtNum } from '../../utils/format.js';
+import { formatTime,  fmtVel } from '../../utils/format.js';
 
 // ============================================================================
 // Tool Definition
@@ -76,7 +76,7 @@ export const inclinationTool: ToolDefinition = {
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
-          responseText = `Match planes: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+          responseText = `Match planes: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
           if (result.warning) {
             responseText += `\n${result.warning}`;
@@ -105,7 +105,7 @@ export const inclinationTool: ToolDefinition = {
 
         if (result.success) {
           const execInfo = result.executed ? ' (executed)' : '';
-          responseText = `Change inclination to ${targetAngle}°: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+          responseText = `Change inclination to ${targetAngle}°: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
           if (result.warning) {
             responseText += `\n${result.warning}`;

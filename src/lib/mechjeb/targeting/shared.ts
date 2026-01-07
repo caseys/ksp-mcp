@@ -8,7 +8,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { formatTime, formatOrbit } from '../../utils/format.js';
+import { formatTime, formatOrbit, fmtVel } from '../../utils/format.js';
 
 function formatDistance(meters: number): string {
   if (meters < 1000) return `${meters.toFixed(0)} m`;
@@ -443,7 +443,7 @@ export async function getTargetPositionInfo(conn: KosConnection): Promise<Target
 
   let formatted = `Target: ${targetInfo.name}\n`;
   formatted += `Distance: ${formatDistance(distance)}\n`;
-  formatted += `Relative velocity: ${relVelocityMag.toFixed(1)} m/sec\n`;
+  formatted += `Relative velocity: ${fmtVel(relVelocityMag)}\n`;
   if (canAlign) {
     formatted += `Docking alignment: available`;
   }
@@ -576,7 +576,7 @@ export async function getUnifiedTargetInfo(conn: KosConnection): Promise<Unified
 
   // Build formatted output
   let formatted = `Target: ${targetInfo.name} (${targetInfo.type})\n`;
-  formatted += `Distance: ${formatDistance(distance)} | Rel vel: ${relVelocityMag.toFixed(1)} m/s\n`;
+  formatted += `Distance: ${formatDistance(distance)} | Rel vel: ${fmtVel(relVelocityMag)}\n`;
   formatted += '\n';
   formatted += 'Orbit:\n';
   formatted += `  ${formatOrbit(apoapsis, periapsis)}\n`;

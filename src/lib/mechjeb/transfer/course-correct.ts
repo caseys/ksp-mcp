@@ -10,7 +10,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { executeSchema, distanceSchema, parseTarget } from '../../tool-types.js';
-import { formatTime, fmtNum } from '../../utils/format.js';
+import { formatTime,  fmtVel } from '../../utils/format.js';
 
 // ============================================================================
 // Helper Functions
@@ -278,7 +278,7 @@ export const courseCorrectTool: ToolDefinition = {
       const attempts = (result as { attempts?: number }).attempts ?? 1;
       const finalPe = (result as { finalPeriapsis?: number }).finalPeriapsis ?? 0;
 
-      let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+      let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
       text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(finalPe / 1000).toFixed(0)}km (${attempts} attempt${attempts !== 1 ? 's' : ''})`;
 
       // Show trajectory status - critical for LLM to know state

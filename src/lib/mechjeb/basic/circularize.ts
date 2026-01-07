@@ -9,7 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
-import { formatTime, fmtNum } from '../../utils/format.js';
+import { formatTime,  fmtVel } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to circularize the orbit.
@@ -211,7 +211,7 @@ export const circularizeTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Show resulting orbit after execution
         if (result.executed) {

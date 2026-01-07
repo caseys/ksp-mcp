@@ -9,7 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
-import { formatTime, fmtNum } from '../../utils/format.js';
+import { formatTime,  fmtVel } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to establish a resonant orbit.
@@ -91,7 +91,7 @@ export const resonantOrbitTool: ToolDefinition = {
 
       if (result.success) {
         const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
         if (result.executed) {
           const orbitInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:PERIOD, 1) + "|" + ROUND(APOAPSIS/1000, 1).', 2000);
           const match = orbitInfo.output.match(/([\d.]+)\|([\d.]+)/);

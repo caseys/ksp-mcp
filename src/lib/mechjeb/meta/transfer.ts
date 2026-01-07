@@ -12,7 +12,7 @@ import { getTargetValidationInfo, type TargetClass } from '../../kos/target/vali
 import { getVesselStateInfo, type BodyType } from '../../kos/vessel/validate.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
-import { formatTime, fmtNum } from '../../utils/format.js';
+import { formatTime,  fmtVel } from '../../utils/format.js';
 
 // ============================================================================
 // Tool Definition
@@ -112,7 +112,7 @@ export const transferTool: ToolDefinition = {
         const nodeCount = result.nodesCreated ?? 1;
         const execInfo = result.executed ? ' (executed)' : '';
         let text = `Transfer to ${targetInfo.name} (${transferType}): `;
-        text += `${nodeCount} node(s), ${result.deltaV != null ? fmtNum(result.deltaV) : '?'} m/sec, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        text += `${nodeCount} node(s), ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Include warning if present
         if (result.warning) {

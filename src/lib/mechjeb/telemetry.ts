@@ -11,7 +11,7 @@ import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
 import { delay } from '../utils/progress.js';
-import { formatTime, formatOrbit, fmtNum, fmtDist } from '../utils/format.js';
+import { formatTime, formatOrbit, fmtNum, fmtDist, fmtVel } from '../utils/format.js';
 
 const TELEMETRY_DELAY_MS = 100;
 
@@ -419,18 +419,13 @@ export async function getShipTelemetry(
   const isMoon = soiParent.toLowerCase() !== 'sun' && soiParent.toLowerCase() !== 'kerbol';
   const soiDisplay = isMoon ? `${soi}, a moon of ${soiParent}` : soi;
 
-  // Query ship delta-v and terrain height (separate queries for robustness)
+  // Query ship delta-v
   let shipDeltaV = 0;
-  let terrainHeight = 0;
   try {
-    const dvResult = await conn.execute('PRINT "DV:" + ROUND(SHIP:DELTAV:CURRENT) + " TER:" + ROUND(SHIP:GEOPOSITION:TERRAINHEIGHT).', 2000);
+    const dvResult = await conn.execute('PRINT "DV:" + ROUND(SHIP:DELTAV:CURRENT).', 2000);
     const dvMatch = dvResult.output.match(/DV:(-?\d+)/);
-    const terMatch = dvResult.output.match(/TER:(-?\d+)/);
     if (dvMatch) {
       shipDeltaV = parseInt(dvMatch[1]);
-    }
-    if (terMatch) {
-      terrainHeight = parseInt(terMatch[1]);
     }
   } catch {
     // Ignore query failures - non-critical
@@ -531,21 +526,31 @@ export async function getShipTelemetry(
   const isSurface = ['LANDED', 'SPLASHED', 'PRELAUNCH'].includes(vesselStatus.toUpperCase());
 
   if (isSurface) {
+    // Query slope (pitch/roll) for surface status
+    let slopeDegrees = 0;
+    try {
+      const slopeResult = await conn.execute(
+        'PRINT "SLOPE|" + ABS(ROUND(90 - VANG(SHIP:UP:VECTOR, SHIP:FACING:TOPVECTOR), 1)).',
+        2000
+      );
+      const slopeMatch = slopeResult.output.match(/SLOPE\|([\d.]+)/);
+      if (slopeMatch) {
+        slopeDegrees = parseFloat(slopeMatch[1]);
+      }
+    } catch {
+      // Ignore slope query failures
+    }
+
     // Surface status format
-    lines.push(`Ship: ${vesselStatus.toUpperCase()}`);
-    lines.push(`Surface of: ${soiDisplay}`);
+    lines.push(`Location: ${soiDisplay} (${vesselStatus.toUpperCase()}) on surface`);
+    lines.push(`Longitude: ${longitude.toFixed(4)}°`);
+    lines.push(`Latitude: ${latitude.toFixed(4)}°`);
     const altKm = altitude / 1000;
     lines.push(`Altitude: ${altKm >= 1 ? altKm.toFixed(1) + 'km' : altitude.toFixed(0) + 'm'}`);
-    if (terrainHeight !== 0) {
-      const terKm = terrainHeight / 1000;
-      lines.push(`Terrain: ${terKm >= 1 ? terKm.toFixed(1) + 'km' : terrainHeight.toFixed(0) + 'm'} ASL`);
-    }
-    lines.push(`Latitude: ${latitude.toFixed(4)}°`);
-    lines.push(`Longitude: ${longitude.toFixed(4)}°`);
-    lines.push(`Vessel: ${vesselName}`);
-    if (shipDeltaV > 0) {
-      lines.push(`Delta-V: ${shipDeltaV} m/s`);
-    }
+    lines.push(`Slope: ${slopeDegrees.toFixed(1)}°`);
+    // Vessel line with type as label, delta-v in parentheses
+    const dvPart = shipDeltaV > 0 ? ` (delta-v: ${fmtVel(shipDeltaV)})` : '';
+    lines.push(`${vesselType}: ${vesselName}${dvPart}`);
   } else {
     // Orbit status format (non-surface)
 
@@ -569,8 +574,8 @@ export async function getShipTelemetry(
     }
 
     // Line 4: Ship info with speed and delta-v
-    const speedInfo = orbitalSpeed > 0 ? `speed: ${orbitalSpeed}m/sec` : '';
-    const dvInfo = shipDeltaV > 0 ? `delta-v: ${shipDeltaV}m/sec` : '';
+    const speedInfo = orbitalSpeed > 0 ? `speed: ${fmtVel(orbitalSpeed)}` : '';
+    const dvInfo = shipDeltaV > 0 ? `delta-v: ${fmtVel(shipDeltaV)}` : '';
     const shipDetails = [speedInfo, dvInfo].filter(Boolean).join(', ');
     lines.push(`Ship: ${vesselName}${shipDetails ? ` (${shipDetails})` : ''}`);
   }
@@ -583,7 +588,7 @@ export async function getShipTelemetry(
       estimatedBurnTime,
     };
     lines.push('', '=== Next Maneuver ===');
-    lines.push(`Delta-V: ${fmtNum(nodeDv)} m/sec`);
+    lines.push(`Delta-V: ${fmtVel(nodeDv)}`);
     lines.push(`Time to node: ${formatTime(nodeEta)}`);
     lines.push(`Est. burn time: ${formatTime(estimatedBurnTime)}`);
   }
@@ -831,7 +836,7 @@ function _formatTargetEncounterInfo(info: TargetEncounterInfo): string {
     }
 
     if (bodyInfo.captureDeltaV !== undefined && !isCrash && !isReentry) {
-      lines.push(`Capture ΔV: ${fmtNum(bodyInfo.captureDeltaV)} m/sec`);
+      lines.push(`Capture ΔV: ${fmtVel(bodyInfo.captureDeltaV)}`);
     } else if (isCrash) {
       lines.push(`Capture ΔV: N/A (no safe orbit)`);
     } else if (isReentry) {
@@ -856,7 +861,7 @@ function _formatTargetEncounterInfo(info: TargetEncounterInfo): string {
     }
 
     if (vesselInfo.closestApproachRelVel !== undefined) {
-      lines.push(`Rel. velocity at CA: ${fmtNum(vesselInfo.closestApproachRelVel)} m/sec`);
+      lines.push(`Rel. velocity at CA: ${fmtVel(vesselInfo.closestApproachRelVel)}`);
     }
   }
 
@@ -920,7 +925,7 @@ async function queryMechJebAutopilotStatus(
           const vspeed = parseNumber(match[4]);
           // Use actual MechJeb status, fallback to generic if empty
           const status = mjStatus || (enabled ? 'Landing' : 'Idle');
-          const detail = `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${vspeed.toFixed(0)}m/s`;
+          const detail = `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${fmtVel(vspeed)}`;
           return { enabled, status, detail };
         }
         break;
@@ -943,7 +948,7 @@ async function queryMechJebAutopilotStatus(
             case 'BURN': status = 'Burning'; break;
             case 'IDLE': status = 'Idle'; break;
           }
-          const detail = dvRemaining > 0 ? `ΔV remaining: ${dvRemaining.toFixed(1)} m/s` : undefined;
+          const detail = dvRemaining > 0 ? `ΔV remaining: ${fmtVel(dvRemaining)}` : undefined;
           return { enabled, status, detail };
         }
         break;
@@ -994,7 +999,7 @@ async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: Ko
       if (match) {
         const alt = parseNumber(match[1]);
         const vspeed = parseNumber(match[2]);
-        return { opType: 'landing', status: 'Landing', detail: `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${vspeed.toFixed(0)}m/s` };
+        return { opType: 'landing', status: 'Landing', detail: `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${fmtVel(vspeed)}` };
       }
       return { opType: 'landing', status: 'Landing' };
     }
@@ -1018,7 +1023,7 @@ async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: Ko
         case 'BURN': status = 'Burning'; break;
         case 'IDLE': status = 'Idle'; break;
       }
-      return { opType: 'node', status, detail: dvRemaining > 0 ? `ΔV remaining: ${dvRemaining.toFixed(1)} m/s` : undefined };
+      return { opType: 'node', status, detail: dvRemaining > 0 ? `ΔV remaining: ${fmtVel(dvRemaining)}` : undefined };
     }
   } catch { /* ignore */ }
 

@@ -25,6 +25,7 @@ import {
 import { findLandingSite } from './find-site.js';
 import { getVesselStateInfo } from '../../kos/vessel/validate.js';
 import { circularize } from '../basic/circularize.js';
+import { fmtVel } from '../../utils/format.js';
 
 // ============================================================================
 // Target Validation
@@ -166,8 +167,8 @@ async function monitorLanding(
     onPoll: (state) => {
       // Log progress if status changed (include speed for context)
       if (state.status.status !== lastStatusText) {
-        const speedPart = state.status.speed !== undefined ? ` at ${Math.abs(state.status.speed)} m/sec` : '';
-        const statusText = state.status.status === 'off' ? 'Contact light, Descent engine command override, off.' : state.status.status;
+        const speedPart = state.status.speed !== undefined ? ` at ${fmtVel(Math.abs(state.status.speed))}` : '';
+        const statusText = state.status.status === 'Off' ? 'Contact light, Descent engine command override off.' : state.status.status;
         log.progress(`[Landing] ${statusText}${speedPart}`);
         lastStatusText = state.status.status;
       }
@@ -342,7 +343,7 @@ export const landTool: ToolDefinition = {
           }
 
           // Execute the circularization node
-          logger.progress(`[Landing] Executing circularization burn: (${circResult.deltaV?.toFixed(1) ?? '?'} m/sec)...`);
+          logger.progress(`[Landing] Executing circularization burn: (${circResult.deltaV != null ? fmtVel(circResult.deltaV) : '?'})...`);
           const { executeNode } = await import('../execute-node.js');
           const execResult = await executeNode(conn, { timeoutMs: 300_000 });
           if (!execResult.success) {

@@ -8,7 +8,7 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import { queryNumber, unlockControls } from './shared.js';
 import { delay } from '../utils/progress.js';
-import { formatTime, fmtNum } from '../utils/format.js';
+import { formatTime, fmtNum, fmtVel } from '../utils/format.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
@@ -235,21 +235,21 @@ export async function executeNode(
     return {
       success: false,
       nodesExecuted: 0,
-      error: `Insufficient delta-v: need ${fmtNum(dvRequired)} m/sec, have ${fmtNum(dvShipTotal)} m/sec (deficit: ${fmtNum(deficit)} m/sec). Consider adding more fuel or splitting the maneuver.`,
+      error: `Insufficient delta-v: need ${fmtVel(dvRequired)}, have ${fmtVel(dvShipTotal)} (deficit: ${fmtVel(deficit)}). Consider adding more fuel or splitting the maneuver.`,
       deltaV: { required: dvRequired, available: dvShipTotal }
     };
   }
 
-  log.progress(`${logPrefix} Delta V: ${fmtNum(dvRequired)} m/sec, Ship total: ${fmtNum(dvShipTotal)} m/sec`);
+  log.progress(`${logPrefix} Delta V: ${fmtVel(dvRequired)}, Ship total: ${fmtVel(dvShipTotal)}`);
 
   // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor)
   // This enables status tracking even if MCP client times out
-  await setKosOperation(conn, 'node', callerTool ?? 'execute_node', `${dvRequired.toFixed(0)}m/s`);
+  await setKosOperation(conn, 'node', callerTool ?? 'execute_node', fmtVel(dvRequired));
 
   // Determine if staging will be needed during burn
   const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
   if (needsStaging) {
-    log.progress(`${logPrefix} Current stage: ${fmtNum(dvCurrentStage)} m/sec, (staging will be automated)`);
+    log.progress(`${logPrefix} Current stage: ${fmtVel(dvCurrentStage)}, (staging will be automated)`);
     await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
   } 
 
@@ -405,7 +405,7 @@ export async function executeNode(
         const isCoasting = state.executorState.toUpperCase() === 'LEAD';
         const statusDetail = isCoasting
           ? `in ${formatTime(state.nodeEta)}`
-          : `with ${fmtNum(state.dvRemaining)} m/sec remaining`;
+          : `with ${fmtVel(state.dvRemaining)} remaining`;
 
         if (status !== lastStatus) {
           log.progress(`${logPrefix} ${status}, ${statusDetail}`);
@@ -432,7 +432,7 @@ export async function executeNode(
       if (state.noNode || state.burnComplete) {
         await stopWarp(conn);
         if (state.burnComplete && !state.noNode) {
-          log.progress(`${logPrefix} Burn complete! (${fmtNum(state.dvRemaining)} m/sec remaining < ${DV_THRESHOLD} m/sec threshold)`);
+          log.progress(`${logPrefix} Burn complete! (${fmtVel(state.dvRemaining)} remaining < ${fmtVel(DV_THRESHOLD)} threshold)`);
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
         }
@@ -448,7 +448,7 @@ export async function executeNode(
 
       // Executor stopped but burn incomplete - retry if possible
       if (state.executorStopped) {
-        log.progress(`${logPrefix} Executor stopped with ${fmtNum(state.dvRemaining)} m/sec remaining`);
+        log.progress(`${logPrefix} Executor stopped with ${fmtVel(state.dvRemaining)} remaining`);
         if (attempt < MAX_RETRIES) {
           log.progress(`${logPrefix} Will retry (attempt ${attempt + 1}/${MAX_RETRIES})`);
           await delay(2000);
@@ -459,7 +459,7 @@ export async function executeNode(
           return {
             success: false,
             nodesExecuted: 0,
-            error: `Burn incomplete after ${MAX_RETRIES} attempts. ${fmtNum(state.dvRemaining)} m/sec remaining.`,
+            error: `Burn incomplete after ${MAX_RETRIES} attempts. ${fmtVel(state.dvRemaining)} remaining.`,
             deltaV: { required: dvRequired, available: dvShipTotal, remaining: state.dvRemaining },
             attempts: attempt
           };
@@ -619,13 +619,13 @@ export const executeNodeTool: ToolDefinition = {
         if (asyncMode) {
           return ctx.successResponse('execute_node',
             `Node execution started. Poll status for progress.\n` +
-            `Delta-V required: ${result.deltaV?.required ? fmtNum(result.deltaV.required) : '?'} m/sec`);
+            `Delta-V required: ${result.deltaV?.required ? fmtVel(result.deltaV.required) : '?'}`);
         }
 
         // Sync mode - build detailed response
         let text = `Executed ${result.nodesExecuted} node(s)`;
         if (result.deltaV) {
-          text += `, ${result.deltaV.remaining != null ? fmtNum(result.deltaV.remaining) : '0'} m/sec remaining`;
+          text += `, ${result.deltaV.remaining != null ? fmtVel(result.deltaV.remaining) : '@0m/sec'} remaining`;
         }
 
         // Check for encounter to provide context-aware next step
