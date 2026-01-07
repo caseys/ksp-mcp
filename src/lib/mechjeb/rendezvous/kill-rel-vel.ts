@@ -19,10 +19,12 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  *
  * @param conn kOS connection
  * @param timeRef When to execute: 'CLOSEST_APPROACH', 'X_FROM_NOW'
+ * @param xFromNowSeconds When using X_FROM_NOW, the time in seconds from now
  */
 export async function killRelativeVelocity(
   conn: KosConnection,
-  timeRef = 'CLOSEST_APPROACH'
+  timeRef = 'CLOSEST_APPROACH',
+  xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
   // Validate vessel state: must not be on ground
   const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'match_velocities');
@@ -39,7 +41,13 @@ export async function killRelativeVelocity(
     return { success: false, error: validation.error };
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:KILLRELVEL("${timeRef}").`;
+  // Build command - use KILLRELVELTIMED for X_FROM_NOW (thread-safe, no shared state)
+  let cmd: string;
+  if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:KILLRELVELTIMED("${timeRef}", ${xFromNowSeconds}).`;
+  } else {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:KILLRELVEL("${timeRef}").`;
+  }
   const result = await conn.execute(cmd, 10_000);
 
   const success = result.output.includes('True');

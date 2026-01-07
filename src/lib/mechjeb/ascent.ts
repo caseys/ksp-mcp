@@ -54,37 +54,39 @@ export class AscentHandle {
    * Uses MechJeb STATUS for accurate phase detection and dynamic atmosphere height
    */
   async getProgress(): Promise<AscentProgress> {
-    // Single atomic query for all progress values including MechJeb status and atmosphere height
+    // Single atomic query for all progress values including MechJeb enabled state and atmosphere height
+    // Note: STATUS suffix doesn't exist in kOS.MechJeb2.Addon, so we derive phase from orbital params
     const result = await this.conn.execute(
       'PRINT "PROG|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ' +
-      'ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:STATUS + "|" + ' +
-      'ROUND(SHIP:BODY:ATM:HEIGHT).',
+      'ADDONS:MJ:ASCENT:ENABLED + "|" + ' +
+      'ROUND(SHIP:BODY:ATM:HEIGHT) + "|" + SHIP:STATUS.',
       3000
     );
 
-    // Parse "PROG|alt|apo|per|enabled|mjStatus|atmHeight" format
-    const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|([^|]*)\|(\d+)/i);
+    // Parse "PROG|alt|apo|per|enabled|atmHeight|shipStatus" format
+    const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|(\d+)\|(\w+)/i);
 
     const altitude = match ? Number.parseFloat(match[1]) : 0;
     const apoapsis = match ? Number.parseFloat(match[2]) : 0;
     const periapsis = match ? Number.parseFloat(match[3]) : 0;
     const enabled = match ? match[4].toLowerCase() === 'true' : false;
-    const mjStatus = match ? match[5].trim() : '';
-    const atmHeight = match ? Number.parseInt(match[6]) : 70_000;
+    const atmHeight = match ? Number.parseInt(match[5]) : 70_000;
+    const shipStatus = match ? match[6].toLowerCase() : '';
 
-    // Determine phase using MechJeb status strings
+    // Determine phase from orbital parameters and ship status
     let phase: AscentProgress['phase'];
-    const statusLower = mjStatus.toLowerCase();
 
-    if (statusLower.includes('prelaunch') || statusLower.includes('landed') || (!enabled && mjStatus === '')) {
+    if (shipStatus === 'landed' || shipStatus === 'prelaunch' || (!enabled && altitude < 1000)) {
       phase = 'prelaunch';
     } else if (periapsis >= atmHeight) {
       phase = 'complete';
-    } else if (statusLower.includes('circulariz')) {
+    } else if (apoapsis > atmHeight && periapsis > 0) {
       phase = 'circularizing';
-    } else if (statusLower.includes('coasting')) {
+    } else if (apoapsis > atmHeight) {
+      // Above atmosphere but periapsis still negative/low - coasting to apoapsis
       phase = 'coasting';
-    } else if (statusLower.includes('gravity turn') || statusLower.includes('turn')) {
+    } else if (altitude > 10_000) {
+      // Above 10km - in gravity turn
       phase = 'gravity_turn';
     } else if (altitude > 100) {
       phase = 'launching';
@@ -98,7 +100,7 @@ export class AscentHandle {
       apoapsis,
       periapsis,
       enabled,
-      shipStatus: mjStatus || 'Unknown'
+      shipStatus: shipStatus || 'Unknown'
     };
   }
 
@@ -136,26 +138,26 @@ export class AscentHandle {
 
     const result = await pollWithBlackoutResilience<AscentPollState>({
       poll: async () => {
-        // Use pipe delimiters for robust parsing (status may contain spaces/colons)
-        // Include eccentricity for orbit quality assessment
+        // Use pipe delimiters for robust parsing
+        // Note: STATUS suffix doesn't exist in kOS.MechJeb2.Addon, use SHIP:STATUS instead
         const statusResult = await this.conn.execute(
           'SET _ASC TO ADDONS:MJ:ASCENT. ' +
           'SET _E TO _ASC:ENABLED. ' +
-          'SET _S TO _ASC:STATUS. ' +
           'SET _A TO ROUND(APOAPSIS). ' +
           'SET _P TO ROUND(PERIAPSIS). ' +
           'SET _B TO SHIP:BODY:NAME. ' +
           'SET _EC TO ROUND(ORBIT:ECCENTRICITY, 4). ' +
-          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.'
+          'SET _SS TO SHIP:STATUS. ' +
+          'PRINT _E + "|" + _SS + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.'
         );
 
-        const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
+        const statusMatch = statusResult.output.match(/(True|False)\|(\w+)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
         if (!statusMatch) {
           throw new Error('Failed to parse ascent status');
         }
 
         const enabled = statusMatch[1].toLowerCase() === 'true';
-        const status = statusMatch[2].trim();
+        const status = statusMatch[2].trim();  // Now SHIP:STATUS (FLYING, ORBITING, etc.)
         const apoapsis = Number.parseInt(statusMatch[3]);
         const periapsis = Number.parseInt(statusMatch[4]);
         const body = statusMatch[5];

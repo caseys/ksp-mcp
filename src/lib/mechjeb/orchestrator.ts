@@ -258,7 +258,7 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
 
     // Handle target setting if provided
     if (target !== undefined) {
@@ -272,7 +272,7 @@ export class ManeuverOrchestrator {
     }
 
     // Plan the circularization node
-    const planResult = await circularize(this.conn, timeRef);
+    const planResult = await circularize(this.conn, timeRef, xFromNowSeconds);
     if (!planResult.success) {
       return planResult;
     }
@@ -312,9 +312,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      adjustPeriapsis(this.conn, altitude, timeRef),
+      adjustPeriapsis(this.conn, altitude, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );
@@ -328,9 +328,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'PERIAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      adjustApoapsis(this.conn, altitude, timeRef),
+      adjustApoapsis(this.conn, altitude, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );
@@ -447,9 +447,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'EQ_NEAREST_AD',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      changeInclination(this.conn, newInclination, timeRef),
+      changeInclination(this.conn, newInclination, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );
@@ -464,9 +464,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      ellipticize(this.conn, peA, apA, timeRef),
+      ellipticize(this.conn, peA, apA, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );
@@ -513,9 +513,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      resonantOrbit(this.conn, numerator, denominator, timeRef),
+      resonantOrbit(this.conn, numerator, denominator, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );
@@ -528,9 +528,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'CLOSEST_APPROACH',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      killRelativeVelocity(this.conn, timeRef),
+      killRelativeVelocity(this.conn, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );
@@ -544,9 +544,9 @@ export class ManeuverOrchestrator {
     timeRef: string = 'APOAPSIS',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, xFromNowSeconds } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      changeSemiMajorAxis(this.conn, semiMajorAxis, timeRef),
+      changeSemiMajorAxis(this.conn, semiMajorAxis, timeRef, xFromNowSeconds),
       logger,
       callerTool
     );

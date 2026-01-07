@@ -16,10 +16,12 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  *
  * @param conn kOS connection
  * @param timeRef When to execute: 'APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'
+ * @param xFromNowSeconds When using X_FROM_NOW, the time in seconds from now
  */
 export async function circularize(
   conn: KosConnection,
-  timeRef = 'APOAPSIS'
+  timeRef = 'APOAPSIS',
+  xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
   // Validate vessel state: must not be on ground
   const validation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'circularize');
@@ -27,7 +29,13 @@ export async function circularize(
     return { success: false, error: validation.error };
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("${timeRef}").`;
+  // Build command - use CIRCULARIZETIMED for X_FROM_NOW (thread-safe, no shared state)
+  let cmd: string;
+  if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZETIMED("${timeRef}", ${xFromNowSeconds}).`;
+  } else {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("${timeRef}").`;
+  }
   return executeManeuverCommand(conn, cmd, 10_000, 'circularize');
 }
 

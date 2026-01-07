@@ -19,12 +19,14 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  * @param newPeA Target periapsis altitude in meters
  * @param newApA Target apoapsis altitude in meters
  * @param timeRef When to execute: 'APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'
+ * @param xFromNowSeconds When using X_FROM_NOW, the time in seconds from now
  */
 export async function ellipticize(
   conn: KosConnection,
   newPeA: number,
   newApA: number,
-  timeRef = 'APOAPSIS'
+  timeRef = 'APOAPSIS',
+  xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
   // Validate vessel state: must not be on ground
   const validation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'ellipticize');
@@ -32,7 +34,13 @@ export async function ellipticize(
     return { success: false, error: validation.error };
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ELLIPTICIZE(${newPeA}, ${newApA}, "${timeRef}").`;
+  // Build command - use ELLIPTICIZETIMED for X_FROM_NOW (thread-safe, no shared state)
+  let cmd: string;
+  if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ELLIPTICIZETIMED(${newPeA}, ${newApA}, "${timeRef}", ${xFromNowSeconds}).`;
+  } else {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:ELLIPTICIZE(${newPeA}, ${newApA}, "${timeRef}").`;
+  }
   return executeManeuverCommand(conn, cmd, 10_000, 'ellipticize');
 }
 

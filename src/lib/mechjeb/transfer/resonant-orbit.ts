@@ -23,12 +23,14 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  * @param numerator Numerator of the resonance ratio
  * @param denominator Denominator of the resonance ratio
  * @param timeRef When to execute: 'APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW'
+ * @param xFromNowSeconds When using X_FROM_NOW, the time in seconds from now
  */
 export async function resonantOrbit(
   conn: KosConnection,
   numerator: number,
   denominator: number,
-  timeRef = 'APOAPSIS'
+  timeRef = 'APOAPSIS',
+  xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
   // Validate vessel state: must not be on ground
   const validation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'resonant_orbit');
@@ -43,7 +45,13 @@ export async function resonantOrbit(
     };
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:RESONANTORBIT(${numerator}, ${denominator}, "${timeRef}").`;
+  // Build command - use RESONANTORBITTIMED for X_FROM_NOW (thread-safe, no shared state)
+  let cmd: string;
+  if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:RESONANTORBITTIMED(${numerator}, ${denominator}, "${timeRef}", ${xFromNowSeconds}).`;
+  } else {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:RESONANTORBIT(${numerator}, ${denominator}, "${timeRef}").`;
+  }
   return executeManeuverCommand(conn, cmd, 10_000, 'resonant_orbit');
 }
 

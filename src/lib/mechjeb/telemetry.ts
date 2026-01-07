@@ -886,14 +886,15 @@ async function queryMechJebAutopilotStatus(
   try {
     switch (opType) {
       case 'ascent': {
+        // Note: ADDONS:MJ:ASCENT:STATUS doesn't exist, use SHIP:STATUS instead
         const result = await conn.execute(
-          'PRINT ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
+          'PRINT ADDONS:MJ:ASCENT:ENABLED + "|" + SHIP:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
           3000
         );
-        const match = result.output.match(/(True|False)\|([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/i);
+        const match = result.output.match(/(True|False)\|(\w+)\|(-?[\d.]+)\|(-?[\d.]+)/i);
         if (match) {
           const enabled = match[1].toLowerCase() === 'true';
-          const status = match[2].trim() || 'Unknown';
+          const status = match[2].trim() || 'Ascending';
           const apo = parseNumber(match[3]);
           const alt = parseNumber(match[4]);
           const detail = `Alt: ${(alt/1000).toFixed(1)}km, Apo: ${(apo/1000).toFixed(1)}km`;
@@ -902,11 +903,12 @@ async function queryMechJebAutopilotStatus(
         break;
       }
       case 'landing': {
+        // Note: ADDONS:MJ:LANDING:STATUS doesn't exist, use SHIP:STATUS instead
         const result = await conn.execute(
-          'PRINT ADDONS:MJ:LANDING:ENABLED + "|" + ADDONS:MJ:LANDING:STATUS + "|" + ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
+          'PRINT ADDONS:MJ:LANDING:ENABLED + "|" + SHIP:STATUS + "|" + ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
           3000
         );
-        const match = result.output.match(/(True|False)\|([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/i);
+        const match = result.output.match(/(True|False)\|(\w+)\|(-?[\d.]+)\|(-?[\d.]+)/i);
         if (match) {
           const enabled = match[1].toLowerCase() === 'true';
           const mjStatus = match[2].trim();
@@ -969,11 +971,12 @@ async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: Ko
   try {
     const ascentResult = await conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.', 2000);
     if (ascentResult.output.toLowerCase().includes('true')) {
+      // Note: ADDONS:MJ:ASCENT:STATUS doesn't exist, use SHIP:STATUS instead
       const statusResult = await conn.execute(
-        'PRINT ADDONS:MJ:ASCENT:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
+        'PRINT SHIP:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
         2000
       );
-      const match = statusResult.output.match(/([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/);
+      const match = statusResult.output.match(/(\w+)\|(-?[\d.]+)\|(-?[\d.]+)/);
       if (match) {
         const status = match[1].trim() || 'Ascending';
         const apo = parseNumber(match[2]);

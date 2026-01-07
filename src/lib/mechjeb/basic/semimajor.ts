@@ -17,13 +17,21 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  * @param conn kOS connection
  * @param newSma Target semi-major axis in meters
  * @param timeRef When to execute: 'APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'
+ * @param xFromNowSeconds When using X_FROM_NOW, the time in seconds from now
  */
 export async function changeSemiMajorAxis(
   conn: KosConnection,
   newSma: number,
-  timeRef = 'APOAPSIS'
+  timeRef = 'APOAPSIS',
+  xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:SEMIMAJOR(${newSma}, "${timeRef}").`;
+  // Build command - use SEMIMAJORTIMED for X_FROM_NOW (thread-safe, no shared state)
+  let cmd: string;
+  if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:SEMIMAJORTIMED(${newSma}, "${timeRef}", ${xFromNowSeconds}).`;
+  } else {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:SEMIMAJOR(${newSma}, "${timeRef}").`;
+  }
   return executeManeuverCommand(conn, cmd, 10_000, 'change_semi_major_axis');
 }
 

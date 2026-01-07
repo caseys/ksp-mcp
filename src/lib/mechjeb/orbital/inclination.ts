@@ -17,11 +17,13 @@ import { formatTime, fmtNum } from '../../utils/format.js';
  * @param conn kOS connection
  * @param newInclination Target inclination in degrees
  * @param timeRef When to execute
+ * @param xFromNowSeconds When using X_FROM_NOW, the time in seconds from now
  */
 export async function changeInclination(
   conn: KosConnection,
   newInclination: number,
-  timeRef = 'EQ_NEAREST_AD'
+  timeRef = 'EQ_NEAREST_AD',
+  xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
   // Validate vessel state: must be in orbit with no encounters
   const validation = await validateVesselState(conn, CLEAN_ORBIT_REQUIREMENTS, 'change_inclination');
@@ -29,7 +31,13 @@ export async function changeInclination(
     return { success: false, error: validation.error };
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEINCLINATION(${newInclination}, "${timeRef}").`;
+  // Build command - use CHANGEINCLINATIONTIMED for X_FROM_NOW (thread-safe, no shared state)
+  let cmd: string;
+  if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEINCLINATIONTIMED(${newInclination}, "${timeRef}", ${xFromNowSeconds}).`;
+  } else {
+    cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CHANGEINCLINATION(${newInclination}, "${timeRef}").`;
+  }
   const result = await executeManeuverCommand(conn, cmd, 10_000, 'change_inclination');
 
   // Check for dangerous post-burn trajectory
