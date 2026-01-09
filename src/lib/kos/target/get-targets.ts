@@ -29,7 +29,8 @@ export async function listTargets(conn: KosConnection): Promise<ListTargetsResul
     'PRINT "LIST_DONE".',
   ].join(' ');
 
-  const result = await conn.execute(cmd, 10_000);
+  // Reduced from 10s to 3s - fail fast if kOS is slow
+  const result = await conn.execute(cmd, 3000);
   const output = result.output;
 
   // Parse moons

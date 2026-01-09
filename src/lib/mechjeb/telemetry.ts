@@ -13,7 +13,8 @@ import { ensureConnected } from '../../transport/connection-tools.js';
 import { delay } from '../utils/progress.js';
 import { formatTime, formatOrbit, fmtNum, fmtDist, fmtVel } from '../utils/format.js';
 
-const TELEMETRY_DELAY_MS = 100;
+// Delay between query batches - set to 0 since all telemetry queries are read-only
+const TELEMETRY_DELAY_MS = 0;
 
 /**
  * Safely check if a string contains 'true' (case-insensitive)
@@ -289,12 +290,16 @@ export async function getShipTelemetry(
   const { timeoutMs = 2500 } = options;
   const lines: string[] = [];
 
-  // Flush any stale data from previous operations to ensure clean state
-  // This prevents old output from mixing with our queries
-  await conn.flushStaleData(100);
+  // Flush any stale data - reduced from 100ms to 10ms for performance
+  await conn.flushStaleData(10);
 
-  // Split into smaller queries for robustness - each can fail independently
-  // But if critical queries fail, we throw an error rather than showing misleading defaults
+  // ============================================================================
+  // GROUP 1: Ship State (Orbit + Vessel + Node + Delta-V + Slope)
+  // ============================================================================
+  // Combined query for all basic ship state data (19 fields)
+  const parentBodyExpr = '(CHOOSE "Sun" IF SHIP:BODY:NAME = "Sun" ELSE SHIP:BODY:BODY:NAME)';
+  const slopeExpr = '(CHOOSE ROUND(ABS(90 - VANG(SHIP:UP:VECTOR, SHIP:FACING:TOPVECTOR)),1) IF SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" OR SHIP:STATUS = "PRELAUNCH" ELSE 0)';
+
   let soi = '';
   let soiParent = 'Sun';
   let apoRaw = 0;
@@ -306,264 +311,171 @@ export async function getShipTelemetry(
   let vesselName = '';
   let vesselType = '';
   let vesselStatus = '';
-  let nodeDv = 0;
-  let nodeEta = 0;
-  let hasEncounter = false;
   let altitude = 0;
   let latitude = 0;
   let longitude = 0;
+  let nodeDv = 0;
+  let nodeEta = 0;
+  let shipDeltaV = 0;
+  let slopeDegrees = 0;
 
-  let orbitQueryFailed = true;
-  let vesselQueryFailed = true;
+  let shipStateQueryFailed = true;
 
-  // Query 1: Orbit basics (8 fields)
-  const parentBodyExpr = '(CHOOSE "Sun" IF SHIP:BODY:NAME = "Sun" ELSE SHIP:BODY:BODY:NAME)';
   try {
-    const orbitResult = await conn.execute(
-      `PRINT "ORB|" + SHIP:ORBIT:BODY:NAME + "${SEP}" + ${parentBodyExpr} + "${SEP}" + ` +
+    const g1Result = await conn.execute(
+      `PRINT "G1|" + ` +
+      // Orbit (8 fields)
+      `SHIP:ORBIT:BODY:NAME + "${SEP}" + ${parentBodyExpr} + "${SEP}" + ` +
       `(CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + ` +
       `(CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ` +
-      `ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2).`,
+      `ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + ` +
+      // Vessel (6 fields)
+      `SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}" + ` +
+      `ROUND(ALTITUDE) + "${SEP}" + ROUND(SHIP:LATITUDE,4) + "${SEP}" + ROUND(SHIP:LONGITUDE,4) + "${SEP}" + ` +
+      // Node (3 fields)
+      `(CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0) + "${SEP}" + ` +
+      `(CHOOSE ROUND(NEXTNODE:ETA) IF HASNODE ELSE 0) + "${SEP}" + ` +
+      `(CHOOSE NEXTNODE:ORBIT:HASNEXTPATCH IF HASNODE ELSE ORBIT:HASNEXTPATCH) + "${SEP}" + ` +
+      // Delta-V (1 field)
+      `ROUND(SHIP:DELTAV:CURRENT) + "${SEP}" + ` +
+      // Slope (1 field - 0 if not on surface)
+      `${slopeExpr}.`,
       timeoutMs
     );
-    const orbitMatch = orbitResult.output.match(/ORB\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)/i);
-    if (orbitMatch) {
-      soi = orbitMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-      soiParent = orbitMatch[2].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-      apoRaw = parseNumber(orbitMatch[3]);
-      per = parseNumber(orbitMatch[4]);
-      periodRaw = parseNumber(orbitMatch[5]);
-      inc = parseNumber(orbitMatch[6]);
-      ecc = parseNumber(orbitMatch[7]);
-      lan = parseNumber(orbitMatch[8]);
-      orbitQueryFailed = false;
-    }
-  } catch {
-    // Will throw error below if both queries fail
-  }
 
-  // Query 2: Vessel info (6 fields)
-  try {
-    const vesselResult = await conn.execute(
-      `PRINT "VES|" + SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}" + ` +
-      `ROUND(ALTITUDE) + "${SEP}" + ROUND(SHIP:LATITUDE,4) + "${SEP}" + ROUND(SHIP:LONGITUDE,4).`,
-      timeoutMs
+    // Parse Group 1: 19 fields total
+    const g1Match = g1Result.output.match(
+      /G1\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)\|~\|(-?\d+)\|~\|([\d.]+)/i
     );
-    const vesselMatch = vesselResult.output.match(/VES\|([^|]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)/i);
-    if (vesselMatch) {
-      vesselName = vesselMatch[1].trim().replaceAll('"', '');
-      vesselType = vesselMatch[2].trim();
-      vesselStatus = vesselMatch[3].trim();
-      altitude = parseNumber(vesselMatch[4]);
-      latitude = parseNumber(vesselMatch[5]);
-      longitude = parseNumber(vesselMatch[6]);
-      vesselQueryFailed = false;
+
+    if (g1Match) {
+      soi = g1Match[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
+      soiParent = g1Match[2].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
+      apoRaw = parseNumber(g1Match[3]);
+      per = parseNumber(g1Match[4]);
+      periodRaw = parseNumber(g1Match[5]);
+      inc = parseNumber(g1Match[6]);
+      ecc = parseNumber(g1Match[7]);
+      lan = parseNumber(g1Match[8]);
+      vesselName = g1Match[9].trim().replaceAll('"', '');
+      vesselType = g1Match[10].trim();
+      vesselStatus = g1Match[11].trim();
+      altitude = parseNumber(g1Match[12]);
+      latitude = parseNumber(g1Match[13]);
+      longitude = parseNumber(g1Match[14]);
+      nodeDv = parseNumber(g1Match[15]);
+      nodeEta = parseNumber(g1Match[16]);
+      // hasEncounter parsed but not used - encounter logic is in Group 3 kOS query
+      parseBool(g1Match[17]);
+      shipDeltaV = parseInt(g1Match[18]);
+      slopeDegrees = parseFloat(g1Match[19]);
+      shipStateQueryFailed = false;
     }
   } catch {
-    // Will throw error below if both queries fail
+    // Group 1 failed - critical error
   }
 
-  // If both critical queries failed, throw an error - don't show misleading data
-  if (orbitQueryFailed && vesselQueryFailed) {
+  if (shipStateQueryFailed) {
     throw new Error('Telemetry error: failed to query ship data');
   }
 
-  // Query 3: Node info (optional - 3 fields)
-  try {
-    const nodeResult = await conn.execute(
-      `IF HASNODE { PRINT "NODE|" + ROUND(NEXTNODE:DELTAV:MAG,1) + "${SEP}" + ROUND(NEXTNODE:ETA) + "${SEP}" + NEXTNODE:ORBIT:HASNEXTPATCH. } ` +
-      `ELSE { PRINT "NODE|0${SEP}0${SEP}" + ORBIT:HASNEXTPATCH. }`,
-      timeoutMs
-    );
-    const nodeMatch = nodeResult.output.match(/NODE\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
-    if (nodeMatch) {
-      nodeDv = parseNumber(nodeMatch[1]);
-      nodeEta = parseNumber(nodeMatch[2]);
-      hasEncounter = parseBool(nodeMatch[3]);
-    }
-  } catch {
-    // Node query is optional - continue without it
-  }
-
   const hasNode = nodeDv > 0;
-
-  // Handle escape trajectory sentinel values (-1 means infinity)
   const isEscapeTrajectory = apoRaw < 0 || periodRaw === -1;
   const isImpactTrajectory = periodRaw < -1;
   const apo = isEscapeTrajectory ? Infinity : apoRaw;
   const period = isEscapeTrajectory ? Infinity : periodRaw;
 
   // Build structured data
-  const vessel: VesselInfo = {
-    name: vesselName,
-    type: vesselType,
-    status: vesselStatus,
-  };
-
-  const orbit: OrbitTelemetry = {
-    body: soi,
-    apoapsis: apo,
-    periapsis: per,
-    period,
-    inclination: inc,
-    eccentricity: ecc,
-    lan,
-  };
-
+  const vessel: VesselInfo = { name: vesselName, type: vesselType, status: vesselStatus };
+  const orbit: OrbitTelemetry = { body: soi, apoapsis: apo, periapsis: per, period, inclination: inc, eccentricity: ecc, lan };
   let maneuver: ManeuverInfo | undefined;
   let encounter: EncounterInfo | undefined;
   let target: TargetInfo | undefined;
 
-  // Build formatted output
-  // Show "a moon of [parent]" if SOI is a moon (parent is not Sun/Kerbol)
   const isMoon = soiParent.toLowerCase() !== 'sun' && soiParent.toLowerCase() !== 'kerbol';
   const soiDisplay = isMoon ? `${soi}, a moon of ${soiParent}` : soi;
 
-  // Query ship delta-v
-  let shipDeltaV = 0;
-  try {
-    const dvResult = await conn.execute('PRINT "DV:" + ROUND(SHIP:DELTAV:CURRENT).', 2000);
-    const dvMatch = dvResult.output.match(/DV:(-?\d+)/);
-    if (dvMatch) {
-      shipDeltaV = parseInt(dvMatch[1]);
-    }
-  } catch {
-    // Ignore query failures - non-critical
-  }
-
-  // Query orbital events for "Next:" line
-  // Events: apoapsis, periapsis, SOI transition, atmosphere entry, impact
-  interface OrbitalEvent {
-    name: string;
-    eta: number;  // seconds
-  }
+  // ============================================================================
+  // GROUP 2: Timing (ETA values + Time to Impact + Orbital Speed)
+  // ============================================================================
+  interface OrbitalEvent { name: string; eta: number; }
   const orbitalEvents: OrbitalEvent[] = [];
   let atmHeight = 0;
   let hasNextPatch = false;
+  let orbitalSpeed = 0;
 
   try {
-    // Query all ETA values in one go
-    const etaResult = await conn.execute(
-      `PRINT "ETA|" + ROUND(ETA:APOAPSIS) + "${SEP}" + ROUND(ETA:PERIAPSIS) + "${SEP}" + ` +
+    const g2Result = await conn.execute(
+      // ETA values (6 fields) + Time to impact (1 field) + Orbital speed (1 field)
+      `LOCAL _tti IS ADDONS:MJ:INFO:TIMETOIMPACT. ` +
+      `PRINT "G2|" + ROUND(ETA:APOAPSIS) + "${SEP}" + ROUND(ETA:PERIAPSIS) + "${SEP}" + ` +
       `ROUND(ETA:TRANSITION) + "${SEP}" + SHIP:ORBIT:HASNEXTPATCH + "${SEP}" + ` +
-      `ROUND(SHIP:BODY:ATM:HEIGHT) + "${SEP}" + SHIP:BODY:ATM:EXISTS.`,
+      `ROUND(SHIP:BODY:ATM:HEIGHT) + "${SEP}" + SHIP:BODY:ATM:EXISTS + "${SEP}" + ` +
+      `(CHOOSE ROUND(_tti) IF _tti:TYPENAME = "Scalar" ELSE -1) + "${SEP}" + ` +
+      `ROUND(SHIP:VELOCITY:ORBIT:MAG).`,
       timeoutMs
     );
-    const etaMatch = etaResult.output.match(/ETA\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(-?[\d.]+)\|~\|(True|False)/i);
-    if (etaMatch) {
-      const etaApoapsis = parseNumber(etaMatch[1]);
-      const etaPeriapsis = parseNumber(etaMatch[2]);
-      const etaTransition = parseNumber(etaMatch[3]);
-      hasNextPatch = parseBool(etaMatch[4]);
-      atmHeight = parseNumber(etaMatch[5]);
-      const hasAtmosphere = parseBool(etaMatch[6]);
 
-      // Add apoapsis (only for elliptical orbits - ecc < 1)
-      // kOS returns huge values (~3.4e38) for escape trajectories
+    const g2Match = g2Result.output.match(
+      /G2\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(-?[\d.]+)\|~\|(True|False)\|~\|(-?\d+)\|~\|(\d+)/i
+    );
+
+    if (g2Match) {
+      const etaApoapsis = parseNumber(g2Match[1]);
+      const etaPeriapsis = parseNumber(g2Match[2]);
+      const etaTransition = parseNumber(g2Match[3]);
+      hasNextPatch = parseBool(g2Match[4]);
+      atmHeight = parseNumber(g2Match[5]);
+      const hasAtmosphere = parseBool(g2Match[6]);
+      const timeToImpact = parseInt(g2Match[7]);
+      orbitalSpeed = parseInt(g2Match[8]);
+
+      // Build orbital events
       if (etaApoapsis > 0 && etaApoapsis < 1e10 && !isEscapeTrajectory) {
         orbitalEvents.push({ name: 'Apoapsis', eta: etaApoapsis });
       }
-
-      // Add periapsis
       if (etaPeriapsis > 0 && etaPeriapsis < 1e10) {
         orbitalEvents.push({ name: `${soi} Periapsis`, eta: etaPeriapsis });
       }
-
-      // Add SOI transition (escape/encounter)
       if (hasNextPatch && etaTransition > 0 && etaTransition < 1e10) {
-        // Determine if escape or encounter based on trajectory
         const transitionType = isEscapeTrajectory ? 'SOI Escape' : 'SOI Change';
         orbitalEvents.push({ name: transitionType, eta: etaTransition });
       }
-
-      // Check for atmosphere entry (periapsis below atm height, currently above)
       if (hasAtmosphere && atmHeight > 0 && per < atmHeight && altitude > atmHeight) {
-        // Roughly estimate: atmosphere entry happens before periapsis
-        // This is approximate - actual entry depends on orbit geometry
-        const atmEntryEta = Math.max(0, etaPeriapsis * 0.7); // ~70% of time to periapsis
+        const atmEntryEta = Math.max(0, etaPeriapsis * 0.7);
         orbitalEvents.push({ name: 'Atmosphere Entry', eta: atmEntryEta });
       }
-    }
-  } catch {
-    // Optional - continue without timing
-  }
-
-  // Query MechJeb for time to impact (more accurate than orbit math)
-  // Note: TIMETOIMPACT returns "N/A" string when no impact - must check type first
-  try {
-    const impactResult = await conn.execute(
-      'SET _tti TO ADDONS:MJ:INFO:TIMETOIMPACT. IF _tti:TYPENAME = "Scalar" { PRINT "TTI|" + ROUND(_tti). } ELSE { PRINT "TTI|NO". }',
-      2000
-    );
-    const impactMatch = impactResult.output.match(/TTI\|(\d+)/);
-    if (impactMatch) {
-      const timeToImpact = parseInt(impactMatch[1]);
       if (timeToImpact > 0 && timeToImpact < 1e10) {
         orbitalEvents.push({ name: '⚠️ IMPACT', eta: timeToImpact });
       }
     }
   } catch {
-    // Impact query is optional
+    // Timing query is optional
   }
 
-  // Sort events by ETA and take top 2
   orbitalEvents.sort((a, b) => a.eta - b.eta);
   const nextEvents = orbitalEvents.slice(0, 2);
 
-  // Query orbital speed
-  let orbitalSpeed = 0;
-  try {
-    const speedResult = await conn.execute('PRINT ROUND(SHIP:VELOCITY:ORBIT:MAG).', timeoutMs);
-    const speedMatch = speedResult.output.match(/(\d+)/);
-    if (speedMatch) {
-      orbitalSpeed = parseInt(speedMatch[1]);
-    }
-  } catch {
-    // Optional
-  }
-
-  // Check if on surface (LANDED, SPLASHED, PRELAUNCH)
+  // ============================================================================
+  // BUILD FORMATTED OUTPUT (Ship State + Timing)
+  // ============================================================================
   const isSurface = ['LANDED', 'SPLASHED', 'PRELAUNCH'].includes(vesselStatus.toUpperCase());
 
   if (isSurface) {
-    // Query slope (pitch/roll) for surface status
-    let slopeDegrees = 0;
-    try {
-      const slopeResult = await conn.execute(
-        'PRINT "SLOPE|" + ABS(ROUND(90 - VANG(SHIP:UP:VECTOR, SHIP:FACING:TOPVECTOR), 1)).',
-        2000
-      );
-      const slopeMatch = slopeResult.output.match(/SLOPE\|([\d.]+)/);
-      if (slopeMatch) {
-        slopeDegrees = parseFloat(slopeMatch[1]);
-      }
-    } catch {
-      // Ignore slope query failures
-    }
-
-    // Surface status format
     lines.push(`Location: ${soiDisplay} (${vesselStatus.toUpperCase()}) on surface`);
     lines.push(`Longitude: ${longitude.toFixed(4)}°`);
     lines.push(`Latitude: ${latitude.toFixed(4)}°`);
     const altKm = altitude / 1000;
     lines.push(`Altitude: ${altKm >= 1 ? altKm.toFixed(1) + 'km' : altitude.toFixed(0) + 'm'}`);
     lines.push(`Slope: ${slopeDegrees.toFixed(1)}°`);
-    // Vessel line with type as label, delta-v in parentheses
     const dvPart = shipDeltaV > 0 ? ` (delta-v: ${fmtVel(shipDeltaV)})` : '';
     lines.push(`${vesselType}: ${vesselName}${dvPart}`);
   } else {
-    // Orbit status format (non-surface)
-
-    // Line 1: SOI with status
     lines.push(`SOI: ${soiDisplay} (${vesselStatus.toUpperCase()})`);
-
-    // Line 2: Next events (timing info) - show top 2 orbital events
     if (nextEvents.length > 0) {
       const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
       lines.push(`Next: ${eventStrs.join(', ')}`);
     }
-
-    // Line 3: Orbit summary
     if (isEscapeTrajectory) {
       lines.push(`Orbit: Hyperbolic, Periapsis: ${fmtDist(per)}, Inclination: ${inc.toFixed(1)}°`);
     } else if (isImpactTrajectory) {
@@ -572,8 +484,6 @@ export async function getShipTelemetry(
       const orbitType = (apo - per) < 5000 ? 'Circular' : 'Elliptical';
       lines.push(`Orbit: ${orbitType}, ${formatOrbit(apo, per)}, Inclination: ${inc.toFixed(1)}°`);
     }
-
-    // Line 4: Ship info with speed and delta-v
     const speedInfo = orbitalSpeed > 0 ? `speed: ${fmtVel(orbitalSpeed)}` : '';
     const dvInfo = shipDeltaV > 0 ? `delta-v: ${fmtVel(shipDeltaV)}` : '';
     const shipDetails = [speedInfo, dvInfo].filter(Boolean).join(', ');
@@ -582,163 +492,135 @@ export async function getShipTelemetry(
 
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
-    maneuver = {
-      deltaV: nodeDv,
-      timeToNode: nodeEta,
-      estimatedBurnTime,
-    };
+    maneuver = { deltaV: nodeDv, timeToNode: nodeEta, estimatedBurnTime };
     lines.push('', '=== Next Maneuver ===');
     lines.push(`Delta-V: ${fmtVel(nodeDv)}`);
     lines.push(`Time to node: ${formatTime(nodeEta)}`);
     lines.push(`Est. burn time: ${formatTime(estimatedBurnTime)}`);
   }
 
-  // Query 2: Get encounter details (only if there's an encounter)
-  if (hasEncounter) {
-    const encResult = await conn.execute(
-      'IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { ' +
-        `PRINT "ENC|" + NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME + "${SEP}" + ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). ` +
-      '} ELSE IF ORBIT:HASNEXTPATCH { ' +
-        `PRINT "ENC|" + ORBIT:NEXTPATCH:BODY:NAME + "${SEP}" + ROUND(ORBIT:NEXTPATCH:PERIAPSIS). ` +
-      '} ELSE { PRINT "NOENC". }',
+  // ============================================================================
+  // GROUP 3: Targeting (Encounter + Target + Rendezvous)
+  // ============================================================================
+  // Combined query for all target-related info - only if HASTARGET or hasEncounter
+  const targetParentExpr = '(CHOOSE "Sun" IF TARGET:BODY:NAME = "Sun" ELSE TARGET:BODY:BODY:NAME)';
+
+  try {
+    const g3Result = await conn.execute(
+      'IF HASTARGET OR ORBIT:HASNEXTPATCH { ' +
+        // Encounter info (2 fields)
+        `LOCAL encBody IS (CHOOSE (CHOOSE NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH ELSE ORBIT:NEXTPATCH:BODY:NAME) IF ORBIT:HASNEXTPATCH ELSE "NONE"). ` +
+        `LOCAL encPe IS (CHOOSE (CHOOSE ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS) IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH ELSE ROUND(ORBIT:NEXTPATCH:PERIAPSIS)) IF ORBIT:HASNEXTPATCH ELSE 0). ` +
+        // Target info (4 fields) - use -1 for distance if no target to distinguish from 0
+        `LOCAL tgtName IS (CHOOSE TARGET:NAME IF HASTARGET ELSE "NONE"). ` +
+        `LOCAL tgtType IS (CHOOSE TARGET:TYPENAME IF HASTARGET ELSE "NONE"). ` +
+        `LOCAL tgtDist IS (CHOOSE ROUND(TARGET:DISTANCE) IF HASTARGET ELSE -1). ` +
+        `LOCAL tgtParent IS (CHOOSE (CHOOSE ${targetParentExpr} IF TARGET:TYPENAME = "Body" ELSE "NONE") IF HASTARGET ELSE "NONE"). ` +
+        // MechJeb rendezvous info (7 fields) - only if target set
+        `LOCAL caTime IS (CHOOSE ADDONS:MJ:TGT:CLOSESTAPPROACHTIME IF HASTARGET ELSE -1). ` +
+        `LOCAL caDist IS (CHOOSE ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE IF HASTARGET ELSE -1). ` +
+        `LOCAL anTime IS (CHOOSE ADDONS:MJ:TGT:TIMETOAN IF HASTARGET ELSE -1). ` +
+        `LOCAL dnTime IS (CHOOSE ADDONS:MJ:TGT:TIMETODN IF HASTARGET ELSE -1). ` +
+        `LOCAL anEx IS (CHOOSE ADDONS:MJ:TGT:ANEXISTS IF HASTARGET ELSE FALSE). ` +
+        `LOCAL dnEx IS (CHOOSE ADDONS:MJ:TGT:DNEXISTS IF HASTARGET ELSE FALSE). ` +
+        `LOCAL relI IS (CHOOSE ADDONS:MJ:TGT:RELATIVEINCLINATION IF HASTARGET ELSE 0). ` +
+        `PRINT "G3|" + encBody + "${SEP}" + encPe + "${SEP}" + ` +
+        `tgtName + "${SEP}" + tgtType + "${SEP}" + tgtDist + "${SEP}" + tgtParent + "${SEP}" + ` +
+        `caTime + "${SEP}" + caDist + "${SEP}" + anTime + "${SEP}" + dnTime + "${SEP}" + anEx + "${SEP}" + dnEx + "${SEP}" + relI. ` +
+      '} ELSE { PRINT "G3|NOTGT". }',
       timeoutMs
     );
 
-    if (!encResult.error && !encResult.output.includes('NOENC')) {
-      const encMatch = encResult.output.match(/ENC\|([^|]+)\|~\|(-?[\d.]+)/);
-      if (encMatch) {
-        const encounterBody = encMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-        const encounterPe = parseNumber(encMatch[2]);
+    if (!g3Result.error && !g3Result.output.includes('G3|NOTGT')) {
+      const g3Match = g3Result.output.match(
+        /G3\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^|]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(True|False)\|~\|(-?[\d.e+]+)/i
+      );
 
-        encounter = {
-          body: encounterBody,
-          periapsis: encounterPe,
-        };
+      if (g3Match) {
+        const encounterBody = g3Match[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
+        const encounterPe = parseNumber(g3Match[2]);
+        const targetName = g3Match[3].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
+        const targetType = g3Match[4].trim();
+        const targetDist = parseNumber(g3Match[5]);
+        const targetParent = g3Match[6].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
+        const closeApproachTime = parseNumber(g3Match[7]);
+        const closeApproachDist = parseNumber(g3Match[8]);
+        const timeToAN = parseNumber(g3Match[9]);
+        const timeToDN = parseNumber(g3Match[10]);
+        const anExists = parseBool(g3Match[11]);
+        const dnExists = parseBool(g3Match[12]);
+        const relInc = parseNumber(g3Match[13]);
 
-        lines.push('', '=== Encounter ===', `Target: ${encounterBody}`);
-        lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
-      }
-    }
-  }
-
-  // Query 3: Get target info (if a target is set)
-  // For body targets, also get the parent body to show "A moon of X"
-  const targetParentExpr = '(CHOOSE "Sun" IF TARGET:BODY:NAME = "Sun" ELSE TARGET:BODY:BODY:NAME)';
-  const targetResult = await conn.execute(
-    'IF HASTARGET { ' +
-      'IF TARGET:TYPENAME = "Body" { ' +
-        `PRINT "TGT|" + TARGET:NAME + "${SEP}" + TARGET:TYPENAME + "${SEP}" + ROUND(TARGET:DISTANCE) + "${SEP}" + ${targetParentExpr}. ` +
-      '} ELSE { ' +
-        `PRINT "TGT|" + TARGET:NAME + "${SEP}" + TARGET:TYPENAME + "${SEP}" + ROUND(TARGET:DISTANCE) + "${SEP}NONE". ` +
-      '}. ' +
-    '} ELSE { PRINT "NOTGT". }',
-    timeoutMs
-  );
-
-  if (!targetResult.error && !targetResult.output.includes('NOTGT')) {
-    const tgtMatch = targetResult.output.match(/TGT\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^\s]+)/);
-    if (tgtMatch) {
-      const targetName = tgtMatch[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
-      const targetType = tgtMatch[2].trim();
-      const targetDist = parseNumber(tgtMatch[3]);
-      const targetParent = tgtMatch[4].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
-
-      target = {
-        name: targetName,
-        type: targetType,
-        distance: targetDist,
-      };
-
-      lines.push('', '=== Target ===');
-      // Format target description based on type
-      if (targetType === 'Body' && targetParent && targetParent !== 'NONE') {
-        const isSun = targetParent.toLowerCase() === 'sun' || targetParent.toLowerCase() === 'kerbol';
-        if (isSun) {
-          lines.push(`${targetName} (Planet)`);
-        } else {
-          lines.push(`${targetName} (A moon of ${targetParent})`);
+        // Encounter section
+        if (encounterBody !== 'NONE' && encounterPe > 0) {
+          encounter = { body: encounterBody, periapsis: encounterPe };
+          lines.push('', '=== Encounter ===', `Target: ${encounterBody}`);
+          lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
         }
-      } else {
-        lines.push(`${targetName} (${targetType})`);
-      }
-      lines.push(`Distance: ${formatDistance(targetDist)}`);
 
-      // Query MechJeb for rendezvous info (AN/DN, close approach)
-      try {
-        const rdvResult = await conn.execute(
-          'SET TGT TO ADDONS:MJ:TGT. ' +
-          `PRINT "RDV|" + TGT:CLOSESTAPPROACHTIME + "${SEP}" + TGT:CLOSESTAPPROACHDISTANCE + "${SEP}" + ` +
-          `TGT:TIMETOAN + "${SEP}" + TGT:TIMETODN + "${SEP}" + TGT:ANEXISTS + "${SEP}" + TGT:DNEXISTS + "${SEP}" + ` +
-          `TGT:RELATIVEINCLINATION.`,
-          timeoutMs
-        );
-        const rdvMatch = rdvResult.output.match(/RDV\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(True|False)\|~\|(-?[\d.e+]+)/i);
-        if (rdvMatch) {
-          const closeApproachTime = parseNumber(rdvMatch[1]);
-          const closeApproachDist = parseNumber(rdvMatch[2]);
-          const timeToAN = parseNumber(rdvMatch[3]);
-          const timeToDN = parseNumber(rdvMatch[4]);
-          const anExists = parseBool(rdvMatch[5]);
-          const dnExists = parseBool(rdvMatch[6]);
-          const relInc = parseNumber(rdvMatch[7]);
+        // Target section
+        if (targetName !== 'NONE' && targetDist >= 0) {
+          target = { name: targetName, type: targetType, distance: targetDist };
+          lines.push('', '=== Target ===');
+          if (targetType === 'Body' && targetParent && targetParent !== 'NONE') {
+            const isSun = targetParent.toLowerCase() === 'sun' || targetParent.toLowerCase() === 'kerbol';
+            lines.push(isSun ? `${targetName} (Planet)` : `${targetName} (A moon of ${targetParent})`);
+          } else {
+            lines.push(`${targetName} (${targetType})`);
+          }
+          lines.push(`Distance: ${formatDistance(targetDist)}`);
 
-          // Show close approach if reasonable (within 10 days and < 1e9 meters)
+          // Rendezvous info
           if (closeApproachTime > 0 && closeApproachTime < 864_000 && closeApproachDist < 1e9) {
             lines.push(`Close approach: ${formatDistance(closeApproachDist)} in ${formatTime(closeApproachTime)}`);
           }
-
-          // Show relative inclination if significant
           if (relInc > 0.1) {
             lines.push(`Relative inclination: ${relInc.toFixed(1)}°`);
-          }
-
-          // Show AN/DN nodes (only for non-trivial relative inclinations)
-          if (relInc > 0.1) {
             const nodeInfo: string[] = [];
-            if (anExists && timeToAN > 0 && timeToAN < 1e10) {
-              nodeInfo.push(`AN: ${formatTime(timeToAN)}`);
-            }
-            if (dnExists && timeToDN > 0 && timeToDN < 1e10) {
-              nodeInfo.push(`DN: ${formatTime(timeToDN)}`);
-            }
-            if (nodeInfo.length > 0) {
-              lines.push(`Nodes: ${nodeInfo.join(', ')}`);
-            }
+            if (anExists && timeToAN > 0 && timeToAN < 1e10) nodeInfo.push(`AN: ${formatTime(timeToAN)}`);
+            if (dnExists && timeToDN > 0 && timeToDN < 1e10) nodeInfo.push(`DN: ${formatTime(timeToDN)}`);
+            if (nodeInfo.length > 0) lines.push(`Nodes: ${nodeInfo.join(', ')}`);
           }
         }
-      } catch {
-        // Rendezvous info is optional
       }
     }
+  } catch {
+    // Targeting query is optional
   }
 
-  // Query 4: Get available targets using listTargets()
+  // ============================================================================
+  // AVAILABLE TARGETS (with SOI-based caching)
+  // ============================================================================
   const availableTargets: AvailableTargets = { moons: [], planets: [], vessels: [] };
   try {
-    const { listTargets } = await import('../kos/target/get-targets.js');
-    const targets = await listTargets(conn);
+    const { getCachedTargets, setCachedTargets } = await import('../cache/targets-cache.js');
+    const cachedTargets = getCachedTargets(soi);
 
-    availableTargets.moons = targets.moons.map((m: { name: string }) => m.name);
-    // Filter out the parent body from planets (it's shown separately as Parent Body)
-    availableTargets.planets = targets.planets
-      .map((p: { name: string }) => p.name)
-      .filter((name: string) => name.toLowerCase() !== soiParent.toLowerCase());
-    availableTargets.vessels = targets.vessels.map((v: { name: string }) => v.name);
+    if (cachedTargets) {
+      // Use cached data
+      availableTargets.moons = cachedTargets.moons.map(m => m.name);
+      availableTargets.planets = cachedTargets.planets
+        .map(p => p.name)
+        .filter(name => name.toLowerCase() !== soiParent.toLowerCase());
+      availableTargets.vessels = cachedTargets.vessels.map(v => v.name);
+    } else {
+      // Fresh query and cache
+      const { listTargets } = await import('../kos/target/get-targets.js');
+      const targets = await listTargets(conn);
+      setCachedTargets(soi, targets);
+
+      availableTargets.moons = targets.moons.map((m: { name: string }) => m.name);
+      availableTargets.planets = targets.planets
+        .map((p: { name: string }) => p.name)
+        .filter((name: string) => name.toLowerCase() !== soiParent.toLowerCase());
+      availableTargets.vessels = targets.vessels.map((v: { name: string }) => v.name);
+    }
 
     lines.push('', '=== Available Targets ===');
-    if (availableTargets.moons.length > 0) {
-      lines.push(`Moons: ${availableTargets.moons.join(', ')}`);
-    }
-    if (availableTargets.planets.length > 0) {
-      lines.push(`Planets: ${availableTargets.planets.join(', ')}`);
-    }
-    if (availableTargets.vessels.length > 0) {
-      lines.push(`Vessels: ${availableTargets.vessels.join(', ')}`);
-    }
-    // Show parent body if we're at a moon (not in solar orbit)
-    if (isMoon) {
-      lines.push(`Parent Body: ${soiParent}`);
-    }
+    if (availableTargets.moons.length > 0) lines.push(`Moons: ${availableTargets.moons.join(', ')}`);
+    if (availableTargets.planets.length > 0) lines.push(`Planets: ${availableTargets.planets.join(', ')}`);
+    if (availableTargets.vessels.length > 0) lines.push(`Vessels: ${availableTargets.vessels.join(', ')}`);
+    if (isMoon) lines.push(`Parent Body: ${soiParent}`);
   } catch {
     // Silently skip if listTargets fails
   }
