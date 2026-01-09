@@ -121,26 +121,24 @@ export class KosConnection {
   /**
    * Wait for CPU menu, using Ctrl+D to exit any session if needed.
    * Ctrl+D exits kOS session back to CPU menu, Enter wakes up idle menu.
+   *
+   * Event-driven: No fixed delays - waitFor() resolves immediately when pattern found.
    */
   private async waitForCpuMenu(timeoutMs: number): Promise<string> {
     if (!this.transport) {
       throw new Error('Transport not initialized');
     }
 
-    // First try: wait for menu directly (short timeout)
+    // First try: wait for menu directly (fast path - 500ms timeout)
     try {
-      return await this.transport.waitFor('Choose a CPU', Math.min(timeoutMs, 1000));
+      return await this.transport.waitFor('Choose a CPU', 500);
     } catch {
       // Menu didn't appear - might be in a session
     }
 
-    // Clear any stale data
-    await this.transport.read();
-    await new Promise(r => setTimeout(r, 200));
-
     // Send Ctrl+D to exit any existing session back to CPU menu
+    // No delay needed - event-driven waitFor will detect menu immediately
     await this.transport.sendKeys?.('C-d');
-    await new Promise(r => setTimeout(r, 500));
 
     // Second try: wait for menu after Ctrl+D
     try {
@@ -149,10 +147,8 @@ export class KosConnection {
       // Still no menu - try Enter as fallback
     }
 
-    // Clear and try Enter to wake up idle menu
-    await this.transport.read();
+    // Try Enter to wake up idle menu (no delay needed)
     await this.transport.send('\r\n', false);
-    await new Promise(r => setTimeout(r, 300));
 
     // Final try
     try {
@@ -184,7 +180,7 @@ export class KosConnection {
         // No menu appeared - might already be connected to last CPU
         // Try sending REBOOT to verify connection
         await this.transport.read(); // Clear buffer
-        await new Promise(r => setTimeout(r, 500));
+        await new Promise(r => setTimeout(r, 100)); // Brief delay for REBOOT processing
 
         await this.transport.send('REBOOT.');
 
@@ -234,16 +230,14 @@ export class KosConnection {
 
       // Wait for kOS to be ready
       // - Fresh connection shows "Proceed."
-      // - Reconnection to existing session shows scrollback (no Proceed)
+      // - Reconnection to existing session shows prompt ">" with scrollback
+      // Wait for either pattern with short timeout (both appear quickly if they're coming)
       try {
-        await this.transport.waitFor(/Proceed/, config.timeouts.proceed);
+        await this.transport.waitFor(/Proceed|>\s*$/, 500);
       } catch {
-        // Might be reconnecting to existing session with scrollback
-        // Clear the buffer and verify connection by sending a test command
+        // Neither appeared - might be slow or have scrollback without prompt
+        // Clear buffer and continue - health check will verify
         await this.transport.read();
-
-        // Small delay to ensure CPU is selected
-        await new Promise(r => setTimeout(r, 500));
       }
 
       // Parse connection info from menu output

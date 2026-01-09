@@ -493,7 +493,7 @@ export async function getShipTelemetry(
   if (hasNode) {
     const estimatedBurnTime = nodeDv / (1.5 * 9.81);
     maneuver = { deltaV: nodeDv, timeToNode: nodeEta, estimatedBurnTime };
-    lines.push('', '=== Next Maneuver ===');
+    lines.push('', 'NEXT MANEUVER:');
     lines.push(`Delta-V: ${fmtVel(nodeDv)}`);
     lines.push(`Time to node: ${formatTime(nodeEta)}`);
     lines.push(`Est. burn time: ${formatTime(estimatedBurnTime)}`);
@@ -554,14 +554,14 @@ export async function getShipTelemetry(
         // Encounter section
         if (encounterBody !== 'NONE' && encounterPe > 0) {
           encounter = { body: encounterBody, periapsis: encounterPe };
-          lines.push('', '=== Encounter ===', `Target: ${encounterBody}`);
+          lines.push('', 'ENCOUNTER:', `Target: ${encounterBody}`);
           lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
         }
 
         // Target section
         if (targetName !== 'NONE' && targetDist >= 0) {
           target = { name: targetName, type: targetType, distance: targetDist };
-          lines.push('', '=== Target ===');
+          lines.push('', 'TARGET:');
           if (targetType === 'Body' && targetParent && targetParent !== 'NONE') {
             const isSun = targetParent.toLowerCase() === 'sun' || targetParent.toLowerCase() === 'kerbol';
             lines.push(isSun ? `${targetName} (Planet)` : `${targetName} (A moon of ${targetParent})`);
@@ -616,7 +616,7 @@ export async function getShipTelemetry(
       availableTargets.vessels = targets.vessels.map((v: { name: string }) => v.name);
     }
 
-    lines.push('', '=== Available Targets ===');
+    lines.push('', 'AVAILABLE TARGETS:');
     if (availableTargets.moons.length > 0) lines.push(`Moons: ${availableTargets.moons.join(', ')}`);
     if (availableTargets.planets.length > 0) lines.push(`Planets: ${availableTargets.planets.join(', ')}`);
     if (availableTargets.vessels.length > 0) lines.push(`Vessels: ${availableTargets.vessels.join(', ')}`);
@@ -958,7 +958,7 @@ export async function getOperationProgress(conn: KosConnection): Promise<Operati
  * Format operation progress for display
  */
 export function formatOperationProgress(progress: OperationProgress): string {
-  const lines: string[] = ['=== Active Operation ===', `Tool: ${progress.toolName}`, `Phase: ${progress.phase}`];
+  const lines: string[] = ['ACTIVE OPERATION:', `Tool: ${progress.toolName}`, `Phase: ${progress.phase}`];
   if (progress.detail) {
     lines.push(progress.detail);
   }

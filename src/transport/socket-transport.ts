@@ -56,8 +56,8 @@ export class SocketTransport extends BaseTransport {
         this.socket!.setKeepAlive(true, 30_000);
         // Clear any stale data in buffer from previous sessions
         this.outputBuffer = '';
-        // Small delay to let kOS send initial data
-        setTimeout(() => resolve(), config.timeouts.connectDelay);
+        // Resolve immediately - event-driven waitFor will detect when data arrives
+        resolve();
       });
 
       this.socket.on('data', (data: Buffer) => {
@@ -143,6 +143,58 @@ export class SocketTransport extends BaseTransport {
     const output = this.outputBuffer;
     this.outputBuffer = '';
     return output;
+  }
+
+  /**
+   * Event-driven waitFor - resolves immediately when pattern found.
+   * No polling delays - listens for socket data events directly.
+   */
+  override async waitFor(pattern: string | RegExp, timeoutMs: number): Promise<string> {
+    return new Promise((resolve, reject) => {
+      if (!this.socket || !this._isOpen) {
+        reject(new Error('Socket not connected'));
+        return;
+      }
+
+      const regex = typeof pattern === 'string' ? new RegExp(pattern) : pattern;
+      let resolved = false;
+
+      const timeout = setTimeout(() => {
+        if (!resolved) {
+          resolved = true;
+          cleanup();
+          reject(new Error(`Timeout waiting for pattern: ${pattern}`));
+        }
+      }, timeoutMs);
+
+      const checkBuffer = () => {
+        if (resolved) return;
+        if (regex.test(this.outputBuffer)) {
+          resolved = true;
+          cleanup();
+          const output = this.outputBuffer;
+          this.outputBuffer = '';
+          resolve(output);
+        }
+      };
+
+      const onData = () => {
+        checkBuffer();
+      };
+
+      const cleanup = () => {
+        clearTimeout(timeout);
+        this.socket?.off('data', onData);
+      };
+
+      // Check if pattern already in buffer
+      checkBuffer();
+
+      // Listen for new data events
+      if (!resolved) {
+        this.socket.on('data', onData);
+      }
+    });
   }
 
   /**

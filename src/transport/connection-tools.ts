@@ -134,8 +134,8 @@ export interface EnsureConnectedOptions {
 // Delay helper
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
-// Delay after new connection to let kOS stabilize
-const POST_CONNECT_DELAY_MS = 500;
+// No delay needed - event-driven waitFor and "Proceed" confirmation ensure readiness
+const POST_CONNECT_DELAY_MS = 0;
 
 // Health check timeout - shorter to detect stale connections faster
 const HEALTH_CHECK_TIMEOUT_MS = 1500;

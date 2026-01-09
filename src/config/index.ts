@@ -96,8 +96,8 @@ export const config = Object.freeze({
     proceed: Number.parseInt(process.env.KOS_TIMEOUT_PROCEED ?? '3000', 10),
     /** Default timeout for command execution */
     command: Number.parseInt(process.env.KOS_TIMEOUT_COMMAND ?? '30000', 10),
-    /** Delay after telnet connection */
-    connectDelay: Number.parseInt(process.env.KOS_DELAY_CONNECT ?? '500', 10),
+    /** Delay after telnet connection (unused with event-driven waitFor) */
+    connectDelay: Number.parseInt(process.env.KOS_DELAY_CONNECT ?? '0', 10),
     /** Delay after disconnect */
     disconnectDelay: Number.parseInt(process.env.KOS_DELAY_DISCONNECT ?? '200', 10),
   },
