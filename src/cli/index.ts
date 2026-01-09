@@ -18,7 +18,7 @@ import { callTool, listTools, cleanup } from './mcp-client.js';
 // Tool name mappings: CLI command -> MCP tool name
 const TOOL_ALIASES: Record<string, string> = {
   // Shortcuts
-  'launch': 'launch_ascent',
+  'launch': 'launch',
   'hohmann': 'hohmann_transfer',
   'interplanetary': 'interplanetary_transfer',
   'return': 'return_from_moon',
@@ -46,7 +46,7 @@ const TOOL_ALIASES: Record<string, string> = {
   'target-position': 'get_target_position',
 
   // Kebab to snake conversions
-  'launch-ascent': 'launch_ascent',
+  'launch-ascent': 'launch',
   'hohmann-transfer': 'hohmann_transfer',
   'course-correct': 'course_correct',
   'adjust-apoapsis': 'adjust_apoapsis',
@@ -85,8 +85,14 @@ const TOOL_ALIASES: Record<string, string> = {
 
 // Tool-specific positional argument mappings
 // Maps: tool_name -> [arg1Name, arg2Name, ...]
+// Tools where first positional can be either number->paramA or string->paramB
+const SMART_FIRST_POSITIONAL: Record<string, { number: string; string: string }> = {
+  'inclination': { number: 'angle', string: 'target' },
+};
+
 const POSITIONAL_ARGS: Record<string, string[]> = {
-  'launch_ascent': ['altitude'],
+  'launch': ['altitude'],
+  'transfer': ['target'],
   'hohmann_transfer': ['target'],
   'adjust_apoapsis': ['altitude'],
   'adjust_periapsis': ['altitude'],
@@ -152,7 +158,14 @@ function parseArgs(args: string[], toolName: string): Record<string, unknown> {
       result[key] = true;
     } else {
       // Positional argument
-      if (positionalIndex < positionalNames.length) {
+      // Check for smart first positional (number vs string routing)
+      if (positionalIndex === 0 && SMART_FIRST_POSITIONAL[toolName]) {
+        const smart = SMART_FIRST_POSITIONAL[toolName];
+        const value = parseValue(arg);
+        const paramName = typeof value === 'number' ? smart.number : smart.string;
+        result[paramName] = value;
+        positionalIndex++;
+      } else if (positionalIndex < positionalNames.length) {
         result[positionalNames[positionalIndex]] = parseValue(arg);
         positionalIndex++;
       }
@@ -214,6 +227,7 @@ Launch & Orbit:
   ellipticize               Set both apoapsis and periapsis
 
 Transfers:
+  transfer [target]         Auto-detect transfer type (moon/planet/return)
   hohmann <target>          Transfer to moon (Mun, Minmus)
   interplanetary [target]   Transfer to planet (waits for window)
   return [periapsis]        Return from moon to Kerbin
@@ -233,6 +247,7 @@ Rendezvous:
 Orbital Maneuvers:
   adjust-apoapsis <alt>     Change orbit high point
   adjust-periapsis <alt>    Change orbit low point
+  inclination [target|deg]  Match target plane or set inclination
   change-inclination <deg>  Change orbital inclination
   resonant <num> <denom>    Create resonant orbit (e.g., 2 3 for 2:3)
 

@@ -49,6 +49,11 @@ export interface ExecuteOptions {
    * tear down the session (e.g., quickload) where no response will arrive.
    */
   fireAndForget?: boolean;
+  /**
+   * If false, skip prepending Ctrl+C to clear stray input. Default is true.
+   * Set to false for health checks that need pristine command parsing.
+   */
+  clear?: boolean;
 }
 
 /**
@@ -114,34 +119,45 @@ export class KosConnection {
   }
 
   /**
-   * Wait for CPU menu, sending Enter key to wake it up if needed.
-   * Sometimes kOS needs a keypress before showing the menu.
+   * Wait for CPU menu, using Ctrl+D to exit any session if needed.
+   * Ctrl+D exits kOS session back to CPU menu, Enter wakes up idle menu.
    */
   private async waitForCpuMenu(timeoutMs: number): Promise<string> {
     if (!this.transport) {
       throw new Error('Transport not initialized');
     }
 
-    // First try: wait for menu directly
+    // First try: wait for menu directly (short timeout)
     try {
-      return await this.transport.waitFor('Choose a CPU', timeoutMs);
+      return await this.transport.waitFor('Choose a CPU', Math.min(timeoutMs, 1000));
     } catch {
-      // Menu didn't appear - try sending Enter to wake it up
+      // Menu didn't appear - might be in a session
     }
 
     // Clear any stale data
     await this.transport.read();
     await new Promise(r => setTimeout(r, 200));
 
-    // Send Enter key to wake up the menu
-    await this.transport.send('\r\n');
-    await new Promise(r => setTimeout(r, 300));
+    // Send Ctrl+D to exit any existing session back to CPU menu
+    await this.transport.sendKeys?.('C-d');
+    await new Promise(r => setTimeout(r, 500));
 
-    // Second try: wait for menu after Enter
+    // Second try: wait for menu after Ctrl+D
     try {
       return await this.transport.waitFor('Choose a CPU', timeoutMs);
     } catch {
-      // Still no menu - throw the original error
+      // Still no menu - try Enter as fallback
+    }
+
+    // Clear and try Enter to wake up idle menu
+    await this.transport.read();
+    await this.transport.send('\r\n', false);
+    await new Promise(r => setTimeout(r, 300));
+
+    // Final try
+    try {
+      return await this.transport.waitFor('Choose a CPU', timeoutMs);
+    } catch {
       throw new Error('Timeout waiting for CPU menu');
     }
   }
@@ -332,16 +348,20 @@ export class KosConnection {
       // Clear any pending output
       await this.transport.read();
 
+      // Determine if we should clear stray input
+      // Default: true for regular commands, false for health checks (which set clear: false explicitly)
+      const clearInput = options?.clear !== false;
+
       if (options?.fireAndForget) {
-        await this.transport.send(command);
+        await this.transport.send(command, clearInput);
         return { success: true, output: '' };
       }
 
       // Send command followed by sentinel
       const { token: sentinelToken, command: sentinelCommand } = this.createSentinel(command);
       const sentinelPattern = this.buildSentinelPattern(sentinelToken);
-      await this.transport.send(command);
-      await this.transport.send(sentinelCommand);
+      await this.transport.send(command, clearInput);
+      await this.transport.send(sentinelCommand, false);  // Sentinel doesn't need clear
 
       // Wait for sentinel (primary) or prompt (fallback) to ensure completion
       let output: string;

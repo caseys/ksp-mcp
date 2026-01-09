@@ -95,8 +95,8 @@ export async function withTargetAndExecute(
   callerTool?: string
 ): Promise<OrchestratedResult> {
 
-  // Handle target setting if provided
-  if (target !== undefined) {
+  // Handle target setting if provided (skip 'auto' - that should be resolved by caller)
+  if (target !== undefined && target !== 'auto') {
     const targetResult = await setTarget(conn, target, targetType);
     if (!targetResult.success) {
       return {

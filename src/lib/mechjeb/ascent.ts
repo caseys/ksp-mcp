@@ -54,39 +54,37 @@ export class AscentHandle {
    * Uses MechJeb STATUS for accurate phase detection and dynamic atmosphere height
    */
   async getProgress(): Promise<AscentProgress> {
-    // Single atomic query for all progress values including MechJeb enabled state and atmosphere height
-    // Note: STATUS suffix doesn't exist in kOS.MechJeb2.Addon, so we derive phase from orbital params
+    // Single atomic query for all progress values including MechJeb status and atmosphere height
     const result = await this.conn.execute(
       'PRINT "PROG|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ' +
-      'ADDONS:MJ:ASCENT:ENABLED + "|" + ' +
-      'ROUND(SHIP:BODY:ATM:HEIGHT) + "|" + SHIP:STATUS.',
+      'ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:STATUS + "|" + ' +
+      'ROUND(SHIP:BODY:ATM:HEIGHT).',
       3000
     );
 
-    // Parse "PROG|alt|apo|per|enabled|atmHeight|shipStatus" format
-    const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|(\d+)\|(\w+)/i);
+    // Parse "PROG|alt|apo|per|enabled|mjStatus|atmHeight" format
+    const match = result.output.match(/PROG\|([\d.]+)\|([\d.-]+)\|([\d.-]+)\|(True|False)\|([^|]*)\|(\d+)/i);
 
     const altitude = match ? Number.parseFloat(match[1]) : 0;
     const apoapsis = match ? Number.parseFloat(match[2]) : 0;
     const periapsis = match ? Number.parseFloat(match[3]) : 0;
     const enabled = match ? match[4].toLowerCase() === 'true' : false;
-    const atmHeight = match ? Number.parseInt(match[5]) : 70_000;
-    const shipStatus = match ? match[6].toLowerCase() : '';
+    const mjStatus = match ? match[5].trim() : '';
+    const atmHeight = match ? Number.parseInt(match[6]) : 70_000;
 
-    // Determine phase from orbital parameters and ship status
+    // Determine phase using MechJeb status strings
     let phase: AscentProgress['phase'];
+    const statusLower = mjStatus.toLowerCase();
 
-    if (shipStatus === 'landed' || shipStatus === 'prelaunch' || (!enabled && altitude < 1000)) {
+    if (statusLower.includes('prelaunch') || statusLower.includes('landed') || (!enabled && mjStatus === '')) {
       phase = 'prelaunch';
     } else if (periapsis >= atmHeight) {
       phase = 'complete';
-    } else if (apoapsis > atmHeight && periapsis > 0) {
+    } else if (statusLower.includes('circulariz')) {
       phase = 'circularizing';
-    } else if (apoapsis > atmHeight) {
-      // Above atmosphere but periapsis still negative/low - coasting to apoapsis
+    } else if (statusLower.includes('coasting')) {
       phase = 'coasting';
-    } else if (altitude > 10_000) {
-      // Above 10km - in gravity turn
+    } else if (statusLower.includes('gravity turn') || statusLower.includes('turn')) {
       phase = 'gravity_turn';
     } else if (altitude > 100) {
       phase = 'launching';
@@ -100,7 +98,7 @@ export class AscentHandle {
       apoapsis,
       periapsis,
       enabled,
-      shipStatus: shipStatus || 'Unknown'
+      shipStatus: mjStatus || 'Unknown'
     };
   }
 
@@ -138,12 +136,12 @@ export class AscentHandle {
 
     const result = await pollWithBlackoutResilience<AscentPollState>({
       poll: async () => {
-        // Use pipe delimiters for robust parsing
-        // Query MechJeb ascent status for phase tracking (e.g., "Gravity turn")
+        // Use pipe delimiters for robust parsing (status may contain spaces/colons)
+        // Include eccentricity for orbit quality assessment
         const statusResult = await this.conn.execute(
           'SET _ASC TO ADDONS:MJ:ASCENT. ' +
           'SET _E TO _ASC:ENABLED. ' +
-          'SET _S TO _ASC:STATUS. ' +  // MechJeb ascent status (e.g., "Gravity turn", "Coasting to edge of atmosphere")
+          'SET _S TO _ASC:STATUS. ' +
           'SET _A TO ROUND(APOAPSIS). ' +
           'SET _P TO ROUND(PERIAPSIS). ' +
           'SET _B TO SHIP:BODY:NAME. ' +
@@ -151,13 +149,13 @@ export class AscentHandle {
           'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.'
         );
 
-        const statusMatch = statusResult.output.match(/(True|False)\|([^|]+)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
+        const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
         if (!statusMatch) {
           throw new Error('Failed to parse ascent status');
         }
 
         const enabled = statusMatch[1].toLowerCase() === 'true';
-        const status = statusMatch[2].trim();  // MechJeb status (e.g., "Gravity turn", "Off")
+        const status = statusMatch[2].trim();
         const apoapsis = Number.parseInt(statusMatch[3]);
         const periapsis = Number.parseInt(statusMatch[4]);
         const body = statusMatch[5];
@@ -181,11 +179,10 @@ export class AscentHandle {
       connection: this.conn,
 
       onPoll: async (state) => {
-        // Log status changes
+        // Log status changes (skip 'Off' - completion is logged after potential auto-fix)
         const now = Date.now();
-        if (state.status && state.status !== lastStatus) {
-          const status = state.status==='Off' && 'Ascent Complete' || state.status;
-          this.logger.progress(`[Ascent] ${status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
+        if (state.status && state.status !== lastStatus && state.status !== 'Off') {
+          this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
           lastStatus = state.status;
           lastLogTime = now;
         }
@@ -483,22 +480,19 @@ export class AscentProgram {
     await this.conn.execute('SAS OFF.');
     await delay(100);
 
-    // Check if we need to stage (stationary on pad vs already moving)
-    // On Kerbin: need to stage to ignite engines and release clamps
-    // On other bodies: may already be ready to fly without staging
-    const alt1Result = await this.conn.execute('PRINT ROUND(ALTITUDE, 1).');
-    const alt1 = Number.parseFloat(alt1Result.output.match(/-?[\d.]+/)?.[0] ?? '0');
-    await delay(500);
-    const alt2Result = await this.conn.execute('PRINT ROUND(ALTITUDE, 1).');
-    const alt2 = Number.parseFloat(alt2Result.output.match(/-?[\d.]+/)?.[0] ?? '0');
+    // Check if we need to stage (on launchpad with clamps vs already ready)
+    // PRELAUNCH = on launchpad with clamps - need to stage to release and ignite
+    // LANDED = on surface without clamps - MechJeb will throttle up directly
+    const statusResult = await this.conn.execute('PRINT SHIP:STATUS.');
+    const shipStatus = statusResult.output.toLowerCase();
 
-    if (Math.abs(alt2 - alt1) < 1) {
-      // Not moving - need to stage to start
+    if (shipStatus.includes('prelaunch')) {
+      // On launchpad with clamps - stage to release clamps and ignite engines
       await this.conn.execute('STAGE.');
       await delay(500);
-      this.logger.progress('[Ascent] STAGED FOR LAUNCH');
+      this.logger.progress('[Ascent] STAGED TO LAUNCH');
     } else {
-      this.logger.progress('[Ascent] LAUNCHED');
+      this.logger.progress('[Ascent] LAUNCH');
     }
 
     // Enable physics warp after 20 seconds if configured via env var
@@ -553,7 +547,7 @@ async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
  */
 export const launchAscentTool: ToolDefinition = {
   name: 'launch',
-  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent. Returns immediately by default - poll status for completion.',
+  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent.',
   inputSchema: {
     altitude: z.union([distanceSchema, z.literal('auto')]).optional().default('auto')
       .describe('Optional target orbit altitude in meters, default above atmosphere.'),

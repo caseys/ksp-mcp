@@ -13,8 +13,10 @@ export interface Transport {
 
   /**
    * Send a command/line to the remote end
+   * @param data The command to send
+   * @param clear If true (default), prepend Ctrl+C to clear any stray input
    */
-  send(data: string): Promise<void>;
+  send(data: string, clear?: boolean): Promise<void>;
 
   /**
    * Send raw keystrokes (for special keys like Ctrl+D)
@@ -50,7 +52,7 @@ export abstract class BaseTransport implements Transport {
   protected _isOpen: boolean = false;
 
   abstract init(): Promise<void>;
-  abstract send(data: string): Promise<void>;
+  abstract send(data: string, clear?: boolean): Promise<void>;
   abstract readRaw(): Promise<string>;
   abstract close(): Promise<void>;
 

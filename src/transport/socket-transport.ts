@@ -87,14 +87,14 @@ export class SocketTransport extends BaseTransport {
     });
   }
 
-  async send(data: string): Promise<void> {
+  async send(data: string, clear: boolean = false): Promise<void> {
     if (!this.socket || !this._isOpen) {
       throw new Error('Transport not initialized');
     }
 
     return new Promise((resolve, reject) => {
-      // Send with newline (kOS expects \r\n or \n)
-      const payload = data + '\r\n';
+      // Optionally prepend Ctrl+C to clear any stray input, then send command with newline
+      const payload = (clear ? '\u0003' : '') + data + '\r\n';
       this.trace.logSend(payload);
       this.socket!.write(payload, 'utf-8', (err) => {
         if (err) {

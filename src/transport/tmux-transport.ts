@@ -64,9 +64,14 @@ export class TmuxTransport extends BaseTransport {
     this._isOpen = true;
   }
 
-  async send(data: string): Promise<void> {
+  async send(data: string, clear: boolean = false): Promise<void> {
     if (!this.paneId) {
       throw new Error('Transport not initialized');
+    }
+
+    // Optionally send Ctrl+C to clear any stray input
+    if (clear) {
+      await execAsync(`tmux send-keys -t ${this.paneId} C-c`);
     }
 
     // Escape for shell

@@ -165,8 +165,9 @@ interface HealthCheckResult {
 async function checkConnectionHealth(conn: KosConnection): Promise<HealthCheckResult> {
   try {
     // Use unique marker to distinguish result from echo
+    // Use clear=false to avoid Ctrl+C interfering with output parsing
     const marker = 'HEALTH_OK';
-    const result = await conn.execute(`PRINT "${marker}".`, HEALTH_CHECK_TIMEOUT_MS);
+    const result = await conn.execute(`PRINT "${marker}".`, HEALTH_CHECK_TIMEOUT_MS, { clear: false });
 
     // Check for radio blackout - signal lost message (only on first command after loss)
     if (result.output.includes('Signal lost')) {

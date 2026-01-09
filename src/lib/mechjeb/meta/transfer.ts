@@ -20,7 +20,7 @@ import { formatTime,  fmtVel } from '../../utils/format.js';
 
 export const transferTool: ToolDefinition = {
   name: 'transfer',
-  description: 'Transfer to target. Auto-detects: hohmann_transfer (moons/vessels), interplanetary_transfer (planets), or return_from_moon (parent planet from moon). Usually followed by course_correct.',
+  description: 'Start transfer to vessel, moon or planet. Usually followed by course_correct.',
   inputSchema: {
     target: autoTargetSchema,
     execute: executeSchema,

@@ -895,12 +895,11 @@ async function queryMechJebAutopilotStatus(
   try {
     switch (opType) {
       case 'ascent': {
-        // Note: ADDONS:MJ:ASCENT:STATUS doesn't exist, use SHIP:STATUS instead
         const result = await conn.execute(
-          'PRINT ADDONS:MJ:ASCENT:ENABLED + "|" + SHIP:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
+          'PRINT ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
           3000
         );
-        const match = result.output.match(/(True|False)\|(\w+)\|(-?[\d.]+)\|(-?[\d.]+)/i);
+        const match = result.output.match(/(True|False)\|([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/i);
         if (match) {
           const enabled = match[1].toLowerCase() === 'true';
           const status = match[2].trim() || 'Ascending';
@@ -912,12 +911,11 @@ async function queryMechJebAutopilotStatus(
         break;
       }
       case 'landing': {
-        // Note: ADDONS:MJ:LANDING:STATUS doesn't exist, use SHIP:STATUS instead
         const result = await conn.execute(
-          'PRINT ADDONS:MJ:LANDING:ENABLED + "|" + SHIP:STATUS + "|" + ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
+          'PRINT ADDONS:MJ:LANDING:ENABLED + "|" + ADDONS:MJ:LANDING:STATUS + "|" + ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
           3000
         );
-        const match = result.output.match(/(True|False)\|(\w+)\|(-?[\d.]+)\|(-?[\d.]+)/i);
+        const match = result.output.match(/(True|False)\|([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/i);
         if (match) {
           const enabled = match[1].toLowerCase() === 'true';
           const mjStatus = match[2].trim();
@@ -971,12 +969,11 @@ async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: Ko
   try {
     const ascentResult = await conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.', 2000);
     if (ascentResult.output.toLowerCase().includes('true')) {
-      // Note: ADDONS:MJ:ASCENT:STATUS doesn't exist, use SHIP:STATUS instead
       const statusResult = await conn.execute(
-        'PRINT SHIP:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
+        'PRINT ADDONS:MJ:ASCENT:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
         2000
       );
-      const match = statusResult.output.match(/(\w+)\|(-?[\d.]+)\|(-?[\d.]+)/);
+      const match = statusResult.output.match(/([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/);
       if (match) {
         const status = match[1].trim() || 'Ascending';
         const apo = parseNumber(match[2]);
@@ -1104,7 +1101,7 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const statusTool: ToolDefinition = {
   name: 'status',
-  description: 'Get ship info: orbit, fuel, position, encounters.',
+  description: 'Get ship info: position, fuel, targets.',
   inputSchema: {},
   annotations: {
     readOnlyHint: true,

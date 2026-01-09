@@ -706,7 +706,7 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const warpTool: ToolDefinition = {
   name: 'warp',
-  description: 'Fast-forward time. Auto-detects: warp to maneuver node if exists, otherwise warp to SOI change if exists.',
+  description: 'Fast-forward time to specific moment, maneuver node, or SOI transition.',
   inputSchema: {
     target: z.union([
       z.enum(['node', 'soi', 'periapsis', 'apoapsis', 'auto']),
