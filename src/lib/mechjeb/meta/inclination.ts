@@ -21,7 +21,7 @@ import { formatTime,  fmtVel } from '../../utils/format.js';
 
 export const inclinationTool: ToolDefinition = {
   name: 'inclination',
-  description: 'Change orbital inclination. If target set, matches target plane. Otherwise changes to specified angle (default: 0° equatorial).',
+  description: 'Change inclination to match target or specified angle.',
   inputSchema: {
     target: autoTargetSchema
       .describe('Target name to match planes with. If omitted and no target set, uses angle instead.'),

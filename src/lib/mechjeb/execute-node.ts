@@ -583,7 +583,7 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const executeNodeTool: ToolDefinition = {
   name: 'execute_node',
-  description: 'Execute next maneuver. Prefer execute param on maneuver tools.',
+  description: 'Execute next maneuver.',
   inputSchema: {
     async: z.boolean()
       .optional()

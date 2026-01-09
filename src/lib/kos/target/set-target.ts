@@ -104,7 +104,7 @@ export async function setTarget(
 
 export const setTargetTool: ToolDefinition = {
   name: 'set_target',
-  description: 'Set navigation target. Prefer target param on transfer tools.',
+  description: 'Set navigation target.',
   inputSchema: {
     name: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
       .optional()

@@ -54,7 +54,7 @@ export async function changeInclination(
 
 export const changeInclinationTool: ToolDefinition = {
   name: 'change_inclination',
-  description: 'Change orbit plane angle.',
+  description: 'Change angle of orbit plane angle.',
   inputSchema: {
     newInclination: z.number().optional().default(0).describe('Target inclination in degrees (default: 0 for equatorial)'),
     timeRef: z.enum(['EQ_ASCENDING', 'EQ_DESCENDING', 'EQ_NEAREST_AD', 'EQ_HIGHEST_AD', 'X_FROM_NOW'])

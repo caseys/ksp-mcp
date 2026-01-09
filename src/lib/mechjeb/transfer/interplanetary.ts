@@ -74,7 +74,7 @@ export async function interplanetaryTransfer(
 
 export const interplanetaryTransferTool: ToolDefinition = {
   name: 'interplanetary_transfer',
-  description: 'Calculate transfer to another planet then waits for planet aligment.  NOT for moons - use hohmann_transfer instead.',
+  description: 'Calculate transfer to another planet, wait for planet alignment.',
   inputSchema: {
     target: autoTargetSchema,
     waitForPhaseAngle: z.boolean()

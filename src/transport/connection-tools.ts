@@ -458,7 +458,7 @@ import type { ToolDefinition } from '../lib/tool-types.js';
  */
 export const commandTool: ToolDefinition = {
   name: 'command',
-  description: 'Run raw kOS command. Advanced.',
+  description: 'Run raw kOS command.',
   inputSchema: {
     command: z.string().describe('kOS script command to send'),
     timeout: z.number().optional().default(5000).describe('Command timeout in milliseconds'),

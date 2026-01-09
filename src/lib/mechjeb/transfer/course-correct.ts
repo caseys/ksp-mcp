@@ -213,7 +213,7 @@ export async function courseCorrection(
 
 export const courseCorrectTool: ToolDefinition = {
   name: 'course_correct',
-  description: 'Adjust periapsis at target AFTER hohmann_transfer created encounter. Only works mid-transfer with existing close approach.',
+  description: 'Fine tune arrival at target after starting trasfer.',
   inputSchema: {
     target: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
       .optional()

@@ -41,7 +41,7 @@ export async function changeSemiMajorAxis(
 
 export const changeSemiMajorAxisTool: ToolDefinition = {
   name: 'change_semi_major_axis',
-  description: 'Change orbital period. Advanced.',
+  description: 'Change orbital period.',
   inputSchema: {
     semiMajorAxis: distanceSchema.optional().default(1_000_000).describe('Target semi-major axis in meters (default: 1000km)'),
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])

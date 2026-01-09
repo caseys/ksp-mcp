@@ -15,7 +15,7 @@ import { addBroadcastSubscriber, getActiveBroadcastLogger } from '../utils/broad
  */
 export const continueOperationTool: ToolDefinition = {
   name: 'continue_operation',
-  description: 'Subscribe to notifications from a running operation. Returns operation status immediately while notifications continue flowing.',
+  description: 'Subscribe to notifications from a running operation.',
   inputSchema: {},
   annotations: {
     readOnlyHint: true,

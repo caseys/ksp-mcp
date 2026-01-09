@@ -276,7 +276,7 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const runScriptTool: ToolDefinition = {
   name: 'run_script',
-  description: 'Run kOS script file. Advanced.',
+  description: 'Run kOS script file.',
   inputSchema: {
     sourcePath: z.string().describe('Absolute path to the .ks script file to run'),
     timeout: z.number().optional().default(60_000).describe('Maximum execution time in milliseconds (default: 60000 = 1 minute)'),

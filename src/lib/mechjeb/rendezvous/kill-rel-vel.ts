@@ -71,7 +71,7 @@ export async function killRelativeVelocity(
 
 export const matchVelocitiesTool: ToolDefinition = {
   name: 'match_velocities',
-  description: 'Match speed with target for docking. Target must be in same SOI as ship.',
+  description: 'Match speed with target for docking in same SOI.',
   inputSchema: {
     target: autoTargetSchema,
     timeRef: z.enum(['CLOSEST_APPROACH', 'X_FROM_NOW'])

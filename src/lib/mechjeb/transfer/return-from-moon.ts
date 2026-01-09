@@ -41,7 +41,7 @@ export async function returnFromMoon(
 
 export const returnFromMoonTool: ToolDefinition = {
   name: 'return_from_moon',
-  description: 'Leave moon orbit to return home. ONLY works when already orbiting Mun or Minmus, NOT from Kerbin.',
+  description: 'Leave moon orbit to return to parent body SOI.',
   inputSchema: {
     targetPeriapsis: distanceSchema.optional().default(40_000).describe('Target periapsis at parent body in meters (default: 40km)'),
     execute: executeSchema,

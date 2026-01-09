@@ -173,7 +173,7 @@ export async function hohmannTransfer(
 
 export const hohmannTransferTool: ToolDefinition = {
   name: 'hohmann_transfer',
-  description: 'Transfer to moon or vessel. Mode: "rendezvous" (default) optimizes encounter timing, "transfer" creates simple orbit change. Usually followed by course correction.',
+  description: 'Transfer to moon or vessel.',
   inputSchema: {
     target: autoTargetSchema,
     mode: z.enum(['rendezvous', 'transfer'])

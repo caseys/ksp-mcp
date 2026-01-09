@@ -40,7 +40,7 @@ export async function changeLongitudeOfPeriapsis(
 
 export const changePeriapsisLongitudeTool: ToolDefinition = {
   name: 'change_periapsis_longitude',
-  description: 'Rotate orbit orientation. Advanced.',
+  description: 'Rotate orbit orientation.',
   inputSchema: {
     longitude: z.number().optional().default(90).describe('Target longitude in degrees (-180 to 180, default: 90)'),
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])

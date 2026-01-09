@@ -55,7 +55,7 @@ export async function matchPlane(
 
 export const matchPlanesTool: ToolDefinition = {
   name: 'match_planes',
-  description: 'Align orbit with target for rendezvous or docking. Target must be in same SOI as ship.',
+  description: 'Align orbit with target for rendezvous or docking in same SOI.',
   inputSchema: {
     target: autoTargetSchema,
     timeRef: z.enum(['REL_NEAREST_AD', 'REL_HIGHEST_AD', 'REL_ASCENDING', 'REL_DESCENDING'])

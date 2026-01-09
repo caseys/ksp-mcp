@@ -57,7 +57,7 @@ export async function changeEccentricity(
 
 export const changeEccentricityTool: ToolDefinition = {
   name: 'change_eccentricity',
-  description: 'Change orbit shape (0=circular). Advanced.',
+  description: 'Change orbit shape (0=circular).',
   inputSchema: {
     eccentricity: z.number().min(0).max(0.99).optional().default(0).describe('Target eccentricity (0 = circular, <1 = elliptical, default: 0)'),
     timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
