@@ -395,6 +395,9 @@ export async function getShipTelemetry(
   const isMoon = soiParent.toLowerCase() !== 'sun' && soiParent.toLowerCase() !== 'kerbol';
   const soiDisplay = isMoon ? `${soi}, a moon of ${soiParent}` : soi;
 
+  // Small delay between query groups for connection stability
+  await delay(50);
+
   // ============================================================================
   // GROUP 2: Timing (ETA values + Time to Impact + Orbital Speed)
   // ============================================================================
@@ -403,6 +406,7 @@ export async function getShipTelemetry(
   let atmHeight = 0;
   let hasNextPatch = false;
   let orbitalSpeed = 0;
+  let etaTransition = 0;  // Store for ENCOUNTER section
 
   try {
     const g2Result = await conn.execute(
@@ -423,23 +427,24 @@ export async function getShipTelemetry(
     if (g2Match) {
       const etaApoapsis = parseNumber(g2Match[1]);
       const etaPeriapsis = parseNumber(g2Match[2]);
-      const etaTransition = parseNumber(g2Match[3]);
+      etaTransition = parseNumber(g2Match[3]);  // Store in outer scope
       hasNextPatch = parseBool(g2Match[4]);
       atmHeight = parseNumber(g2Match[5]);
       const hasAtmosphere = parseBool(g2Match[6]);
       const timeToImpact = parseInt(g2Match[7]);
       orbitalSpeed = parseInt(g2Match[8]);
 
-      // Build orbital events
+      // Build orbital events (body names added, encounter body updated after G3)
       if (etaApoapsis > 0 && etaApoapsis < 1e10 && !isEscapeTrajectory) {
-        orbitalEvents.push({ name: 'Apoapsis', eta: etaApoapsis });
+        orbitalEvents.push({ name: `${soi} Apoapsis`, eta: etaApoapsis });
       }
       if (etaPeriapsis > 0 && etaPeriapsis < 1e10) {
         orbitalEvents.push({ name: `${soi} Periapsis`, eta: etaPeriapsis });
       }
       if (hasNextPatch && etaTransition > 0 && etaTransition < 1e10) {
+        // Placeholder - encounter body name will be prepended after G3 query
         const transitionType = isEscapeTrajectory ? 'SOI Escape' : 'SOI Change';
-        orbitalEvents.push({ name: transitionType, eta: etaTransition });
+        orbitalEvents.push({ name: `_ENC_ ${transitionType}`, eta: etaTransition });
       }
       if (hasAtmosphere && atmHeight > 0 && per < atmHeight && altitude > atmHeight) {
         const atmEntryEta = Math.max(0, etaPeriapsis * 0.7);
@@ -460,6 +465,7 @@ export async function getShipTelemetry(
   // BUILD FORMATTED OUTPUT (Ship State + Timing)
   // ============================================================================
   const isSurface = ['LANDED', 'SPLASHED', 'PRELAUNCH'].includes(vesselStatus.toUpperCase());
+  let nextLineIndex = -1;  // Index for "Next:" line (updated after G3 with encounter body)
 
   if (isSurface) {
     lines.push(`Location: ${soiDisplay} (${vesselStatus.toUpperCase()}) on surface`);
@@ -471,11 +477,12 @@ export async function getShipTelemetry(
     const dvPart = shipDeltaV > 0 ? ` (delta-v: ${fmtVel(shipDeltaV)})` : '';
     lines.push(`${vesselType}: ${vesselName}${dvPart}`);
   } else {
-    lines.push(`SOI: ${soiDisplay} (${vesselStatus.toUpperCase()})`);
-    if (nextEvents.length > 0) {
-      const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
-      lines.push(`Next: ${eventStrs.join(', ')}`);
-    }
+    // Show TRANSFERRING when on course for SOI transition
+    const displayStatus = hasNextPatch ? 'TRANSFERRING' : vesselStatus.toUpperCase();
+    lines.push(`SOI: ${soiDisplay} (${displayStatus})`);
+    // Store index for "Next:" line - will be populated after G3 with encounter body name
+    nextLineIndex = lines.length;
+    lines.push('');  // Placeholder
     if (isEscapeTrajectory) {
       lines.push(`Orbit: Hyperbolic, Periapsis: ${fmtDist(per)}, Inclination: ${inc.toFixed(1)}°`);
     } else if (isImpactTrajectory) {
@@ -499,11 +506,15 @@ export async function getShipTelemetry(
     lines.push(`Est. burn time: ${formatTime(estimatedBurnTime)}`);
   }
 
+  // Small delay between query groups for connection stability
+  await delay(50);
+
   // ============================================================================
   // GROUP 3: Targeting (Encounter + Target + Rendezvous)
   // ============================================================================
   // Combined query for all target-related info - only if HASTARGET or hasEncounter
-  const targetParentExpr = '(CHOOSE "Sun" IF TARGET:BODY:NAME = "Sun" ELSE TARGET:BODY:BODY:NAME)';
+  // TARGET:BODY:NAME gives the parent body (Sun for planets, planet for moons)
+  const targetParentExpr = 'TARGET:BODY:NAME';
 
   try {
     // Single defensive query - uses HASSUFFIX to check MechJeb TGT availability
@@ -535,7 +546,11 @@ export async function getShipTelemetry(
       timeoutMs
     );
 
-    if (!g3Result.error && !g3Result.output.includes('G3|NOTGT')) {
+    // Check for actual NOTGT result (not just the echoed command containing the string)
+    // The actual result would be like "G3|NOTGT" without quotes around NOTGT
+    const hasNoTarget = /G3\|NOTGT[^"]/i.test(g3Result.output) || g3Result.output.endsWith('G3|NOTGT');
+
+    if (!g3Result.error && !hasNoTarget) {
       const g3Match = g3Result.output.match(
         /G3\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^|]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(True|False)\|~\|(-?[\d.e+]+)/i
       );
@@ -555,11 +570,40 @@ export async function getShipTelemetry(
         const dnExists = parseBool(g3Match[12]);
         const relInc = parseNumber(g3Match[13]);
 
-        // Encounter section
-        if (encounterBody !== 'NONE' && encounterPe > 0) {
+        // Update "Next:" line with encounter body name (replace _ENC_ placeholder)
+        if (encounterBody !== 'NONE' && encounterBody !== soi) {
+          for (const event of nextEvents) {
+            if (event.name.startsWith('_ENC_')) {
+              event.name = event.name.replace('_ENC_', encounterBody);
+            }
+          }
+        }
+        // Build "Next:" line now that we have encounter body name
+        if (nextLineIndex >= 0 && nextEvents.length > 0) {
+          const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
+          lines[nextLineIndex] = `Next: ${eventStrs.join(', ')}`;
+        }
+
+        // Encounter section - show even for negative periapsis (crash trajectories)
+        if (encounterBody !== 'NONE' && encounterBody !== soi) {
           encounter = { body: encounterBody, periapsis: encounterPe };
-          lines.push('', 'ENCOUNTER:', `Target: ${encounterBody}`);
-          lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
+          // If we're at a planet (soiParent is Sun), encounter body is a moon of current SOI
+          const atPlanet = soiParent.toLowerCase() === 'sun' || soiParent.toLowerCase() === 'kerbol';
+          const encParentInfo = atPlanet ? ` (A moon of ${soi})` : '';
+
+          lines.push('', 'ENCOUNTER:');
+          lines.push(`Body: ${encounterBody}${encParentInfo}`);
+          if (encounterPe < 0) {
+            lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (CRASH TRAJECTORY!)`);
+          } else if (encounterPe < 10_000) {
+            lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (LOW - may need course_correct)`);
+          } else {
+            lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
+          }
+          // Show time to encounter
+          if (etaTransition > 0 && etaTransition < 1e10) {
+            lines.push(`Time: ${formatTime(etaTransition)}`);
+          }
         }
 
         // Target section
@@ -590,6 +634,22 @@ export async function getShipTelemetry(
     }
   } catch {
     // Targeting query is optional
+  }
+
+  // Fallback: Build "Next:" line if G3 didn't provide encounter body
+  // Remove _ENC_ placeholder if still present (no encounter found)
+  if (nextLineIndex >= 0 && lines[nextLineIndex] === '') {
+    for (const event of nextEvents) {
+      if (event.name.startsWith('_ENC_')) {
+        event.name = event.name.replace('_ENC_ ', '');  // Remove placeholder
+      }
+    }
+    if (nextEvents.length > 0) {
+      const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
+      lines[nextLineIndex] = `Next: ${eventStrs.join(', ')}`;
+    } else {
+      lines.splice(nextLineIndex, 1);  // Remove empty placeholder
+    }
   }
 
   // ============================================================================
