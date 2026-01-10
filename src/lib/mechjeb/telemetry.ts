@@ -506,22 +506,28 @@ export async function getShipTelemetry(
   const targetParentExpr = '(CHOOSE "Sun" IF TARGET:BODY:NAME = "Sun" ELSE TARGET:BODY:BODY:NAME)';
 
   try {
-    // IMPORTANT: Use nested IF instead of CHOOSE for ADDONS:MJ:TGT access
-    // kOS evaluates CHOOSE branches at parse time, causing "TGT suffix not found" errors
-    // when HASTARGET is false but ORBIT:HASNEXTPATCH is true
+    // Single defensive query - uses HASSUFFIX to check MechJeb TGT availability
     const g3Result = await conn.execute(
       'IF HASTARGET OR ORBIT:HASNEXTPATCH { ' +
         // Encounter info (2 fields)
-        `LOCAL encBody IS (CHOOSE (CHOOSE NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH ELSE ORBIT:NEXTPATCH:BODY:NAME) IF ORBIT:HASNEXTPATCH ELSE "NONE"). ` +
-        `LOCAL encPe IS (CHOOSE (CHOOSE ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS) IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH ELSE ROUND(ORBIT:NEXTPATCH:PERIAPSIS)) IF ORBIT:HASNEXTPATCH ELSE 0). ` +
-        // Target info (4 fields) - use -1 for distance if no target to distinguish from 0
-        `LOCAL tgtName IS (CHOOSE TARGET:NAME IF HASTARGET ELSE "NONE"). ` +
-        `LOCAL tgtType IS (CHOOSE TARGET:TYPENAME IF HASTARGET ELSE "NONE"). ` +
-        `LOCAL tgtDist IS (CHOOSE ROUND(TARGET:DISTANCE) IF HASTARGET ELSE -1). ` +
-        `LOCAL tgtParent IS (CHOOSE (CHOOSE ${targetParentExpr} IF TARGET:TYPENAME = "Body" ELSE "NONE") IF HASTARGET ELSE "NONE"). ` +
-        // MechJeb rendezvous info (7 fields) - use nested IF to avoid parse-time ADDONS:MJ:TGT access
+        `LOCAL encBody IS "NONE". LOCAL encPe IS 0. ` +
+        `IF ORBIT:HASNEXTPATCH { ` +
+          `IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { SET encBody TO NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. SET encPe TO ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). } ` +
+          `ELSE { SET encBody TO ORBIT:NEXTPATCH:BODY:NAME. SET encPe TO ROUND(ORBIT:NEXTPATCH:PERIAPSIS). } ` +
+        `} ` +
+        // Target info (4 fields)
+        `LOCAL tgtName IS "NONE". LOCAL tgtType IS "NONE". LOCAL tgtDist IS -1. LOCAL tgtParent IS "NONE". ` +
+        `IF HASTARGET { ` +
+          `SET tgtName TO TARGET:NAME. SET tgtType TO TARGET:TYPENAME. SET tgtDist TO ROUND(TARGET:DISTANCE). ` +
+          `IF TARGET:TYPENAME = "Body" { SET tgtParent TO ${targetParentExpr}. } ` +
+        `} ` +
+        // MechJeb rendezvous info (7 fields) - check HASSUFFIX before access
         `LOCAL caTime IS -1. LOCAL caDist IS -1. LOCAL anTime IS -1. LOCAL dnTime IS -1. LOCAL anEx IS FALSE. LOCAL dnEx IS FALSE. LOCAL relI IS 0. ` +
-        `IF HASTARGET { SET caTime TO ADDONS:MJ:TGT:CLOSESTAPPROACHTIME. SET caDist TO ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE. SET anTime TO ADDONS:MJ:TGT:TIMETOAN. SET dnTime TO ADDONS:MJ:TGT:TIMETODN. SET anEx TO ADDONS:MJ:TGT:ANEXISTS. SET dnEx TO ADDONS:MJ:TGT:DNEXISTS. SET relI TO ADDONS:MJ:TGT:RELATIVEINCLINATION. } ` +
+        `IF HASTARGET AND ADDONS:MJ:HASSUFFIX("TGT") { ` +
+          `SET caTime TO ADDONS:MJ:TGT:CLOSESTAPPROACHTIME. SET caDist TO ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE. ` +
+          `SET anTime TO ADDONS:MJ:TGT:TIMETOAN. SET dnTime TO ADDONS:MJ:TGT:TIMETODN. ` +
+          `SET anEx TO ADDONS:MJ:TGT:ANEXISTS. SET dnEx TO ADDONS:MJ:TGT:DNEXISTS. SET relI TO ADDONS:MJ:TGT:RELATIVEINCLINATION. ` +
+        `} ` +
         `PRINT "G3|" + encBody + "${SEP}" + encPe + "${SEP}" + ` +
         `tgtName + "${SEP}" + tgtType + "${SEP}" + tgtDist + "${SEP}" + tgtParent + "${SEP}" + ` +
         `caTime + "${SEP}" + caDist + "${SEP}" + anTime + "${SEP}" + dnTime + "${SEP}" + anEx + "${SEP}" + dnEx + "${SEP}" + relI. ` +
