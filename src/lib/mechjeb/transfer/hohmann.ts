@@ -27,6 +27,58 @@ interface TransferAttemptResult {
 }
 
 /**
+ * Details about a wrong encounter situation
+ */
+interface WrongEncounterDetails {
+  encounterBody: string;
+  encounterPeriapsis: number;  // altitude above surface in meters
+  transferApoapsis: number;     // transfer orbit apoapsis in parent SOI
+  targetSMA: number;            // target's semi-major axis
+  isCrash: boolean;             // true if encounter periapsis < 10km
+  hasCloseApproach: boolean;    // true if transfer apoapsis >= 85% of target SMA
+}
+
+/**
+ * Query details about a wrong encounter situation.
+ * Must be called while nodes still exist (before clearing).
+ */
+async function queryWrongEncounterDetails(
+  conn: KosConnection,
+  encounterBody: string
+): Promise<WrongEncounterDetails | null> {
+  try {
+    const result = await conn.execute(
+      `LOCAL encPe IS NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS. ` +
+      `LOCAL xferAp IS NEXTNODE:ORBIT:APOAPSIS. ` +
+      `LOCAL tgtSMA IS TARGET:ORBIT:SEMIMAJORAXIS. ` +
+      `PRINT encPe + "|" + xferAp + "|" + tgtSMA.`,
+      5000
+    );
+
+    const match = result.output.match(/([-\d.]+)\|([-\d.]+)\|([-\d.]+)/);
+    if (!match) return null;
+
+    const encounterPeriapsis = parseFloat(match[1]);
+    const transferApoapsis = parseFloat(match[2]);
+    const targetSMA = parseFloat(match[3]);
+
+    const SAFE_PE_THRESHOLD = 10_000;  // 10km minimum safe periapsis
+    const CLOSE_APPROACH_RATIO = 0.85;  // Must reach 85% of target's orbital altitude
+
+    return {
+      encounterBody,
+      encounterPeriapsis,
+      transferApoapsis,
+      targetSMA,
+      isCrash: encounterPeriapsis < SAFE_PE_THRESHOLD,
+      hasCloseApproach: transferApoapsis >= targetSMA * CLOSE_APPROACH_RATIO,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Attempt a single Hohmann transfer with given mode.
  * Does not include retry logic - just tries once and reports result.
  */
@@ -63,7 +115,13 @@ async function attemptHohmannTransfer(
 
   // Check if encounter is with the correct target (case-insensitive)
   if (targetName && encounterBody.toLowerCase() !== targetName.toLowerCase()) {
-    return { success: false, wrongEncounter: encounterBody };
+    // Include node info so caller can decide whether to keep nodes
+    return {
+      success: false,
+      wrongEncounter: encounterBody,
+      deltaV: nodeInfo.deltaV,
+      timeToNode: nodeInfo.timeToNode,
+    };
   }
 
   // Query actual node count
@@ -142,15 +200,92 @@ export async function hohmannTransfer(
     }
   }
 
-  // Handle wrong encounter (don't retry - phase angle issue)
+  // Handle wrong encounter - analyze trajectory and decide best approach
   if (attempt.wrongEncounter) {
+    const originalTarget = targetName;
+    const detourBody = attempt.wrongEncounter;
+
+    // Query encounter details BEFORE clearing nodes
+    const details = await queryWrongEncounterDetails(conn, detourBody);
+
+    // Decision tree based on trajectory analysis
+    if (details) {
+      const encPeKm = (details.encounterPeriapsis / 1000).toFixed(0);
+      const xferApMm = (details.transferApoapsis / 1_000_000).toFixed(1);
+      const tgtSmaMm = (details.targetSMA / 1_000_000).toFixed(1);
+
+      // Case 1: Crash trajectory - keep nodes, warn about course_correct required
+      if (details.isCrash) {
+        // Query node count for the kept nodes
+        const nodeCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
+        const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+
+        return {
+          success: true,
+          deltaV: attempt.deltaV,
+          timeToNode: attempt.timeToNode,
+          nodesCreated,
+          warning: `⚠️ CRASH TRAJECTORY at ${detourBody}! Periapsis: ${encPeKm}km\n` +
+                   `Target was ${originalTarget}, but ${detourBody} is in the way.\n` +
+                   `Transfer apoapsis: ${xferApMm}Mm (target orbit: ${tgtSmaMm}Mm)\n` +
+                   `REQUIRED: Use course_correct immediately to raise periapsis and adjust trajectory.`
+        };
+      }
+
+      // Case 2: Safe encounter + close approach to target - keep nodes, suggest course_correct
+      if (details.hasCloseApproach) {
+        // Query node count for the kept nodes
+        const nodeCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
+        const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+
+        return {
+          success: true,
+          deltaV: attempt.deltaV,
+          timeToNode: attempt.timeToNode,
+          nodesCreated,
+          warning: `${detourBody} flyby en route to ${originalTarget}.\n` +
+                   `Encounter periapsis: ${encPeKm}km (safe)\n` +
+                   `Transfer apoapsis: ${xferApMm}Mm reaches ${originalTarget} orbit (${tgtSmaMm}Mm)\n` +
+                   `After ${detourBody} flyby: use course_correct to fine-tune approach to ${originalTarget}.`
+        };
+      }
+    }
+
+    // Case 3: Safe but no close approach - replan detour to encountered body
     await clearNodes(conn);
+
+    // Set new target to the accidentally-encountered body
+    await conn.execute(`SET TARGET TO BODY("${detourBody}").`, 3000);
+
+    // Replan Hohmann transfer to detour body - use same two-step retry logic
+    let detourAttempt = await attemptHohmannTransfer(conn, timeRef, capture, rendezvous, detourBody);
+
+    // If NO_ENCOUNTER on first try, retry with opposite mode
+    if (detourAttempt.noEncounter) {
+      await clearNodes(conn);
+      detourAttempt = await attemptHohmannTransfer(conn, timeRef, capture, !rendezvous, detourBody);
+    }
+
+    if (!detourAttempt.success) {
+      // Build descriptive error message
+      let errorDetail = detourAttempt.error ?? '';
+      if (detourAttempt.noEncounter) errorDetail = 'no encounter with either mode';
+      if (detourAttempt.wrongEncounter) errorDetail = `wrong encounter: ${detourAttempt.wrongEncounter}`;
+      return {
+        success: false,
+        error: `Failed to plan detour to ${detourBody}: ${errorDetail || 'unknown error'}`
+      };
+    }
+
+    // Return success with warning about the detour
     return {
-      success: false,
-      error: `❌ Hohmann transfer creates WRONG ENCOUNTER!\n` +
-             `Target: ${targetName}\n` +
-             `Encounter: ${attempt.wrongEncounter}\n` +
-             'The phase angle may be wrong - wait for better timing or use interplanetary_transfer.'
+      success: true,
+      deltaV: detourAttempt.deltaV,
+      timeToNode: detourAttempt.timeToNode,
+      nodesCreated: detourAttempt.nodesCreated,
+      warning: `Direct transfer to ${originalTarget} not possible - ${detourBody} is in the way.\n` +
+               `Transfer does not reach ${originalTarget} orbit, so detour planned to ${detourBody}.\n` +
+               `After ${detourBody} encounter: use course_correct for gravity assist toward ${originalTarget}.`
     };
   }
 
@@ -250,6 +385,11 @@ export const hohmannTransferTool: ToolDefinition = {
             text += ` (safe)`;
             text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
           }
+        }
+
+        // Add warning if present (e.g., detour due to wrong encounter)
+        if (result.warning) {
+          text += `\n\nWARNING: ${result.warning}`;
         }
 
         return ctx.successResponse('hohmann_transfer', text);
