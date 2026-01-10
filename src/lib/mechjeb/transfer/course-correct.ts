@@ -41,31 +41,49 @@ async function queryNodePeriapsis(conn: KosConnection): Promise<{ hasEncounter: 
  * Uses secant method when we have 2+ data points, simple scaling otherwise.
  */
 function calculateNextInput(target: number, history: Array<{ input: number; result: number }>): number {
+  const MIN_INPUT = target * 0.1;
+  const MAX_INPUT = target * 10;
+
+  // Helper to clamp and validate
+  const clampResult = (value: number): number => {
+    if (!Number.isFinite(value)) return target;  // Fallback for NaN/Infinity
+    return Math.max(MIN_INPUT, Math.min(MAX_INPUT, value));
+  };
+
   if (history.length < 2) {
     // Not enough data - use simple scaling
     const last = history.at(-1);
     if (!last) return target; // Shouldn't happen, but fallback to target
-    if (last.result === Infinity) return last.input * 2; // No encounter
+    if (last.result === Infinity) return clampResult(last.input * 2); // No encounter
+    if (last.result === 0) return target; // Avoid division by zero
     const ratio = target / last.result;
-    return last.input * ratio;
+    return clampResult(last.input * ratio);
   }
 
   // Use secant method with last two points
   const [p1, p2] = history.slice(-2);
 
   // Handle no-encounter cases
-  if (p2.result === Infinity) return p2.input * 2;
+  if (p2.result === Infinity) return clampResult(p2.input * 2);
   if (p1.result === Infinity) {
     // Interpolate between p2 and infinity
-    return p2.input + (p2.input - p1.input) * 0.5;
+    return clampResult(p2.input + (p2.input - p1.input) * 0.5);
+  }
+
+  // Check for identical results (would cause division by zero)
+  const resultDiff = p2.result - p1.result;
+  if (Math.abs(resultDiff) < 1) {
+    // Results too similar - try adjusting input by 20%
+    // If result < target, increase input; if result > target, decrease input
+    const adjustmentFactor = p2.result < target ? 1.2 : 0.8;
+    return clampResult(p2.input * adjustmentFactor);
   }
 
   // Secant method: find input that would give target result
-  const slope = (p2.input - p1.input) / (p2.result - p1.result);
+  const slope = (p2.input - p1.input) / resultDiff;
   const newInput = p2.input + (target - p2.result) * slope;
 
-  // Clamp to reasonable range (0.1x to 10x of target)
-  return Math.max(target * 0.1, Math.min(target * 10, newInput));
+  return clampResult(newInput);
 }
 
 // Extended result type with iteration info
