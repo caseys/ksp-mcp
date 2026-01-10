@@ -42,9 +42,7 @@ export const transferTool: ToolDefinition = {
       let target = args.target as string | undefined;
       if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'second-closest');
-        if (autoTarget) {
-          target = autoTarget;
-        }
+        target = autoTarget ?? undefined;  // Never pass 'auto' to kOS
       }
 
       // Set target if provided

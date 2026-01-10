@@ -239,9 +239,7 @@ export const courseCorrectTool: ToolDefinition = {
       let target = args.target as string | undefined;
       if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'second-closest');
-        if (autoTarget) {
-          target = autoTarget;
-        }
+        target = autoTarget ?? undefined;  // Never pass 'auto' to kOS
       }
 
       // Try course correction

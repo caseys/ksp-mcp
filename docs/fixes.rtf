@@ -1,0 +1,274 @@
+{\rtf1\ansi\ansicpg1252\cocoartf2867
+\cocoatextscaling0\cocoaplatform0{\fonttbl\f0\fnil\fcharset0 .SFNS-Regular;\f1\fnil\fcharset0 .SFNS-Semibold;\f2\fnil\fcharset0 HelveticaNeue-Bold;
+\f3\fnil\fcharset0 .AppleSystemUIFontMonospaced-Regular;\f4\fswiss\fcharset0 Helvetica;\f5\fnil\fcharset0 .SFNS-RegularItalic;
+}
+{\colortbl;\red255\green255\blue255;\red14\green14\blue14;}
+{\*\expandedcolortbl;;\cssrgb\c6700\c6700\c6700;}
+\margl1440\margr1440\vieww11520\viewh8400\viewkind0
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+
+\f0\fs28 \cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs34 \cf2 Revision notes (proposed)
+\f0\b0\fs28 \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 1) Make pipeline + executor a single explicit state machine
+\f0\b0\fs28 \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Change:
+\f0\b0  Model the overall control flow as a small state machine (turn-level), where \'93executor loop\'94 is just one state that can iterate internally.\
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Suggested states:\
+\pard\tqr\tx500\tx660\li660\fi-660\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	
+\f3 WAIT_USER
+\f0  \uc0\u8594  
+\f3 EXPAND/CLARIFY
+\f0  \uc0\u8594  
+\f3 SELECT_TOOLS
+\f0  \uc0\u8594  
+\f3 EXECUTE
+\f0  (iterative) \uc0\u8594  
+\f3 FINALIZE
+\f0  (history + response) \uc0\u8594  
+\f3 WAIT_USER
+\f0 \
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Keep the semantics described in the README: iterate until the model produces non-tool output.  \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Why:
+\f0\b0  Removes the \'93two loops that can both iterate\'94 mental overhead and prevents double-bounding bugs (e.g., max-iterations in both places, but neither is authoritative).\
+\
+
+\f2\b Done when:
+\f0\b0  There is exactly one authoritative \'93iteration counter\'94 per user turn, and all repeats go through the same guardrail (
+\f3 MAX_ITERATIONS
+\f0 ).  \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f4\fs24 \cf0 \
+\uc0\u11835 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f0\fs28 \cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 1.1) Make the tool planning consensus stage select the next tool only.\
+ \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f3\b0\fs28 \cf2 Instead of picking many tools, tool planning should only be concerned with next tool to use. The output should be only the next tool name, not a JSON array. It should also be made aware of any previous tool runs or if it\'92s the first tool.\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 1.2) Remove the tool order query logic:\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f3\b0\fs28 \cf2 Instead It\'92s not needed now that consensus outputs only 1 tool
+\f1\b\fs30 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f0\b0\fs28 \cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 1.3) Merge minimal summary step function into the reflection step:\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f3\b0\fs28 \cf2 Reflection step should first determine if:\
+ 1. tool results precipitate a planning addition or change\
+ 2. original user query has been fully satisfied or additional tool should be run made.\
+\
+Then if more tool runs are needed, reflection step should rewrite user query to reflect the remaining work needed to satisfy query.\
+\
+If a suitable next step(s) can be determined, continue to tool planning (new loop) with the revised user query.\
+\
+If no suitable next steps can be determined. Ask LLM to summarize the work that has been complete.  Mark the user input as fully satisfied. 
+\f0 \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+\cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 2) Stop mutating a giant context object implicitly across steps
+\f0\b0\fs28 \
+\
+Your 
+\f3 PipelineContext
+\f0  is already doing a lot (expanded request, planned tools, tool results, branch, skip flags, reflection fields, etc.). The biggest maintainability win is tightening the contracts.\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Change:
+\f0\b0  Split context into:\
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	
+\f3 TurnInput
+\f0  (userInput, previousResponse, inputSource)\
+	\'95	
+\f3 TurnWorkingState
+\f0  (expandedRequest, plannedTools, toolResults, reminders, etc.)\
+	\'95	
+\f3 TurnOutput
+\f0  (final response, branch/stop reason, stateSummary)\
+\
+Optionally keep a single object, but enforce 
+\f2\b step-level input/output
+\f0\b0 :\
+	\'95	Each step declares which fields it reads and writes (even just in comments/types).\
+	\'95	Consider returning partial outputs rather than mutating shared fields.\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Why:
+\f0\b0  Makes it obvious what \'93executor\'94 is allowed to update (tool events, retry notes, etc.) vs what\'92s owned by higher-level steps.\
+\
+
+\f2\b Done when:
+\f0\b0  You can answer \'93where does 
+\f3 plannedTools
+\f0  get set, and who is allowed to change it after execution starts?\'94 by reading types/interfaces.\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f4\fs24 \cf0 \
+\uc0\u11835 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f0\fs28 \cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 3) Unify all LLM + tool invocations behind one \'93invoker\'94 interface
+\f0\b0\fs28 \
+\
+You already have retry and consensus helpers exported from the pipeline module. The next step is to route 
+\f5\i all
+\f0\i0  invocations through a single abstraction.\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Change:
+\f0\b0 \
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Create a single 
+\f3 invokeLLM()
+\f0  wrapper that:\
+\pard\tqr\tx500\tx660\li660\fi-660\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Applies retry/backoff (
+\f3 MAX_RETRIES
+\f0 )  \
+	\'95	Emits structured events for logging + history\
+	\'95	Normalizes model outputs (tool_calls parsing, empty responses, etc.)\
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Create a single 
+\f3 invokeTool()
+\f0  wrapper that:\
+\pard\tqr\tx500\tx660\li660\fi-660\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Executes MCP tool calls\
+	\'95	Sanitizes/normalizes tool output (already a key behavior)  \
+	\'95	Extracts prerequisite references and turns them into reminders  \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Why:
+\f0\b0  Makes the executor loop mostly orchestration (\'93given a model message, perform tool calls, then re-query\'94), not a place where logging, retry, parsing, and history all intermix.\
+\
+
+\f2\b Done when:
+\f0\b0  There are no \'93one-off\'94 calls to Ollama or MCP tools that bypass event creation and normalization.\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f4\fs24 \cf0 \
+\uc0\u11835 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f0\fs28 \cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 4) Strengthen history + reminders as first-class data (not string glue)
+\f0\b0\fs28 \
+\
+The README describes history summaries and reminder behavior as major features.    \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Change:
+\f0\b0 \
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Represent history entries as structured records:\
+\pard\tqr\tx500\tx660\li660\fi-660\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	
+\f3 prompt
+\f0 \
+	\'95	
+\f3 toolEvents[]
+\f0  (name, args hash, status, short result)\
+	\'95	
+\f3 finalResponseSnippet
+\f0 \
+	\'95	
+\f3 hiddenCount
+\f0  metadata\
+     \'95 step X of Y\
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Represent reminders as structured items (toolName, reason, sourceToolEventId), then render into the prompt just-in-time.\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Why:
+\f0\b0  Lets you:\
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	Deduplicate repeated reminders\
+	\'95	Tie reminders to a specific failed tool event\
+	\'95	Keep prompt formatting separate from logic\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Done when:
+\f0\b0  Prompt formatting can change without changing executor logic.\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\pardirnatural\partightenfactor0
+
+\f4\fs24 \cf0 \
+\uc0\u11835 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f0\fs28 \cf2 \
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f1\b\fs30 \cf2 5) Observability: add turn/iteration IDs and event ordering guarantees
+\f0\b0\fs28 \
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Change:
+\f0\b0  Every emitted event gets:\
+\pard\tqr\tx100\tx260\li260\fi-260\sl324\slmult1\sb240\partightenfactor0
+\cf2 	\'95	
+\f3 turnId
+\f0 , 
+\f3 iteration
+\f0 , 
+\f3 timestamp
+\f0 \
+	\'95	
+\f3 source: "pipeline" | "executor" | "tool" | "llm"
+\f0 \
+	\'95	Monotonic ordering within a turn\
+\
+\pard\tx560\tx1120\tx1680\tx2240\tx2800\tx3360\tx3920\tx4480\tx5040\tx5600\tx6160\tx6720\sl324\slmult1\pardirnatural\partightenfactor0
+
+\f2\b \cf2 Why:
+\f0\b0  Debugging loops is mostly \'93what happened in what order?\'94 This makes it deterministic.\
+\
+
+\f2\b Done when:
+\f0\b0  A set of turns that satisfy the user query can be reconstructed from events without reading console logs.
+\f4\fs24 \cf0 \
+}

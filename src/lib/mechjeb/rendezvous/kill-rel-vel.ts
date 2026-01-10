@@ -97,9 +97,7 @@ export const matchVelocitiesTool: ToolDefinition = {
       let target = args.target as string | undefined;
       if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'closest-vessel');
-        if (autoTarget) {
-          target = autoTarget;
-        }
+        target = autoTarget ?? undefined;  // Never pass 'auto' to kOS
       }
 
       const result = await orchestrator.killRelVel(args.timeRef as string, {

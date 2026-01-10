@@ -100,9 +100,7 @@ export const interplanetaryTransferTool: ToolDefinition = {
       let target = args.target as string | undefined;
       if (!target || target === 'auto') {
         const autoTarget = await ctx.selectTarget(orchestrator, 'furthest-body');
-        if (autoTarget) {
-          target = autoTarget;
-        }
+        target = autoTarget ?? undefined;  // Never pass 'auto' to kOS
       }
 
       const result = await orchestrator.interplanetaryTransfer(args.waitForPhaseAngle as boolean, {
