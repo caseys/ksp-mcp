@@ -506,6 +506,9 @@ export async function getShipTelemetry(
   const targetParentExpr = '(CHOOSE "Sun" IF TARGET:BODY:NAME = "Sun" ELSE TARGET:BODY:BODY:NAME)';
 
   try {
+    // IMPORTANT: Use nested IF instead of CHOOSE for ADDONS:MJ:TGT access
+    // kOS evaluates CHOOSE branches at parse time, causing "TGT suffix not found" errors
+    // when HASTARGET is false but ORBIT:HASNEXTPATCH is true
     const g3Result = await conn.execute(
       'IF HASTARGET OR ORBIT:HASNEXTPATCH { ' +
         // Encounter info (2 fields)
@@ -516,14 +519,9 @@ export async function getShipTelemetry(
         `LOCAL tgtType IS (CHOOSE TARGET:TYPENAME IF HASTARGET ELSE "NONE"). ` +
         `LOCAL tgtDist IS (CHOOSE ROUND(TARGET:DISTANCE) IF HASTARGET ELSE -1). ` +
         `LOCAL tgtParent IS (CHOOSE (CHOOSE ${targetParentExpr} IF TARGET:TYPENAME = "Body" ELSE "NONE") IF HASTARGET ELSE "NONE"). ` +
-        // MechJeb rendezvous info (7 fields) - only if target set
-        `LOCAL caTime IS (CHOOSE ADDONS:MJ:TGT:CLOSESTAPPROACHTIME IF HASTARGET ELSE -1). ` +
-        `LOCAL caDist IS (CHOOSE ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE IF HASTARGET ELSE -1). ` +
-        `LOCAL anTime IS (CHOOSE ADDONS:MJ:TGT:TIMETOAN IF HASTARGET ELSE -1). ` +
-        `LOCAL dnTime IS (CHOOSE ADDONS:MJ:TGT:TIMETODN IF HASTARGET ELSE -1). ` +
-        `LOCAL anEx IS (CHOOSE ADDONS:MJ:TGT:ANEXISTS IF HASTARGET ELSE FALSE). ` +
-        `LOCAL dnEx IS (CHOOSE ADDONS:MJ:TGT:DNEXISTS IF HASTARGET ELSE FALSE). ` +
-        `LOCAL relI IS (CHOOSE ADDONS:MJ:TGT:RELATIVEINCLINATION IF HASTARGET ELSE 0). ` +
+        // MechJeb rendezvous info (7 fields) - use nested IF to avoid parse-time ADDONS:MJ:TGT access
+        `LOCAL caTime IS -1. LOCAL caDist IS -1. LOCAL anTime IS -1. LOCAL dnTime IS -1. LOCAL anEx IS FALSE. LOCAL dnEx IS FALSE. LOCAL relI IS 0. ` +
+        `IF HASTARGET { SET caTime TO ADDONS:MJ:TGT:CLOSESTAPPROACHTIME. SET caDist TO ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE. SET anTime TO ADDONS:MJ:TGT:TIMETOAN. SET dnTime TO ADDONS:MJ:TGT:TIMETODN. SET anEx TO ADDONS:MJ:TGT:ANEXISTS. SET dnEx TO ADDONS:MJ:TGT:DNEXISTS. SET relI TO ADDONS:MJ:TGT:RELATIVEINCLINATION. } ` +
         `PRINT "G3|" + encBody + "${SEP}" + encPe + "${SEP}" + ` +
         `tgtName + "${SEP}" + tgtType + "${SEP}" + tgtDist + "${SEP}" + tgtParent + "${SEP}" + ` +
         `caTime + "${SEP}" + caDist + "${SEP}" + anTime + "${SEP}" + dnTime + "${SEP}" + anEx + "${SEP}" + dnEx + "${SEP}" + relI. ` +

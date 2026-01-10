@@ -49,6 +49,7 @@ const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 // Alignment configuration
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
 const RCS_TRIGGER_TIME = 3000; // ms - enable RCS if no progress after this
+const HEADING_RESET_TRIGGER_TIME = 5000; // ms - enable RCS if no progress after this
 const MAX_ALIGN_TIME = 300_000; // ms - 5 minutes, keep trying (warn after 30s)
 
 /**
@@ -136,6 +137,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
         warnedSlow = true;
       }
 
+
       // Check for progress (improvement of at least 0.5 degrees)
       if (state.angle < lastAngle - 0.5) {
         noProgressSince = Date.now();
@@ -149,6 +151,9 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
         } catch {
           // Ignore RCS enable errors during blackout
         }
+      } else if (Date.now() - noProgressSince > HEADING_RESET_TRIGGER_TIME) {
+        // No progress for 5s - kick SAS
+        await conn.execute('SAS OFF. UNLOCK STEERING. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
       }
     },
   });
@@ -235,12 +240,12 @@ export async function executeNode(
     return {
       success: false,
       nodesExecuted: 0,
-      error: `Insufficient delta-v: need ${fmtVel(dvRequired)}, have ${fmtVel(dvShipTotal)} (deficit: ${fmtVel(deficit)}). Consider adding more fuel or splitting the maneuver.`,
+      error: `Insufficient delta-V: need ${fmtVel(dvRequired)}, have ${fmtVel(dvShipTotal)} (deficit: ${fmtVel(deficit)}). Consider adding more fuel or splitting the maneuver.`,
       deltaV: { required: dvRequired, available: dvShipTotal }
     };
   }
 
-  log.progress(`${logPrefix} Delta V: ${fmtVel(dvRequired)}, Ship total: ${fmtVel(dvShipTotal)}`);
+  log.progress(`${logPrefix} burn requires ${fmtVel(dvRequired)} of Delta-V.  Ship has: ${fmtVel(dvShipTotal)}`);
 
   // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor)
   // This enables status tracking even if MCP client times out
@@ -256,7 +261,6 @@ export async function executeNode(
   // Get estimated burn duration from MechJeb INFO wrapper
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
-  log.progress(`${logPrefix} Estimated burn: ${formatTime(burnDuration)}, will shift node by ${formatTime(halfBurn)}`);
 
   // Best-effort alignment before warp - MechJeb will handle final alignment
   // We don't fail on alignment issues since MechJeb's executor has its own alignment phase
@@ -612,6 +616,7 @@ export const executeNodeTool: ToolDefinition = {
         async: asyncMode,
         timeoutMs: (args.timeoutSeconds as number) * 1000,
         logger,
+        callerTool: 'execute_node',
       });
 
       if (result.success) {
