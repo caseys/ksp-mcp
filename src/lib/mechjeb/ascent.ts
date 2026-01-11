@@ -184,8 +184,8 @@ export class AscentHandle {
         if (!state?.status) {
           this.logger.progress(`[Ascent] no status`);
         } else if (state.status === 'Off') {
-          this.logger.progress(`[Ascent] special off handler`);
-        } else if (/awaiting/.test(state.status)) {
+          //this.logger.progress(`[Ascent] primary ascent burn complete.`);
+        } else if (/liftoff/i.test(state.status)) {
           this.logger.progress(`[Ascent] special awaiting handler`);
         } else if (state?.status && state.status !== lastStatus) {
           this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);

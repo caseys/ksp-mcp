@@ -165,10 +165,16 @@ async function monitorLanding(
     onPoll: (state) => {
       // Log progress if status changed
       if (state.status.status !== lastStatusText) {
-        const statusText = state.status.status === 'Off' ? 'Contact light, [[pbas=30]]Engine Shutdown, [[pbas=50]]Descent engine command override off.' : state.status.status;
+        const statusText = state.status.status === 'Off' ? 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.' : state.status.status;
+        if (/Coasting toward deceleration/.test(state.status.status)) {
+          conn.execute(`SET WARP TO 1.`);          
+        }
         log.progress(`[Landing] ${statusText}`);
+
         lastStatusText = state.status.status;
       }
+
+
 
       // Log touchdown
       if (state.isLanded) {

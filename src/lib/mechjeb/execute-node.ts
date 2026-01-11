@@ -68,7 +68,11 @@ function formatExecutorState(state: string): string {
 
 /**
  * Align ship to maneuver node using kOS LOCK STEERING before MechJeb takes over.
- * Enables RCS if no angular progress is made after 3 seconds.
+ *
+ * Fallback sequence if no progress:
+ * 1. Start with LOCK STEERING (kOS control)
+ * 2. After 2s no progress: enable RCS
+ * 3. After 5s no progress: switch to SAS MANEUVER mode (if vessel supports it)
  *
  * @param conn kOS connection
  * @param logger Optional MCP logger for progress updates
@@ -92,10 +96,8 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   const rcsState = await conn.execute('PRINT RCS.');
   const wasRcsOn = rcsState.output.includes('True');
 
-  // Start with SAS MANEUVER mode (game's built-in node pointing), then layer kOS steering on top
-  // This combination tends to be more reliable than either alone
-  await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER". WAIT 0.5.');
-  await conn.execute('LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
+  // Start with kOS LOCK STEERING only (no SAS - they conflict)
+  await conn.execute('SAS OFF. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR.');
   log.progress(`${logPrefix} Aligning for maneuver...`);
 
   const alignStartTime = Date.now();
@@ -104,7 +106,8 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   let lastAngle = 180;
   let noProgressSince = Date.now();
   let triedRcs = false;
-  let triedSteeringReset = false;
+  let triedSasManeuver = false;
+  let usingSasMode = false;  // Track if we switched to SAS mode
 
   interface AlignState {
     angle: number;
@@ -150,21 +153,31 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
       if (state.angle < lastAngle - 0.5) {
         noProgressSince = Date.now();
         lastAngle = state.angle;
-        // Reset fallback flags on progress - steering is working
+        // Reset fallback flags on progress - current method is working
         triedRcs = false;
-        triedSteeringReset = false;
-      } else if (timeSinceProgress > STEERING_RESET_TRIGGER_TIME && !triedSteeringReset) {
-        // No progress for 5s - complete steering reset
-        // Unlock everything, re-enable SAS MANEUVER, then re-lock kOS steering
+        triedSasManeuver = false;
+      } else if (timeSinceProgress > STEERING_RESET_TRIGGER_TIME && !triedSasManeuver) {
+        // No progress for 5s - try SAS MANEUVER mode instead
+        // Some vessels may not have this capability, so handle gracefully
         try {
-          log.progress(`${logPrefix} Steering stuck, resetting... (${fmtNum(state.angle)}°)`);
-          await conn.execute('UNLOCK STEERING. SAS OFF. WAIT 0.5.');
-          await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER". WAIT 0.5.');
-          await conn.execute('LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
-          triedSteeringReset = true;
+          log.progress(`${logPrefix} LOCK STEERING stuck, trying SAS MANEUVER... (${fmtNum(state.angle)}°)`);
+          await conn.execute('UNLOCK STEERING. WAIT 0.1.');
+          // Try to enable SAS MANEUVER - may fail if vessel doesn't support it
+          const sasResult = await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER". PRINT SASMODE.', 3000);
+          if (sasResult.output.includes('MANEUVER')) {
+            log.progress(`${logPrefix} Switched to SAS MANEUVER mode`);
+            usingSasMode = true;
+          } else {
+            // SAS MANEUVER not available - fall back to LOCK STEERING
+            log.progress(`${logPrefix} SAS MANEUVER not available, continuing with LOCK STEERING`);
+            await conn.execute('SAS OFF. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR.');
+          }
+          triedSasManeuver = true;
           noProgressSince = Date.now();
         } catch {
-          // Ignore errors during blackout
+          // Error switching modes - continue with current method
+          log.progress(`${logPrefix} Mode switch failed, continuing...`);
+          triedSasManeuver = true;
         }
       } else if (timeSinceProgress > RCS_TRIGGER_TIME && !triedRcs) {
         // No progress for 2s - enable RCS to help rotation
@@ -182,7 +195,11 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
 
   // Always unlock steering and disable SAS when done (MechJeb will take over)
   try {
-    await conn.execute('UNLOCK STEERING. SAS OFF.');
+    if (usingSasMode) {
+      await conn.execute('SAS OFF.');
+    } else {
+      await conn.execute('UNLOCK STEERING. SAS OFF.');
+    }
   } catch {
     // Ignore cleanup errors
   }
