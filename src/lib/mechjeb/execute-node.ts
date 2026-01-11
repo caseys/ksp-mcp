@@ -256,6 +256,7 @@ export async function executeNode(
   const dvRequired = await queryNumber(conn, 'NEXTNODE:DELTAV:MAG');
   const dvShipTotal = await queryNumber(conn, 'SHIP:DELTAV:CURRENT');
   const dvCurrentStage = await queryNumber(conn, 'STAGE:DELTAV:CURRENT');
+  const initialNodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
 
   if (dvShipTotal < dvRequired) {
     const deficit = dvRequired - dvShipTotal;
@@ -267,7 +268,7 @@ export async function executeNode(
     };
   }
 
-  log.progress(`${logPrefix} burn requires ${fmtVel(dvRequired)} of Delta-V.  Ship has: ${fmtVel(dvShipTotal)}`);
+  log.progress(`${logPrefix} ${fmtVel(dvRequired)}, T-${formatTime(initialNodeEta)}`);
 
   // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor)
   // This enables status tracking even if MCP client times out
@@ -278,7 +279,9 @@ export async function executeNode(
   if (needsStaging) {
     log.progress(`${logPrefix} Current stage: ${fmtVel(dvCurrentStage)}, (staging will be automated)`);
     await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
-  } 
+  } else {
+    log.progress(`${logPrefix} staging not required`);
+  }
 
   // Get estimated burn duration from MechJeb INFO wrapper
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
@@ -473,6 +476,10 @@ export async function executeNode(
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
         }
+        // Enable SAS stability mode to stop any spin from MechJeb releasing control
+        try {
+          await conn.execute('SAS ON. WAIT 0.1. SET SASMODE TO "STABILITY".');
+        } catch { /* ignore stabilization errors */ }
         // Clear operation state on success (safety monitor may have already cleared)
         try { await clearKosOperation(conn); } catch { /* ignore */ }
         return {

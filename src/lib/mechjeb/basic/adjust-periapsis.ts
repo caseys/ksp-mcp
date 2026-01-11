@@ -89,8 +89,9 @@ export const adjustPeriapsisTool: ToolDefinition = {
       });
 
       if (result.success) {
-        const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = result.executed
+          ? 'Burn complete'
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
           text += await formatResultingOrbit(conn);
         }

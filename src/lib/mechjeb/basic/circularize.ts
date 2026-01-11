@@ -210,8 +210,9 @@ export const circularizeTool: ToolDefinition = {
       });
 
       if (result.success) {
-        const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = result.executed
+          ? 'Burn complete'
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
 
         // Show resulting orbit after execution
         if (result.executed) {

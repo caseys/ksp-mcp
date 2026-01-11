@@ -390,8 +390,9 @@ export const hohmannTransferTool: ToolDefinition = {
 
       if (result.success) {
         const nodeCount = result.nodesCreated ?? 1;
-        const execInfo = result.executed ? ' (executed)' : '';
-        let text = `${nodeCount} node(s): ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = result.executed
+          ? 'Burn complete'
+          : `${nodeCount} node(s): ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
 
         // Query current encounter info for guidance
         const encounterInfo = await queryTargetEncounterInfo(conn);

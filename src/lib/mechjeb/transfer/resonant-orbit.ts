@@ -90,8 +90,9 @@ export const resonantOrbitTool: ToolDefinition = {
       });
 
       if (result.success) {
-        const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = result.executed
+          ? 'Burn complete'
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
           const orbitInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:PERIOD, 1) + "|" + ROUND(APOAPSIS/1000, 1).', 2000);
           const match = orbitInfo.output.match(/([\d.]+)\|([\d.]+)/);

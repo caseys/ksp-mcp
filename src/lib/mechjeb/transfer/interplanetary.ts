@@ -111,8 +111,9 @@ export const interplanetaryTransferTool: ToolDefinition = {
       });
 
       if (result.success) {
-        const execInfo = result.executed ? ' (executed)' : '';
-        let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+        let text = result.executed
+          ? 'Burn complete'
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
 
         // Include warning if present (crash trajectory, close approach, etc.)
         if (result.warning) {

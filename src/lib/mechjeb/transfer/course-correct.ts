@@ -302,12 +302,13 @@ export const courseCorrectTool: ToolDefinition = {
         return ctx.errorResponse('course_correct', result.error ?? 'Failed');
       }
 
-      const execInfo = result.executed ? ' (executed)' : '';
       const targetDistance = args.targetDistance as number;
       const attempts = (result as { attempts?: number }).attempts ?? 1;
       const finalPe = (result as { finalPeriapsis?: number }).finalPeriapsis ?? 0;
 
-      let text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
+      let text = result.executed
+        ? 'Burn complete'
+        : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
       text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(finalPe / 1000).toFixed(0)}km (${attempts} attempt${attempts !== 1 ? 's' : ''})`;
 
       // Show trajectory status - critical for LLM to know state
