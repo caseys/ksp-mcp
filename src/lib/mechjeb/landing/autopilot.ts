@@ -6,7 +6,7 @@ import { z } from 'zod';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { nullLogger, parseTarget } from '../../tool-types.js';
 import { setKosOperation, clearKosOperation } from '../../../utils/kos-operation-state.js';
-import { clearBroadcastLogger } from '../../../utils/broadcast-logger.js';
+import { clearBroadcastLogger } from '../../../utils/mcp-logger.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { config as appConfig } from '../../../config/index.js';
@@ -14,18 +14,16 @@ import {
   getLandingStatus,
   setLandingConfig,
   setLandingPositionTarget,
-  setLandingPositionTargetKSC,
   hasLandingPositionTarget,
   startTargetedLanding,
   startUntargetedLanding,
-  stopLanding,
   type LandingStatus,
   type LandingConfig,
 } from './shared.js';
 import { findLandingSite } from './find-site.js';
 import { getVesselStateInfo } from '../../kos/vessel/validate.js';
 import { circularize } from '../basic/circularize.js';
-import { fmtVel } from '../../utils/format.js';
+import { fmtVel, fmtDist, formatTime } from '../../utils/format.js';
 
 // ============================================================================
 // Target Validation
@@ -165,11 +163,10 @@ async function monitorLanding(
     connection: conn,
 
     onPoll: (state) => {
-      // Log progress if status changed (include speed for context)
+      // Log progress if status changed
       if (state.status.status !== lastStatusText) {
-        const speedPart = state.status.speed !== undefined ? ` at ${fmtVel(Math.abs(state.status.speed))}` : '';
-        const statusText = state.status.status === 'Off' ? 'Contact light, Descent engine command override off.' : state.status.status;
-        log.progress(`[Landing] ${statusText}${speedPart}`);
+        const statusText = state.status.status === 'Off' ? 'Contact light, [[pbas=30]]Engine Shutdown, [[pbas=50]]Descent engine command override off.' : state.status.status;
+        log.progress(`[Landing] ${statusText}`);
         lastStatusText = state.status.status;
       }
 
@@ -210,12 +207,7 @@ export const landTool: ToolDefinition = {
   name: 'land',
   description: 'Land on surface from orbit.',
   inputSchema: {
-    action: z.enum(['start', 'abort', 'status'])
-      .optional()
-      .default('start')
-      .describe('start=begin landing (default), abort=cancel, status=check progress'),
-
-    // Target (NEW - first optional param for targeting)
+    // Target
     target: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
       .optional()
       .default('auto')
@@ -232,9 +224,6 @@ export const landTool: ToolDefinition = {
       .max(180)
       .optional()
       .describe('Override: target longitude (-180 to 180). Ignored if target specified.'),
-    named_preset: z.enum(['KSC'])
-      .optional()
-      .describe('ADVANCED: Built-in waypoint. Ignored if target specified.'),
 
     // Config (optional - applied before start)
     touchdownSpeed: z.number()
@@ -271,30 +260,11 @@ export const landTool: ToolDefinition = {
   tier: 1,
   handler: async (args, ctx, extra) => {
     const conn = await ctx.ensureConnected();
-    const action = args.action as 'start' | 'abort' | 'status';
     // Resolve 'auto' to client-appropriate default
     const waitArg = args.wait as boolean | 'auto';
     const wait = waitArg === 'auto' ? ctx.supportsNotifications(extra) : waitArg;
 
-    // Handle status action first (simplest case) - no operation guard needed
-    if (action === 'status') {
-      const status = await getLandingStatus(conn);
-      return ctx.successResponse('land', status.formatted);
-    }
-
-    // Handle abort action - clears active operation
-    if (action === 'abort') {
-      await clearKosOperation(conn);
-      const result = await stopLanding(conn);
-      if (result.success) {
-        return ctx.successResponse('land', 'Landing aborted. Vessel control returned to manual.');
-      } else {
-        return ctx.errorResponse('land', result.error ?? 'Failed to abort landing');
-      }
-    }
-
-    // Handle start action
-    const logger = ctx.createBroadcastableLogger(extra);
+    const logger = ctx.createLogger(extra);
 
     // Validate vessel state BEFORE setting operation state
     // Step 0: Validate vessel state - must be in orbit or flying
@@ -332,7 +302,7 @@ export const landTool: ToolDefinition = {
       if (isHyperbolic) {
         if (periapsis >= SAFE_PERIAPSIS_M) {
           // Hyperbolic with safe periapsis - circularize first
-          logger.progress(`[Landing] Hyperbolic approach detected (ecc=${eccentricity.toFixed(2)}, Pe=${(periapsis/1000).toFixed(1)}km)`);
+          logger.progress(`[Landing] Hyperbolic approach detected (ecc=${eccentricity.toFixed(2)}, Pe=${fmtDist(periapsis)})`);
           logger.progress(`[Landing] Planning circularization at periapsis...`);
 
           const circResult = await circularize(conn, 'PERIAPSIS');
@@ -356,25 +326,29 @@ export const landTool: ToolDefinition = {
         } else {
           // Hyperbolic with low periapsis - dangerous impact approach
           logger.progress(`[Landing] ⚠️ DANGEROUS: Hyperbolic impact trajectory!`);
-          logger.progress(`[Landing] Periapsis ${(periapsis/1000).toFixed(1)}km is too low to circularize safely.`);
+          logger.progress(`[Landing] Periapsis ${fmtDist(periapsis)} is too low to circularize safely.`);
           logger.progress(`[Landing] Proceeding with direct landing (high risk)...`);
           // Continue with landing - MechJeb will handle the descent
         }
       } else if (isImpactTrajectory) {
         // Suborbital/impact - warn but proceed
-        logger.progress(`[Landing] ⚠️ WARNING: Impact trajectory detected (Pe=${(periapsis/1000).toFixed(1)}km)`);
+        logger.progress(`[Landing] ⚠️ WARNING: Impact trajectory detected (Pe=${fmtDist(periapsis)})`);
         logger.progress(`[Landing] Landing without circularization - this is risky!`);
         // Continue with landing
       } else {
         // Stable orbit - normal landing
-        logger.progress(`[Landing] Stable orbit confirmed (Pe=${(periapsis/1000).toFixed(1)}km, ecc=${eccentricity.toFixed(3)})`);
+        logger.progress(`[Landing] Stable orbit confirmed (Pe=${fmtDist(periapsis)}, ecc=${eccentricity.toFixed(3)})`);
       }
 
       // Step 1: Resolve landing target
       const targetArg = args.target as string | 'auto';
       const latitude = args.latitude as number | undefined;
       const longitude = args.longitude as number | undefined;
-      const namedPreset = args.named_preset as 'KSC' | undefined;
+
+      // Named presets that can be used as target values
+      const PRESETS: Record<string, { lat: number; lng: number }> = {
+        'KSC': { lat: -0.0972, lng: -74.5577 },
+      };
 
       // Track resolved coordinates for deorbit burn logic
       let targetLat: number | undefined;
@@ -421,16 +395,21 @@ export const landTool: ToolDefinition = {
           const statusMatch = vesselResult.output.match(/NOTLANDED\|(\w+)/);
           return ctx.errorResponse('land', `Vessel "${effectiveTarget}" is not landed (status: ${statusMatch?.[1] ?? 'unknown'})`);
         } else {
-          return ctx.errorResponse('land', `Vessel "${effectiveTarget}" not found`);
+          // Vessel not found - check if target matches a preset name
+          const presetKey = Object.keys(PRESETS).find(k => k.toLowerCase() === effectiveTarget!.toLowerCase());
+          if (presetKey) {
+            const preset = PRESETS[presetKey];
+            logger.progress(`[Landing] Setting target: ${presetKey}`);
+            const targetResult = await setLandingPositionTarget(conn, preset.lat, preset.lng);
+            if (!targetResult.success) {
+              return ctx.errorResponse('land', targetResult.error ?? `Failed to set ${presetKey} target`);
+            }
+            targetLat = preset.lat;
+            targetLng = preset.lng;
+          } else {
+            return ctx.errorResponse('land', `Vessel "${effectiveTarget}" not found`);
+          }
         }
-      } else if (namedPreset === 'KSC') {
-        logger.progress('[Landing] Setting target: KSC');
-        const targetResult = await setLandingPositionTargetKSC(conn);
-        if (!targetResult.success) {
-          return ctx.errorResponse('land', targetResult.error ?? 'Failed to set KSC target');
-        }
-        targetLat = -0.0972;
-        targetLng = -74.5577;
       } else if (latitude !== undefined && longitude !== undefined) {
         logger.progress(`[Landing] Setting target: ${latitude.toFixed(2)}°, ${longitude.toFixed(2)}°`);
         const targetResult = await setLandingPositionTarget(conn, latitude, longitude);
@@ -512,10 +491,10 @@ export const landTool: ToolDefinition = {
 
         if (overflyT > quarterOrbit) {
           // Target is more than 1/4 orbit away - let MechJeb handle it
-          logger.progress(`[Landing] Target ${Math.round(overflyT / 60)}m away (>${Math.round(quarterOrbit / 60)}m), MechJeb will plan approach`);
+          logger.progress(`[Landing] Target ${formatTime(overflyT)} away (>${formatTime(quarterOrbit)}), MechJeb will plan approach`);
           skipDeorbitBurn = true;
         } else {
-          logger.progress(`[Landing] Target overfly in ${Math.round(overflyT / 60)}m, burn in ${Math.round(burnT / 60)}m`);
+          logger.progress(`[Landing] Target overfly in ${formatTime(overflyT)}, burn in ${formatTime(burnT)}`);
         }
 
         if (!skipDeorbitBurn) {
@@ -550,7 +529,12 @@ export const landTool: ToolDefinition = {
             PRINT "Deorbit complete. PE=" + ROUND(PERIAPSIS).
           `.trim().replaceAll('\n', ' ');
           const burnResult = await conn.execute(burnScript, 60_000);
-          logger.progress(`[Landing] ${burnResult.output.trim()}`);
+          // Extract just the "Deorbit complete" message, format periapsis
+          const peMatch = burnResult.output.match(/Deorbit complete\. PE=([-\d]+)/);
+          if (peMatch) {
+            const pe = parseInt(peMatch[1]);
+            logger.progress(`[Landing] Deorbit complete, Pe=${fmtDist(pe)}`);
+          }
         }
       }
 
@@ -617,10 +601,7 @@ export const landTool: ToolDefinition = {
               const bodyName = siteMatch[1].trim();
               const altitude = Number.parseFloat(siteMatch[2]);
               const biome = siteMatch[3].trim();
-              const altStr = Math.abs(altitude) > 1000
-                ? `${(altitude / 1000).toFixed(1)}km`
-                : `${Math.round(altitude)}m`;
-              landingDetails = `\nLocation: ${bodyName}, ${biome} at ${altStr} elevation`;
+              landingDetails = `\nLocation: ${bodyName}, ${biome} at ${fmtDist(altitude)} elevation`;
             }
           } catch {
             // Ignore errors querying site details
@@ -659,4 +640,4 @@ export const landTool: ToolDefinition = {
 // Re-export for library use
 
 
-export {getLandingStatus, startTargetedLanding, startUntargetedLanding, stopLanding, type LandingStatus} from './shared.js';
+export {getLandingStatus, startTargetedLanding, startUntargetedLanding, type LandingStatus} from './shared.js';

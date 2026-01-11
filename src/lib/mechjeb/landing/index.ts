@@ -11,7 +11,7 @@
 export * from './shared.js';
 
 // Tool definitions
-export { landTool, getLandingStatus, startTargetedLanding, startUntargetedLanding, stopLanding } from './autopilot.js';
+export { landTool, getLandingStatus, startTargetedLanding, startUntargetedLanding } from './autopilot.js';
 export { configureLandingTool, getLandingConfig, setLandingConfig } from './config.js';
 export { getLandingPredictionTool, getLandingPrediction } from './prediction.js';
 export { findLandingSiteTool, findLandingSite } from './find-site.js';

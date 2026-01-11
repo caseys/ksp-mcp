@@ -27,6 +27,8 @@ export interface TargetInfo {
   hasEncounter: boolean;
   /** Name of encounter body if different from target */
   encounterBody?: string;
+  /** Body radius in meters (only for bodies, not vessels) */
+  radius?: number;
 }
 
 /**
@@ -70,23 +72,25 @@ export async function getTargetValidationInfo(conn: KosConnection): Promise<Targ
   }
 
   // Step 2: Get target info using SET-then-PRINT (more reliable than inline expressions)
+  // For bodies, also get RADIUS (needed for altitude calculations in course_correct)
   const infoCmd = [
     'SET _tgtType TO TARGET:TYPENAME.',
     'SET _tgtName TO TARGET:NAME.',
     'SET _shipSOI TO SHIP:BODY:NAME.',
     'SET _tgtParent TO TARGET:BODY:NAME.',
     'SET _inSOI TO (_tgtParent = _shipSOI).',
-    'PRINT "INFO|" + _tgtType + "|" + _tgtName + "|" + _tgtParent + "|" + _inSOI.',
+    'IF _tgtType = "Body" { SET _tgtRad TO ROUND(TARGET:RADIUS). } ELSE { SET _tgtRad TO 0. }',
+    'PRINT "INFO|" + _tgtType + "|" + _tgtName + "|" + _tgtParent + "|" + _inSOI + "|" + _tgtRad.',
   ].join(' ');
 
   const infoResult = await conn.execute(infoCmd, 3000);
-  const infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)/);
+  const infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/);
 
   if (!infoMatch) {
     throw new Error(`[validateTarget] Failed to parse target info. Output: "${infoResult.output}"`);
   }
 
-  const [, typename, name, parentBody, inSOIStr] = infoMatch;
+  const [, typename, name, parentBody, inSOIStr, radiusStr] = infoMatch;
   const isInShipSOI = inSOIStr.toLowerCase() === 'true';
 
   // Classify target
@@ -106,6 +110,7 @@ export async function getTargetValidationInfo(conn: KosConnection): Promise<Targ
   );
   const encMatch = encResult.output.match(/ENC\|(\w+)/);
 
+  const radius = parseInt(radiusStr);
   return {
     name: name.trim(),
     class: targetClass,
@@ -113,6 +118,7 @@ export async function getTargetValidationInfo(conn: KosConnection): Promise<Targ
     isInShipSOI,
     hasEncounter: encMatch !== null,
     encounterBody: encMatch ? encMatch[1] : undefined,
+    radius: radius > 0 ? radius : undefined,
   };
 }
 

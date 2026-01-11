@@ -28,6 +28,7 @@ export interface LandingStatus {
   predictedOutcome?: string; // LANDED, AEROBRAKED, NO_REENTRY, etc.
   timeToLanding?: number;   // seconds
   speed?: number;           // Vertical speed in m/s (negative = descending)
+  altitude?: number;        // Radar altitude (above ground) in meters
   formatted: string;
 }
 
@@ -78,6 +79,28 @@ void (undefined as unknown as PositionTarget);
 // ============================================================================
 
 /**
+ * Clean up MechJeb status strings:
+ * - Add newline before "Course correction" (MechJeb concatenates without separator)
+ * - Format meter values with fmtDist (e.g., "196m" → "196m", "15000m" → "15km")
+ * - Handles integers and decimals, but NOT m/s (velocity)
+ */
+function formatMechJebStatus(status: string): string {
+  let result = status;
+
+  // Add newline before "Course correction" (MechJeb concatenates status lines)
+  result = result.replaceAll(/(\S)(Course correction)/g, '$1\n$2');
+
+  // Format meter values: patterns like "196m" or "15000.5m" but NOT "15m/s"
+  // Use negative lookahead to exclude m/s (velocity)
+  result = result.replaceAll(/(\d+(?:\.\d+)?)m(?!\/)/g, (match, meters) => {
+    const m = parseFloat(meters);
+    return fmtDist(m);
+  });
+
+  return result;
+}
+
+/**
  * Get current landing autopilot status
  */
 export async function getLandingStatus(conn: KosConnection): Promise<LandingStatus> {
@@ -87,12 +110,12 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
     'PRINT "LSTAT|" + LAND:ENABLED + "|" + LAND:STATUS + "|" + LAND:LANDATTARGET + "|" + ' +
     'LAND:PREDICTIONREADY + "|" + LAND:PREDICTEDLAT + "|" + LAND:PREDICTEDLNG + "|" + ' +
     'LAND:PREDICTEDALT + "|" + LAND:PREDICTEDOUTCOME + "|" + LAND:PREDICTEDUT + "|" + TIME:SECONDS + "|" + ' +
-    'ROUND(SHIP:VERTICALSPEED).',
+    'ROUND(SHIP:VERTICALSPEED) + "|" + ROUND(ALT:RADAR).',
     5000
   );
 
   const match = result.output.match(
-    /LSTAT\|(True|False)\|([^|]*)\|(True|False)\|(True|False)\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|(\w+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d]+)/i
+    /LSTAT\|(True|False)\|([^|]*)\|(True|False)\|(True|False)\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|(\w+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d]+)\|([-\d]+)/i
   );
 
   if (!match) {
@@ -102,7 +125,7 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
   }
 
   const enabled = match[1].toLowerCase() === 'true';
-  const status = match[2].trim() || 'Idle';
+  const status = formatMechJebStatus(match[2].trim() || 'Idle');
   const landingAtTarget = match[3].toLowerCase() === 'true';
   const predictionReady = match[4].toLowerCase() === 'true';
   const predictedLat = Number.parseFloat(match[5]);
@@ -112,6 +135,7 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
   const predictedUT = Number.parseFloat(match[9]);
   const currentUT = Number.parseFloat(match[10]);
   const speed = Number.parseInt(match[11]);
+  const altitude = Number.parseInt(match[12]);
   const timeToLanding = predictionReady ? Math.max(0, predictedUT - currentUT) : undefined;
 
   // Build formatted output
@@ -142,6 +166,7 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
     predictedOutcome: predictionReady ? predictedOutcome : undefined,
     timeToLanding,
     speed,
+    altitude,
     formatted,
   };
 }
@@ -324,23 +349,6 @@ export async function startUntargetedLanding(
   return { success: true };
 }
 
-/**
- * Stop/abort landing
- */
-export async function stopLanding(
-  conn: KosConnection
-): Promise<{ success: boolean; error?: string }> {
-  const result = await conn.execute(
-    'SET LAND TO ADDONS:MJ:LANDING. PRINT LAND:STOPLANDING().',
-    5000
-  );
-
-  const success = result.output.includes('True');
-  return {
-    success,
-    error: success ? undefined : 'Failed to stop landing',
-  };
-}
 
 // ============================================================================
 // Landing Prediction

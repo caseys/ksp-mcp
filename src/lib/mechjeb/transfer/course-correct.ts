@@ -140,12 +140,22 @@ export async function courseCorrection(
     };
   }
 
+  // For bodies, MechJeb expects distance from body center, but user provides altitude above surface
+  // Convert altitude → distance by adding body radius
+  const bodyRadius = targetInfo.radius ?? 0;
+  const isBody = targetInfo.class !== 'vessel';
+  const targetDistanceFromCenter = isBody ? targetPeriapsis + bodyRadius : targetPeriapsis;
+
   // Track attempts for interpolation: [inputValue, resultingPeriapsis]
   const history: Array<{ input: number; result: number }> = [];
-  let currentInput = targetPeriapsis;
+  let currentInput = targetDistanceFromCenter;
   let bestResult: { input: number; result: number; error: number } | null = null;
 
-  logger?.info(`[CourseCorrect] Target: ${(targetPeriapsis / 1000).toFixed(1)}km, tolerance: ${TOLERANCE * 100}%`);
+  if (isBody && bodyRadius > 0) {
+    logger?.info(`[CourseCorrect] Target: ${(targetPeriapsis / 1000).toFixed(1)}km altitude (${targetInfo.name} radius: ${(bodyRadius / 1000).toFixed(0)}km)`);
+  } else {
+    logger?.info(`[CourseCorrect] Target: ${(targetPeriapsis / 1000).toFixed(1)}km, tolerance: ${TOLERANCE * 100}%`);
+  }
 
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     // Clear any existing node
@@ -160,7 +170,7 @@ export async function courseCorrection(
       continue;
     }
 
-    // Check resulting periapsis
+    // Check resulting periapsis (kOS returns altitude above surface)
     const nodeResult = await queryNodePeriapsis(conn);
     if (!nodeResult.hasEncounter) {
       // No encounter - need higher input to get closer
@@ -170,39 +180,42 @@ export async function courseCorrection(
       continue;
     }
 
-    const resultPe = nodeResult.periapsis;
-    const error = (resultPe - targetPeriapsis) / targetPeriapsis;
+    // kOS returns altitude; convert to distance-from-center for consistent iteration
+    const resultAltitude = nodeResult.periapsis;
+    const resultDistFromCenter = isBody ? resultAltitude + bodyRadius : resultAltitude;
+    const error = (resultDistFromCenter - targetDistanceFromCenter) / targetDistanceFromCenter;
 
-    logger?.info(`[CourseCorrect] Attempt ${attempt}: input=${(currentInput / 1000).toFixed(1)}km → result=${(resultPe / 1000).toFixed(1)}km (error=${(error * 100).toFixed(1)}%)`);
+    // Log in altitude terms (what user understands)
+    logger?.info(`[CourseCorrect] Attempt ${attempt}: input=${((currentInput - bodyRadius) / 1000).toFixed(1)}km → result=${(resultAltitude / 1000).toFixed(1)}km (error=${(error * 100).toFixed(1)}%)`);
 
-    history.push({ input: currentInput, result: resultPe });
+    history.push({ input: currentInput, result: resultDistFromCenter });
 
-    // Track best result
+    // Track best result (store altitude for display)
     if (!bestResult || Math.abs(error) < Math.abs(bestResult.error)) {
-      bestResult = { input: currentInput, result: resultPe, error };
+      bestResult = { input: currentInput, result: resultAltitude, error };
     }
 
     // Check if within tolerance
     if (Math.abs(error) <= TOLERANCE) {
       const nodeInfo = await queryNodeInfo(conn);
-      logger?.info(`[CourseCorrect] Success! Achieved ${(resultPe / 1000).toFixed(1)}km in ${attempt} attempt(s)`);
+      logger?.info(`[CourseCorrect] Success! Achieved ${(resultAltitude / 1000).toFixed(1)}km altitude in ${attempt} attempt(s)`);
       return {
         success: true,
         deltaV: nodeInfo.deltaV,
         timeToNode: nodeInfo.timeToNode,
         attempts: attempt,
-        finalPeriapsis: resultPe,
+        finalPeriapsis: resultAltitude,  // Return altitude, not distance-from-center
       };
     }
 
-    // Adjust input using interpolation/secant method
-    currentInput = calculateNextInput(targetPeriapsis, history);
+    // Adjust input using interpolation/secant method (in distance-from-center space)
+    currentInput = calculateNextInput(targetDistanceFromCenter, history);
   }
 
   // All attempts exhausted - use best result if reasonable
   if (bestResult && Math.abs(bestResult.error) < 0.5) {
     // Within 50% - acceptable with warning
-    logger?.warn(`[CourseCorrect] Max attempts reached. Using best result: ${(bestResult.result / 1000).toFixed(1)}km (${(bestResult.error * 100).toFixed(1)}% error)`);
+    logger?.warn(`[CourseCorrect] Max attempts reached. Using best result: ${(bestResult.result / 1000).toFixed(1)}km altitude (${(bestResult.error * 100).toFixed(1)}% error)`);
 
     // Re-create with best input
     await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
@@ -213,13 +226,13 @@ export async function courseCorrection(
       deltaV: nodeInfo.deltaV,
       timeToNode: nodeInfo.timeToNode,
       attempts: MAX_ATTEMPTS,
-      finalPeriapsis: bestResult.result,
+      finalPeriapsis: bestResult.result,  // Already storing altitude
     };
   }
 
   return {
     success: false,
-    error: `Could not achieve target periapsis after ${MAX_ATTEMPTS} attempts. Best result: ${bestResult ? (bestResult.result / 1000).toFixed(1) + 'km' : 'none'}`,
+    error: `Could not achieve target periapsis after ${MAX_ATTEMPTS} attempts. Best result: ${bestResult ? (bestResult.result / 1000).toFixed(1) + 'km altitude' : 'none'}`,
     attempts: MAX_ATTEMPTS,
     finalPeriapsis: bestResult?.result ?? 0,
   };
