@@ -16,7 +16,7 @@ import { delay } from '../utils/progress.js';
 import { formatOrbit, formatTime, fmtNum } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
-import { clearBroadcastLogger } from '../../utils/broadcast-logger.js';
+import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { config } from '../../config/index.js';
 import { ManeuverOrchestrator } from './orchestrator.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
@@ -181,7 +181,7 @@ export class AscentHandle {
       onPoll: async (state) => {
         // Log status changes (skip 'Off' - completion is logged after potential auto-fix)
         const now = Date.now();
-        if (state.status && state.status !== lastStatus && state.status !== 'Off') {
+        if (state?.status && state.status !== lastStatus && state.status !== 'Off') {
           this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
           lastStatus = state.status;
           lastLogTime = now;
@@ -564,7 +564,7 @@ export const launchAscentTool: ToolDefinition = {
   tier: 1,
   handler: async (args, ctx, extra) => {
     const conn = await ctx.ensureConnected();
-    const logger = ctx.createBroadcastableLogger(extra);
+    const logger = ctx.createLogger(extra);
 
     // Validate vessel state: must be landed or prelaunch
     const validation = await validateVesselState(conn, LAUNCH_REQUIREMENTS, 'launch');

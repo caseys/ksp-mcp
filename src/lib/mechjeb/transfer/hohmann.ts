@@ -3,7 +3,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, queryTargetEncounterInfo, sanitizeError, type ManeuverResult } from '../shared.js';
 import { clearNodes } from '../../kos/nodes.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
@@ -174,6 +174,35 @@ export async function hohmannTransfer(
   }
 
   const targetName = validation.targetInfo?.name ?? '';
+
+  // Check if we already have an encounter with the target
+  if (validation.targetInfo?.hasEncounter &&
+      validation.targetInfo?.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
+
+    // Reuse existing helper to get encounter details
+    const encounterInfo = await queryTargetEncounterInfo(conn);
+    if (encounterInfo?.targetType === 'body') {
+      const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+      const encPeKm = (peAlt / 1000).toFixed(0);
+
+      // Same advice pattern as post-transfer logic
+      if (peAlt < 10_000) {
+        return {
+          success: false,
+          error: `Already have encounter with ${targetName} at ${encPeKm}km - UNSAFE trajectory!\n` +
+                 `REQUIRED: Use course_correct to fix trajectory before doing anything else.`
+        };
+      } else {
+        return {
+          success: false,
+          error: `Already have encounter with ${targetName} at ${encPeKm}km (safe).\n` +
+                 `Next: warp to ${targetName} SOI, then circularize\n` +
+                 `Use course_correct if you need to adjust approach.`
+        };
+      }
+    }
+  }
+
   const firstMode = rendezvous ? 'rendezvous' : 'transfer';
   const secondMode = rendezvous ? 'transfer' : 'rendezvous';
 
@@ -365,7 +394,6 @@ export const hohmannTransferTool: ToolDefinition = {
         let text = `${nodeCount} node(s): ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}${execInfo}`;
 
         // Query current encounter info for guidance
-        const { queryTargetEncounterInfo } = await import('../shared.js');
         const encounterInfo = await queryTargetEncounterInfo(conn);
 
         if (encounterInfo && encounterInfo.targetType === 'body') {

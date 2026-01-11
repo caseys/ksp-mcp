@@ -1,9 +1,9 @@
 /**
- * Broadcast Logger
+ * MCP Logger
  *
- * Allows multiple MCP clients to subscribe to notifications from a running operation.
- * The original client's logger is wrapped in a broadcast logger that can have
- * additional subscribers added later via the continue_operation tool.
+ * Provides logging infrastructure for MCP tools. Uses a broadcast logger that
+ * allows multiple MCP clients to subscribe to notifications from running operations
+ * via the continue_operation tool.
  */
 
 import type { McpLogger } from '../lib/tool-types.js';
@@ -145,7 +145,7 @@ let activeBroadcastLogger: BroadcastLogger | null = null;
  * Create a new broadcast logger and set it as the active one.
  * Returns the logger instance.
  */
-export function createBroadcastLogger(): BroadcastLogger {
+function createBroadcastLogger(): BroadcastLogger {
   activeBroadcastLogger = new BroadcastLogger();
   return activeBroadcastLogger;
 }
@@ -178,4 +178,27 @@ export function addBroadcastSubscriber(
     return null;
   }
   return activeBroadcastLogger.addSubscriber(extra);
+}
+
+/**
+ * Create a structured logger from the MCP request handler extra context.
+ * Uses a broadcast logger that allows multiple MCP clients to subscribe
+ * to notifications from long-running operations via continue_operation.
+ *
+ * @param extra The RequestHandlerExtra from the tool callback
+ * @returns An McpLogger that broadcasts to all subscribers
+ */
+export function createLogger(
+  extra: RequestHandlerExtra<ServerRequest, ServerNotification>
+): McpLogger {
+  // Create the broadcast logger singleton
+  const broadcastLogger = createBroadcastLogger();
+
+  // Set initial client for progress notifications (must be before addSubscriber)
+  broadcastLogger.setInitialClient(extra);
+
+  // Add the initial client as first subscriber
+  broadcastLogger.addSubscriber(extra);
+
+  return broadcastLogger;
 }

@@ -174,6 +174,9 @@ export async function pollWithBlackoutResilience<T>(
   const startTime = Date.now();
   let inBlackout = false;
   let hadBlackout = false;
+  let blackoutStartTime = 0;
+  let lastBlackoutLogTime = 0;
+  const BLACKOUT_LOG_INTERVAL_MS = 30_000; // Log every 30 seconds during blackout
   let lastResult: T | undefined;
   let currentReason: DisconnectReason | undefined;
   let crashConfirmCount = 0;
@@ -186,7 +189,8 @@ export async function pollWithBlackoutResilience<T>(
 
       // If we were in blackout, we're back
       if (inBlackout) {
-        logger.progress(`[${context}] Signal restored - resuming monitoring`);
+        const blackoutDuration = Math.round((Date.now() - blackoutStartTime) / 1000);
+        logger.progress(`[${context}] Signal restored after ${blackoutDuration}s - resuming monitoring`);
         inBlackout = false;
         crashConfirmCount = 0;
       }
@@ -227,24 +231,37 @@ export async function pollWithBlackoutResilience<T>(
         }
         inBlackout = true;
         hadBlackout = true;
+        blackoutStartTime = Date.now();
+        lastBlackoutLogTime = blackoutStartTime;
 
         // If crashed, start confirmation counter
         if (reason === 'crashed') {
           crashConfirmCount = 1;
         }
-      } else if (currentReason === 'crashed') {
-        // Already in blackout, re-check if still crashed
-        crashConfirmCount++;
-        if (crashConfirmCount >= CRASH_CONFIRM_THRESHOLD) {
-          // Confirmed crash - abort monitoring
-          logger.progress(`[${context}] Vessel crash confirmed - aborting`);
-          return {
-            success: false,
-            result: lastResult,
-            timedOut: false,
-            hadBlackout: true,
-            disconnectReason: 'crashed',
-          };
+      } else {
+        // Already in blackout - log periodic status updates
+        const now = Date.now();
+        if (now - lastBlackoutLogTime >= BLACKOUT_LOG_INTERVAL_MS) {
+          const elapsedSec = Math.round((now - blackoutStartTime) / 1000);
+          const reasonText = currentReason === 'power_loss' ? 'no power' : 'no signal';
+          logger.progress(`[${context}] Still waiting for ${reasonText} (${elapsedSec}s)...`);
+          lastBlackoutLogTime = now;
+        }
+
+        if (currentReason === 'crashed') {
+          // Already in blackout, re-check if still crashed
+          crashConfirmCount++;
+          if (crashConfirmCount >= CRASH_CONFIRM_THRESHOLD) {
+            // Confirmed crash - abort monitoring
+            logger.progress(`[${context}] Vessel crash confirmed - aborting`);
+            return {
+              success: false,
+              result: lastResult,
+              timedOut: false,
+              hadBlackout: true,
+              disconnectReason: 'crashed',
+            };
+          }
         }
       }
 

@@ -12,7 +12,7 @@ import { formatTime, fmtNum, fmtVel } from '../utils/format.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
-import { clearBroadcastLogger } from '../../utils/broadcast-logger.js';
+import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
@@ -275,7 +275,7 @@ export async function executeNode(
   const alignmentBuffer = 15; // Extra time for alignment before burn starts
   const warpLeadTime = halfBurn + alignmentBuffer;
   if (nodeEta > warpLeadTime + 10 && config.warp.onRails) {
-    log.progress(`${logPrefix} Node T-${formatTime(nodeEta)}, burn ~${formatTime(burnDuration)}, warping to T-${formatTime(warpLeadTime)}`);
+    log.progress(`${logPrefix} Node in T-minus ${formatTime(nodeEta)}, burn ~${formatTime(burnDuration)}, warping to T-minus ${formatTime(warpLeadTime)}`);
 
     // Clear any existing warp state before starting new warp
     await stopWarp(conn);
@@ -607,7 +607,7 @@ export const executeNodeTool: ToolDefinition = {
   tier: 2,
   handler: async (args, ctx, extra) => {
     const conn = await ctx.ensureConnected();
-    const logger = ctx.createBroadcastableLogger(extra);
+    const logger = ctx.createLogger(extra);
     const asyncMode = args.async as boolean;
 
     try {

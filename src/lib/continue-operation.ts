@@ -8,7 +8,7 @@
 
 import type { ToolDefinition } from './tool-types.js';
 import { getKosOperation } from '../utils/kos-operation-state.js';
-import { addBroadcastSubscriber, getActiveBroadcastLogger } from '../utils/broadcast-logger.js';
+import { addBroadcastSubscriber, getActiveBroadcastLogger } from '../utils/mcp-logger.js';
 
 /**
  * Continue operation tool - subscribe to notifications from a running operation.

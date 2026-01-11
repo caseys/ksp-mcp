@@ -44,8 +44,6 @@ export interface ToolContext {
   ensureConnected: () => Promise<KosConnection>;
   getConnection: () => KosConnection;
   createLogger: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => McpLogger;
-  /** Create a logger that broadcasts to multiple subscribers (for long-running operations) */
-  createBroadcastableLogger: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => McpLogger;
   successResponse: (prefix: string, text: string) => CallToolResult;
   errorResponse: (prefix: string, error: string) => CallToolResult;
   selectTarget: (orchestrator: ManeuverOrchestrator, mode: TargetSelectMode, checkExisting?: boolean) => Promise<string | null>;
