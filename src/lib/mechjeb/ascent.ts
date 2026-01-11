@@ -181,7 +181,13 @@ export class AscentHandle {
       onPoll: async (state) => {
         // Log status changes (skip 'Off' - completion is logged after potential auto-fix)
         const now = Date.now();
-        if (state?.status && state.status !== lastStatus && state.status !== 'Off') {
+        if (!state?.status) {
+          this.logger.progress(`[Ascent] no status`);
+        } else if (state.status === 'Off') {
+          this.logger.progress(`[Ascent] special off handler`);
+        } else if (/awaiting/.test(state.status)) {
+          this.logger.progress(`[Ascent] special awaiting handler`);
+        } else if (state?.status && state.status !== lastStatus) {
           this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
           lastStatus = state.status;
           lastLogTime = now;

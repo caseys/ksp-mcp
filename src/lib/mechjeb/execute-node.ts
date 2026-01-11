@@ -6,7 +6,7 @@
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
-import { queryNumber, unlockControls } from './shared.js';
+import { queryNumber, unlockControls, parseNumber } from './shared.js';
 import { delay } from '../utils/progress.js';
 import { formatTime, fmtNum, fmtVel } from '../utils/format.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
@@ -48,8 +48,8 @@ const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 
 // Alignment configuration
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
-const RCS_TRIGGER_TIME = 3000; // ms - enable RCS if no progress after this
-const HEADING_RESET_TRIGGER_TIME = 5000; // ms - enable RCS if no progress after this
+const RCS_TRIGGER_TIME = 2000; // ms - enable RCS if no progress after this
+const STEERING_RESET_TRIGGER_TIME = 5000; // ms - unlock and re-lock steering if still stuck
 const MAX_ALIGN_TIME = 300_000; // ms - 5 minutes, keep trying (warn after 30s)
 
 /**
@@ -58,7 +58,7 @@ const MAX_ALIGN_TIME = 300_000; // ms - 5 minutes, keep trying (warn after 30s)
  */
 function formatExecutorState(state: string): string {
   switch (state.toUpperCase()) {
-    case 'WARPALIGN': return 'Aligning to node';
+    case 'WARPALIGN': return 'Checking heading';
     case 'LEAD': return 'Coasting to burn';
     case 'BURN': return 'Burning';
     case 'IDLE': return 'Idle';
@@ -92,9 +92,10 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   const rcsState = await conn.execute('PRINT RCS.');
   const wasRcsOn = rcsState.output.includes('True');
 
-  // Use LOCK STEERING - more reliable than SAS MANEUVER mode
-  // Keep SAS OFF to avoid conflicts, give kOS a moment to engage steering
-  await conn.execute('SAS OFF. UNLOCK STEERING. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
+  // Start with SAS MANEUVER mode (game's built-in node pointing), then layer kOS steering on top
+  // This combination tends to be more reliable than either alone
+  await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER". WAIT 0.5.');
+  await conn.execute('LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
   log.progress(`${logPrefix} Aligning for maneuver...`);
 
   const alignStartTime = Date.now();
@@ -102,6 +103,8 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
 
   let lastAngle = 180;
   let noProgressSince = Date.now();
+  let triedRcs = false;
+  let triedSteeringReset = false;
 
   interface AlignState {
     angle: number;
@@ -110,8 +113,13 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
 
   const result = await pollWithBlackoutResilience<AlignState>({
     poll: async () => {
-      const angle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-      return { angle, aligned: angle < ALIGN_THRESHOLD };
+      // Query angle - if parsing fails, return last known angle to avoid false blackout
+      const result = await conn.execute('PRINT VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR).', 2000);
+      const angle = parseNumber(result.output);
+      // If parsing returned 0 but we expect a real angle, use lastAngle as fallback
+      // (0 is valid only if we're nearly aligned, which would mean angle < 3)
+      const effectiveAngle = (angle === 0 && lastAngle > 10) ? lastAngle : angle;
+      return { angle: effectiveAngle, aligned: effectiveAngle < ALIGN_THRESHOLD };
     },
 
     isDone: (state) => state.aligned,
@@ -137,30 +145,44 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
         warnedSlow = true;
       }
 
-
       // Check for progress (improvement of at least 0.5 degrees)
+      const timeSinceProgress = Date.now() - noProgressSince;
       if (state.angle < lastAngle - 0.5) {
         noProgressSince = Date.now();
         lastAngle = state.angle;
-      } else if (Date.now() - noProgressSince > RCS_TRIGGER_TIME) {
-        // No progress for 3s - enable RCS to help rotation
+        // Reset fallback flags on progress - steering is working
+        triedRcs = false;
+        triedSteeringReset = false;
+      } else if (timeSinceProgress > STEERING_RESET_TRIGGER_TIME && !triedSteeringReset) {
+        // No progress for 5s - complete steering reset
+        // Unlock everything, re-enable SAS MANEUVER, then re-lock kOS steering
+        try {
+          log.progress(`${logPrefix} Steering stuck, resetting... (${fmtNum(state.angle)}°)`);
+          await conn.execute('UNLOCK STEERING. SAS OFF. WAIT 0.5.');
+          await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER". WAIT 0.5.');
+          await conn.execute('LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
+          triedSteeringReset = true;
+          noProgressSince = Date.now();
+        } catch {
+          // Ignore errors during blackout
+        }
+      } else if (timeSinceProgress > RCS_TRIGGER_TIME && !triedRcs) {
+        // No progress for 2s - enable RCS to help rotation
         try {
           await conn.execute('RCS ON.');
-          log.progress(`${logPrefix} No progress, enabled RCS (${fmtNum(state.angle)}°)`);
-          noProgressSince = Date.now(); // Reset timer after enabling RCS
+          log.progress(`${logPrefix} Enabled RCS (${fmtNum(state.angle)}°)`);
+          triedRcs = true;
+          noProgressSince = Date.now();
         } catch {
           // Ignore RCS enable errors during blackout
         }
-      } else if (Date.now() - noProgressSince > HEADING_RESET_TRIGGER_TIME) {
-        // No progress for 5s - kick SAS
-        await conn.execute('SAS OFF. UNLOCK STEERING. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR. WAIT 0.5.');
       }
     },
   });
 
-  // Always unlock steering when done (MechJeb will take over)
+  // Always unlock steering and disable SAS when done (MechJeb will take over)
   try {
-    await conn.execute('UNLOCK STEERING.');
+    await conn.execute('UNLOCK STEERING. SAS OFF.');
   } catch {
     // Ignore cleanup errors
   }
@@ -354,6 +376,9 @@ export async function executeNode(
       };
     }
 
+    // Track last valid state for fallback during parsing errors
+    let lastValidState: BurnPollState | null = null;
+
     // Wait for burn completion using pollWithBlackoutResilience
     const result = await pollWithBlackoutResilience<BurnPollState>({
       poll: async () => {
@@ -374,7 +399,13 @@ export async function executeNode(
         // IMPORTANT: Use \d[\d.]* to require starting with a digit
         const progressMatch = progressResult.output.match(/(\d[\d.]*)\|(True|False)\|(\w+)\|(-?\d+)/i);
         if (!progressMatch) {
-          throw new Error('Failed to parse executor progress');
+          // Parsing failed but connection worked - return last valid state or a placeholder
+          // Don't throw - that would trigger false blackout detection
+          if (lastValidState) {
+            return lastValidState; // Keep monitoring with last known state
+          }
+          // No previous state - return a "still checking" state
+          return { noNode: false, dvRemaining: 999, executorEnabled: true, executorState: 'WARPALIGN', burnComplete: false, executorStopped: false, nodeEta: 0 };
         }
 
         const dvRemaining = Number.parseFloat(progressMatch[1]);
@@ -384,7 +415,9 @@ export async function executeNode(
         const burnComplete = dvRemaining < DV_THRESHOLD;
         const executorStopped = !executorEnabled && dvRemaining >= DV_THRESHOLD;
 
-        return { noNode: false, dvRemaining, executorEnabled, executorState, burnComplete, executorStopped, nodeEta };
+        const state = { noNode: false, dvRemaining, executorEnabled, executorState, burnComplete, executorStopped, nodeEta };
+        lastValidState = state; // Save for fallback
+        return state;
       },
 
       isDone: (state) => state.noNode || state.burnComplete || state.executorStopped,

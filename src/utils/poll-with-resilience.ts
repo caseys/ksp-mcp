@@ -84,7 +84,8 @@ async function classifyConnectionFailure(
   errorOutput?: string
 ): Promise<DisconnectReason> {
   // Check error message/output for signal loss indicators
-  if (errorOutput && (errorOutput.includes('Signal lost') || errorOutput.includes('signal'))) {
+  // IMPORTANT: Only match the specific kOS message, not generic 'signal' which causes false positives
+  if (errorOutput && errorOutput.includes('Signal lost')) {
     return 'signal_lost';
   }
 
