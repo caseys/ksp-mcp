@@ -6,10 +6,10 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { allTools } from '../tool-registry.js';
 
 const TIER_DESCRIPTIONS = [
-  'launch, land, circularize, inclination, warp...',
-  'match_velocities, adjust_apoapsis, ellipticize, crash_avoidance...',
-  'get_target_info, clear_target, set_position_target...',
-  'run_script, load_save, command...',
+  'launch, land, transfer, course_correct, circularize, warp, status',
+  'Orbital Adjustment Tools',
+  'Targeting Tools',
+  'Simulation Tools',
 ];
 
 export function tiersResource(server: McpServer): void {
