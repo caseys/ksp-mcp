@@ -14,8 +14,6 @@ import { getKosOperation } from '../utils/kos-operation-state.js';
 // MechJeb basic maneuver tools
 import {
   circularizeTool,
-  adjustApoapsisTool,
-  adjustPeriapsisTool,
   ellipticizeTool,
   changeSemiMajorAxisTool,
 } from './mechjeb/basic/index.js';
@@ -47,6 +45,7 @@ import {
 import {
   transferTool,
   inclinationTool,
+  adjustOrbitTool,
 } from './mechjeb/meta/index.js';
 
 // MechJeb targeting tools
@@ -122,6 +121,7 @@ export const allTools: ToolDefinition[] = [
   circularizeTool,
   inclinationTool,
   transferTool,
+  adjustOrbitTool,
   courseCorrectTool,
   warpTool,
   statusTool,
@@ -129,8 +129,6 @@ export const allTools: ToolDefinition[] = [
   // Tier 2 - Maneuvers & Orbital Changes
   matchVelocitiesTool,
   matchPlanesTool,
-  adjustApoapsisTool,
-  adjustPeriapsisTool,
   ellipticizeTool,
   resonantOrbitTool,
   hohmannTransferTool,

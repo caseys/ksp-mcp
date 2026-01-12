@@ -88,6 +88,14 @@ export interface AscentSettings {
   forceRoll?: boolean;
   verticalRoll?: number;
   turnRoll?: number;
+
+  // Launch mode settings (for Launch to Plane / Launch to Rendezvous)
+  launchingToPlane?: boolean;
+  launchingToRendezvous?: boolean;
+  launchPhaseAngle?: number;
+  launchLANDifference?: number;
+  desiredLan?: number;
+  overrideWarpToPlane?: boolean;
 }
 
 export interface AscentStatus {
@@ -114,6 +122,9 @@ export interface AscentResult {
   aborted: boolean;
 }
 
+/** Launch mode for ascent guidance */
+export type LaunchMode = 'orbit' | 'rendezvous' | 'plane';
+
 export interface LaunchOptions {
   /** Target orbit altitude in meters */
   altitude: number;
@@ -125,4 +136,14 @@ export interface LaunchOptions {
   circularize?: boolean;
   /** Auto-warp to maneuver nodes (default: true) */
   autoWarp?: boolean;
+
+  // Launch mode options
+  /** Launch mode: 'orbit' (default), 'rendezvous' (phase angle), or 'plane' (orbital plane) */
+  launchMode?: LaunchMode;
+  /** Target name for rendezvous/plane modes (required if launchMode is not 'orbit') */
+  target?: string;
+  /** Phase angle for rendezvous mode in degrees (default: 0) */
+  phaseAngle?: number;
+  /** LAN difference for plane mode in degrees (default: 0) */
+  lanDifference?: number;
 }

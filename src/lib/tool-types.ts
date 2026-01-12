@@ -136,30 +136,69 @@ export const executeSchema = z.boolean()
 
 /**
  * Parse distance string with optional units (km, m, Mm) to meters.
- * Handles LLM outputs like "50km" or "100m" and converts to meters.
+ * Handles LLM outputs like "50km", "50 km", or "100m" and converts to meters.
+ *
+ * SMART DEFAULT: For orbital measurements, bare numbers < 10000 are assumed to be km.
+ * This matches how humans talk about orbits ("raise to 100" means 100km, not 100m).
  */
-export function parseDistance(val: unknown): number | unknown {
-  if (typeof val === 'number') return val;
-  if (typeof val !== 'string') return val;
+export function parseDistance(val: unknown): number | 'auto' {
+  // Pass through 'auto' sentinel unchanged for dynamic resolution
+  if (val === 'auto') return 'auto';
 
-  const match = val.trim().match(/^([\d.]+)\s*(km|m|Mm)?$/i);
-  if (!match) return val; // Let Zod handle invalid input
+  // Handle numbers directly
+  if (typeof val === 'number') {
+    // Smart default: small numbers are almost certainly km for orbital work
+    // Threshold 1000: "raise to 500" means 500km, but "5000" is likely 5000m
+    if (val < 1000) {
+      return val * 1000; // Assume km
+    }
+    return val; // Already in meters (large value)
+  }
+
+  if (typeof val !== 'string') {
+    throw new TypeError(`Invalid distance value: ${val}`);
+  }
+
+  const trimmed = val.trim();
+
+  // Match number with optional unit: "50", "50km", "50 km", "1.5Mm"
+  const match = trimmed.match(/^([\d.]+)\s*(km|m|Mm)?$/i);
+  if (!match) {
+    throw new Error(`Invalid distance format: ${val}. Use "50km", "100m", or "1.5Mm"`);
+  }
 
   const num = Number.parseFloat(match[1]);
-  const unit = (match[2] || 'm').toLowerCase();
+  const unit = match[2]?.toLowerCase();
 
-  switch (unit) {
-    case 'km': return num * 1000;
-    case 'mm': return num * 1_000_000;
-    default: return num; // meters
+  // If unit specified, use it
+  if (unit) {
+    switch (unit) {
+      case 'km': return num * 1000;
+      case 'mm': return num * 1_000_000;
+      case 'm': return num;
+    }
   }
+
+  // No unit specified - smart default based on magnitude
+  // For orbital work, small numbers are km (nobody says "orbit at 100 meters")
+  if (num < 1000) {
+    return num * 1000; // Assume km
+  }
+  return num; // Large number, assume already in meters
 }
 
 /**
- * Zod schema for distance values that accepts numbers or strings with units.
- * Examples: 50000, "50km", "100m", "1.5Mm"
+ * Zod schema for distance values - prefers strings with units, also accepts numbers.
+ * LLMs should pass strings like "50km" to preserve units.
+ * Examples: "50km", "100m", "1.5Mm", "50 km", or "auto" for dynamic resolution.
+ *
+ * Smart default: bare numbers < 1000 are assumed to be km (e.g., "100" → 100km).
+ * This applies to both string and number inputs for consistency.
  */
-export const distanceSchema = z.preprocess(parseDistance, z.number());
+export const distanceSchema = z.preprocess(
+  parseDistance,
+  z.union([z.number(), z.literal('auto')])
+);
 
 /**
  * Stock KSP celestial bodies for fuzzy matching.

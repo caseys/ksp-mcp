@@ -10,7 +10,8 @@ import type {
   AscentSettings,
   AscentStatus,
   AscentProgress,
-  AscentResult
+  AscentResult,
+  LaunchMode
 } from '../types.js';
 import { delay } from '../utils/progress.js';
 import { formatOrbit, formatTime, fmtNum } from '../utils/format.js';
@@ -20,6 +21,366 @@ import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { config } from '../../config/index.js';
 import { ManeuverOrchestrator } from './orchestrator.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
+
+// Imports for smart launch parameter resolution
+import { hasTarget } from '../kos/target/shared.js';
+import { setTarget } from '../kos/target/set-target.js';
+import { getTargetValidationInfo } from '../kos/target/validate.js';
+import { getVesselStateInfo } from '../kos/vessel/validate.js';
+import { getTargetOrbitInfo, getRendezvousInfo } from './targeting/shared.js';
+// Note: interplanetaryTransfer not imported - we call MechJeb directly in warpToTransferWindow
+// to bypass validation that requires being in orbit
+import { queryNodeInfo } from './shared.js';
+import { warpForward } from '../kos/warp.js';
+
+// ============================================================================
+// Smart Launch Parameter Resolution
+// ============================================================================
+
+/**
+ * Smart launch parameters resolved based on target type
+ */
+interface SmartLaunchParams {
+  /** Target orbit altitude in meters (undefined = use default/arg) */
+  altitude?: number;
+  /** Target inclination in degrees (undefined = use arg) */
+  inclination?: number;
+  /** Launch mode to use */
+  launchMode: LaunchMode;
+  /** Target name (may be changed if redirected) */
+  target?: string;
+  /** Pre-launch action required */
+  prelaunchAction?: 'warp_to_overhead' | 'warp_to_transfer_window';
+  /** Error message if launch is invalid */
+  error?: string;
+  /** Log message explaining the chosen strategy */
+  strategyMessage?: string;
+}
+
+/**
+ * Query body properties (radius, atmosphere height)
+ */
+async function getBodyProperties(conn: KosConnection): Promise<{ radius: number; atmHeight: number }> {
+  const result = await conn.execute(
+    'SET _R TO SHIP:BODY:RADIUS. ' +
+    'SET _ATM TO 0. IF SHIP:BODY:ATM:EXISTS { SET _ATM TO SHIP:BODY:ATM:HEIGHT. } ' +
+    'PRINT _R + "|" + _ATM.',
+    3000
+  );
+  const match = result.output.match(/([\d.]+)\|([\d.]+)/);
+  return {
+    radius: match ? Number.parseFloat(match[1]) : 600_000,  // Default to Kerbin
+    atmHeight: match ? Number.parseFloat(match[2]) : 70_000
+  };
+}
+
+/**
+ * Calculate default parking orbit altitude based on body properties
+ * Returns max(radius/2, atmHeight*2) to ensure safe orbit above atmosphere
+ */
+function calculateParkingOrbitAltitude(radius: number, atmHeight: number): number {
+  const halfRadius = radius / 2;
+  const doubleAtm = atmHeight * 2;
+  return Math.max(halfRadius, doubleAtm, 80_000);  // Minimum 80km for safety
+}
+
+
+/**
+ * Resolve smart launch parameters based on target type and current situation
+ */
+async function resolveSmartLaunchParams(
+  conn: KosConnection,
+  targetName: string | undefined,
+  logger: McpLogger
+): Promise<SmartLaunchParams> {
+  // Step 1: Set target if provided
+  if (targetName) {
+    const result = await setTarget(conn, targetName, 'auto');
+    if (!result.success) {
+      return { launchMode: 'orbit', error: result.error ?? `Failed to set target '${targetName}'` };
+    }
+  }
+
+  // Step 2: Get vessel state and target info
+  const vesselState = await getVesselStateInfo(conn);
+  const targetInfo = await getTargetValidationInfo(conn);
+
+  if (!targetInfo) {
+    // No target - fall through to normal launch with defaults
+    return { launchMode: 'orbit' };
+  }
+
+  const bodyProps = await getBodyProperties(conn);
+  const parkingAltitude = calculateParkingOrbitAltitude(bodyProps.radius, bodyProps.atmHeight);
+
+  // Step 3: Handle edge cases (heuristics)
+
+  // Case: We're on a moon and target is a planet (other than our parent)
+  if (vesselState.bodyType === 'moon' && targetInfo.class === 'planet') {
+    return {
+      launchMode: 'orbit',
+      error: `Must return to ${vesselState.parentBodyName} before interplanetary transfer to ${targetInfo.name}. Use return_from_moon tool first.`
+    };
+  }
+
+  // Case: Target is parent body of our moon (e.g., targeting Kerbin from Mun)
+  if (vesselState.bodyType === 'moon' && targetInfo.name === vesselState.parentBodyName) {
+    return {
+      altitude: parkingAltitude,
+      // inclination left undefined - will be determined by launch direction
+      launchMode: 'orbit',
+      target: targetInfo.name,
+      prelaunchAction: 'warp_to_overhead',
+      strategyMessage: `Launch from ${vesselState.bodyName} to return to ${targetInfo.name} - warping until ${targetInfo.name} is overhead`
+    };
+  }
+
+  // Case: Target is vessel or moon in a different SOI
+  if (!targetInfo.isInShipSOI && (targetInfo.class === 'vessel' || targetInfo.class === 'moon')) {
+    // Redirect to the SOI body containing the target
+    const redirectTarget = targetInfo.parentBody;
+    logger.warn(`[Ascent] Target ${targetInfo.name} is in ${redirectTarget}'s SOI - redirecting target`);
+    const redirectResult = await setTarget(conn, redirectTarget, 'body');
+    if (!redirectResult.success) {
+      return { launchMode: 'orbit', error: redirectResult.error ?? `Failed to redirect to ${redirectTarget}` };
+    }
+
+    // Re-query target info after redirect
+    const newTargetInfo = await getTargetValidationInfo(conn);
+    if (!newTargetInfo) {
+      return { launchMode: 'orbit', error: `Target redirected to ${redirectTarget} but failed to query target info` };
+    }
+
+    // Now treat as planet transfer
+    return {
+      altitude: parkingAltitude,
+      inclination: 0,
+      launchMode: 'orbit',
+      target: redirectTarget,
+      prelaunchAction: 'warp_to_transfer_window',
+      strategyMessage: `Target ${targetInfo.name} is in ${redirectTarget}'s SOI - launching to ${redirectTarget} transfer window`
+    };
+  }
+
+  // Step 4: Main target type handling
+
+  // Case A: Target is a vessel in same SOI
+  if (targetInfo.class === 'vessel' && targetInfo.isInShipSOI) {
+    const targetOrbit = await getTargetOrbitInfo(conn);
+    const rendezvousInfo = await getRendezvousInfo(conn);
+
+    if (!targetOrbit) {
+      return { launchMode: 'orbit', error: 'Could not get target orbit info' };
+    }
+
+    const targetInc = targetOrbit.inclination;
+    const relativeInc = rendezvousInfo?.relativeInclination ?? Math.abs(targetInc);
+    const targetAltitude = targetOrbit.periapsis * 0.95;  // 5% below target
+
+    // Check if inclinations are close (within 5°)
+    if (relativeInc <= 5) {
+      // Use rendezvous mode - same orbital plane
+      return {
+        altitude: targetAltitude,
+        inclination: targetInc,
+        launchMode: 'rendezvous',
+        target: targetInfo.name,
+        strategyMessage: `Vessel ${targetInfo.name} in same plane (${relativeInc.toFixed(1)}° apart) - using rendezvous launch`
+      };
+    } else {
+      // Use plane mode - different orbital plane
+      return {
+        altitude: targetAltitude,
+        inclination: targetInc,
+        launchMode: 'plane',
+        target: targetInfo.name,
+        strategyMessage: `Vessel ${targetInfo.name} in different plane (${relativeInc.toFixed(1)}° apart) - using plane-matching launch`
+      };
+    }
+  }
+
+  // Case B: Target is a moon in same SOI
+  if (targetInfo.class === 'moon' && targetInfo.isInShipSOI) {
+    const targetOrbit = await getTargetOrbitInfo(conn);
+
+    if (!targetOrbit) {
+      return { launchMode: 'orbit', error: 'Could not get target orbit info' };
+    }
+
+    // If moon is nearly equatorial, just do normal launch
+    if (targetOrbit.inclination < 0.05) {
+      return {
+        altitude: parkingAltitude,
+        inclination: 0,
+        launchMode: 'orbit',
+        target: targetInfo.name,
+      };
+    }
+
+    // Moon has significant inclination - use plane matching
+    return {
+      altitude: parkingAltitude,
+      inclination: targetOrbit.inclination,
+      launchMode: 'plane',
+      target: targetInfo.name,
+      strategyMessage: `Matching planes with ${targetInfo.name} at ${targetOrbit.inclination.toFixed(1)}°`
+    };
+  }
+
+  // Case C: Target is a planet (interplanetary transfer)
+  if (targetInfo.class === 'planet') {
+    return {
+      altitude: parkingAltitude,
+      inclination: 0,  // Equatorial for interplanetary
+      launchMode: 'orbit',
+      target: targetInfo.name,
+      prelaunchAction: 'warp_to_transfer_window',
+      strategyMessage: `Target set to the planet ${targetInfo.name}`
+    };
+  }
+
+  // Fallback: normal launch
+  return { altitude: parkingAltitude, inclination: 0, launchMode: 'orbit' };
+}
+
+/**
+ * Warp to interplanetary transfer window
+ * Creates a transfer node, warps to 1 hour before, then deletes the node
+ *
+ * NOTE: This bypasses normal interplanetaryTransfer validation because we're
+ * calling from the launchpad. MechJeb can create transfer nodes from the pad,
+ * but our normal validation requires being in orbit.
+ *
+ * @returns Error message if failed, undefined if successful
+ */
+async function warpToTransferWindow(
+  conn: KosConnection,
+  logger: McpLogger
+): Promise<string | undefined> {
+  logger.progress('[Ascent] Calculating interplanetary transfer window...');
+
+  try {
+    // Call MechJeb directly, bypassing our validation (which requires orbit)
+    // MechJeb can calculate transfer windows from the launchpad
+    const cmd = 'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:INTERPLANETARY(TRUE).';
+    const result = await conn.execute(cmd, 10_000);
+
+    // Check if node was created
+    if (result.output.toLowerCase().includes('false') || result.output.toLowerCase().includes('error')) {
+      return `Could not create transfer node: ${result.output.trim()}`;
+    }
+
+    // Verify a node exists
+    const hasNodeResult = await conn.execute('PRINT HASNODE.', 3000);
+    if (!hasNodeResult.output.toLowerCase().includes('true')) {
+      return 'Transfer node was not created by MechJeb';
+    }
+
+    // Get node time and warp to 1 hour before
+    const nodeInfo = await queryNodeInfo(conn);
+    const warpSeconds = nodeInfo.timeToNode - 3600;  // 1 hour before node
+
+    if (warpSeconds > 60) {
+      logger.progress(`[Ascent] Warping to transfer window in ${formatTime(nodeInfo.timeToNode)}...`);
+
+      // Use WARPTO directly - warpForward has crash checks that fail on launchpad
+      await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpSeconds}).`, 5000);
+
+      // Wait for warp to complete (poll WARP level)
+      let warpComplete = false;
+      const maxWait = 600_000;  // 10 minutes max
+      const startTime = Date.now();
+
+      while (!warpComplete && (Date.now() - startTime) < maxWait) {
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        const warpResult = await conn.execute('PRINT WARP.', 3000);
+        const warpLevel = parseInt(warpResult.output.match(/(\d+)/)?.[1] ?? '0');
+        if (warpLevel === 0) {
+          warpComplete = true;
+        }
+      }
+
+      if (!warpComplete) {
+        return 'Warp timed out';
+      }
+      logger.progress('[Ascent] Warp complete');
+    } else {
+      logger.progress('[Ascent] Transfer window is soon - no warp needed');
+    }
+
+    // Clear the node - we just used it for timing
+    await clearNodes(conn);
+    logger.progress('[Ascent] Transfer node cleared - ready to launch');
+    return undefined;  // Success
+
+  } catch (error) {
+    return `Transfer window calculation failed: ${error instanceof Error ? error.message : String(error)}`;
+  }
+}
+
+/**
+ * Warp until parent body is at zenith (directly overhead)
+ * Used when launching from a moon to return to parent body
+ */
+async function warpUntilBodyOverhead(
+  conn: KosConnection,
+  bodyName: string,
+  logger: McpLogger
+): Promise<void> {
+  logger.info(`[Ascent] Waiting for ${bodyName} to be overhead...`);
+
+  // Query current angle to body
+  const getAngle = async (): Promise<number> => {
+    const result = await conn.execute(
+      `SET _ANG TO VANG(BODY("${bodyName}"):DIRECTION, SHIP:UP). PRINT _ANG.`,
+      3000
+    );
+    const match = result.output.match(/([\d.]+)/);
+    return match ? Number.parseFloat(match[1]) : 90;
+  };
+
+  const OVERHEAD_THRESHOLD = 10;  // degrees from zenith
+  let angle = await getAngle();
+
+  if (angle <= OVERHEAD_THRESHOLD) {
+    logger.info(`[Ascent] ${bodyName} is already overhead (${angle.toFixed(1)}° from zenith)`);
+    return;
+  }
+
+  // Get moon's rotation period to estimate warp time
+  const rotResult = await conn.execute('PRINT SHIP:BODY:ROTATIONPERIOD.', 3000);
+  const rotMatch = rotResult.output.match(/([\d.]+)/);
+  const rotationPeriod = rotMatch ? Number.parseFloat(rotMatch[1]) : 21_600;  // Default 6 hours
+
+  // Estimate time to overhead - rough approximation based on angle
+  // The body will be overhead when we've rotated to face it
+  const estimatedWarp = (angle / 360) * rotationPeriod * 0.8;  // 80% of estimated time
+
+  if (estimatedWarp > 60) {
+    logger.info(`[Ascent] ${bodyName} is ${angle.toFixed(1)}° from overhead - warping ~${formatTime(estimatedWarp)}...`);
+    await warpForward(conn, estimatedWarp, 300_000, logger);
+  }
+
+  // Fine-tune: poll and warp in smaller increments until overhead
+  for (let i = 0; i < 10; i++) {
+    angle = await getAngle();
+    if (angle <= OVERHEAD_THRESHOLD) {
+      logger.info(`[Ascent] ${bodyName} is now overhead (${angle.toFixed(1)}° from zenith)`);
+      return;
+    }
+
+    // Warp smaller increments
+    const smallWarp = Math.min((angle / 360) * rotationPeriod * 0.5, 300);
+    if (smallWarp > 10) {
+      await warpForward(conn, smallWarp, 60_000, logger);
+    } else {
+      await delay(5000);  // Just wait real-time for small angles
+    }
+  }
+
+  // Good enough
+  logger.info(`[Ascent] ${bodyName} is approximately overhead (${angle.toFixed(1)}° from zenith)`);
+}
 
 /**
  * Detect kOS errors in output
@@ -379,6 +740,26 @@ export class AscentProgram {
       commands.push(`SET ${AG}:TURNROLL TO ${settings.turnRoll}.`);
     }
 
+    // Launch mode settings (for Launch to Plane / Launch to Rendezvous)
+    if (settings.launchingToPlane !== undefined) {
+      commands.push(`SET ${AG}:LAUNCHINGTOPLANE TO ${settings.launchingToPlane ? 'TRUE' : 'FALSE'}.`);
+    }
+    if (settings.launchingToRendezvous !== undefined) {
+      commands.push(`SET ${AG}:LAUNCHINGTORENDEZVOUS TO ${settings.launchingToRendezvous ? 'TRUE' : 'FALSE'}.`);
+    }
+    if (settings.launchPhaseAngle !== undefined) {
+      commands.push(`SET ${AG}:LAUNCHPHASEANGLE TO ${settings.launchPhaseAngle}.`);
+    }
+    if (settings.launchLANDifference !== undefined) {
+      commands.push(`SET ${AG}:LAUNCHLANDIFFERENCE TO ${settings.launchLANDifference}.`);
+    }
+    if (settings.desiredLan !== undefined) {
+      commands.push(`SET ${AG}:DESIREDLAN TO ${settings.desiredLan}.`);
+    }
+    if (settings.overrideWarpToPlane !== undefined) {
+      commands.push(`SET ${AG}:OVERRIDEWARPTOPLANE TO ${settings.overrideWarpToPlane ? 'TRUE' : 'FALSE'}.`);
+    }
+
     // Execute commands one at a time for reliability
     // Batch commands can overwhelm the kOS telnet connection
     for (const cmd of commands) {
@@ -424,88 +805,179 @@ export class AscentProgram {
    * Configures MechJeb ascent guidance and initiates launch.
    * MechJeb handles throttle, staging, and attitude automatically.
    * Returns a handle for monitoring progress.
+   *
+   * Launch modes:
+   * - 'orbit' (default): Simple launch to target altitude/inclination
+   * - 'rendezvous': Launch at optimal phase angle to intercept target
+   * - 'plane': Launch into target's orbital plane (auto-calculates inclination)
    */
   async launchToOrbit(options: LaunchOptions): Promise<AscentHandle> {
     const {
       altitude,
       inclination = 0,
       autoStage = true,
+      launchMode = 'orbit',
+      target,
+      phaseAngle = 0,
+      lanDifference = 0,
     } = options;
 
     // Wait for MechJeb to be ready (critical after save reload)
     await this.waitForMechJebReady();
 
+    // Handle launch modes that require a target
+    if (launchMode !== 'orbit') {
+      if (!target) {
+        throw new Error(`Launch mode '${launchMode}' requires a target. Use launchMode: 'orbit' for basic launches.`);
+      }
+
+      // Set the target in KSP
+      this.logger.info(`[Ascent] Setting target: ${target}`);
+      const targetResult = await this.conn.execute(`SET TARGET TO "${target}".`);
+      if (targetResult.output.toLowerCase().includes('error') || targetResult.output.toLowerCase().includes('not found')) {
+        throw new Error(`Failed to set target '${target}'. Make sure the vessel/body exists.`);
+      }
+      await delay(200);
+
+      // Verify target was set
+      const verifyTarget = await this.conn.execute('IF HASTARGET { PRINT TARGET:NAME. } ELSE { PRINT "NO_TARGET". }');
+      if (verifyTarget.output.includes('NO_TARGET')) {
+        throw new Error(`Target '${target}' was not set successfully.`);
+      }
+      this.logger.info(`[Ascent] Target set: ${verifyTarget.output.trim()}`);
+    }
+
     // Configure ascent - always enable MechJeb autowarp capability
     // Actual physics warp level is controlled by AUTOWARP_PHYSICS_MAX env var
-    await this.configure({
+    const ascentSettings: Partial<AscentSettings> = {
       desiredAltitude: altitude,
       desiredInclination: inclination,
       autostage: autoStage,
       skipCircularization: false,  // Let MechJeb handle circularization
-      autowarp: config.warp.physicsMax > 0  // Enable MechJeb autowarp if physics warp is enabled
-    });
+      autowarp: config.warp.physicsMax > 0,  // Enable MechJeb autowarp if physics warp is enabled
+      overrideWarpToPlane: config.warp.physicsMax <= 0,  // Skip plane warp if autowarp disabled (inverse)
+      // Reset launch mode flags
+      launchingToPlane: false,
+      launchingToRendezvous: false,
+     launchPhaseAngle: 0, launchLANDifference: 0,};
+
+    // Configure launch mode specific settings
+    // Always reset launch mode values to prevent stale data from previous MechJeb usage
+
+    if (launchMode === 'rendezvous') {
+      ascentSettings.launchingToRendezvous = true;
+      ascentSettings.launchPhaseAngle = phaseAngle;  // Use provided value (default 0)
+    } else if (launchMode === 'plane') {
+      ascentSettings.launchingToPlane = true;
+      ascentSettings.launchLANDifference = lanDifference;  // Use provided value (default 0)
+      // For plane mode, let MechJeb calculate inclination from target
+      delete ascentSettings.desiredInclination;
+    }
+
+    await this.configure(ascentSettings);
 
     // Let MechJeb process the configuration
     await delay(500);
 
-    // Enable autopilot with retry loop (critical step - must succeed)
-    let autopilotEngaged = false;
-    for (let attempt = 1; attempt <= 10; attempt++) {
-      // Enable the autopilot
+    // For plane/rendezvous modes, MechJeb handles the countdown and warp to launch window
+    // For normal orbit mode, use our staged launch
+    if (launchMode === 'plane' || launchMode === 'rendezvous') {
+      // Enable autopilot and start countdown - MechJeb will warp to launch window
       await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
-      await delay(500);  // Let MechJeb state update
+      await delay(500);
+      await this.conn.execute('ADDONS:MJ:ASCENT:STARTCOUNTDOWN(TIME:SECONDS + 999999).');
+      await delay(1000);
 
-      // Verify it's enabled - try multiple times in case of empty response
-      for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
-        const verifyResult = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
-        if (verifyResult.output.toLowerCase().includes('true')) {
-          autopilotEngaged = true;
-          this.logger.progress(`[Ascent] Autopilot engaged`);
+      // Wait for MechJeb to warp to window and launch
+      let launched = false;
+      let wasWarping = false;
+      for (let i = 0; i < 600; i++) {
+        const statusResult = await this.conn.execute('PRINT SHIP:STATUS + "|" + WARP.');
+        const parts = statusResult.output.split('|');
+        const status = parts[0]?.toLowerCase() ?? '';
+        const warpLevel = parseInt(parts[1]?.trim() ?? '0');
+
+        if (status.includes('flying') || status.includes('orbiting') || status.includes('sub_orbital')) {
+          launched = true;
           break;
         }
-        if (verifyResult.output.toLowerCase().includes('false')) {
-          // Got valid response but not enabled - continue outer loop to retry enable
-          break;
+
+        // Track warp state and stage when warp completes (if MechJeb doesn't)
+        if (warpLevel > 0 && !wasWarping) {
+          this.logger.progress('[Ascent] Warping to launch window...');
+          wasWarping = true;
+        } else if (warpLevel === 0 && wasWarping) {
+          wasWarping = false;
+          // Give MechJeb a few seconds to launch on its own
+          await delay(3000);
+          const checkStatus = await this.conn.execute('PRINT SHIP:STATUS.');
+          if (checkStatus.output.toLowerCase().includes('prelaunch')) {
+            // Still on pad - stage manually
+            await this.conn.execute('STAGE.');
+            await delay(500);
+          }
         }
-        // Empty response - small delay and retry verify
-        await delay(200);
+
+        await delay(1000);
       }
 
-      if (autopilotEngaged) break;
-      this.logger.progress(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
-      await delay(300);
-    }
-
-    if (!autopilotEngaged) {
-      this.logger.warn('[Ascent] Autopilot may not have engaged after 10 attempts, proceeding anyway');
-    }
-
-    // Release controls
-    await this.conn.execute('UNLOCK THROTTLE.');
-    await delay(100);
-    await this.conn.execute('SAS OFF.');
-    await delay(100);
-
-    // Check if we need to stage (on launchpad with clamps vs already ready)
-    // PRELAUNCH = on launchpad with clamps - need to stage to release and ignite
-    // LANDED = on surface without clamps - MechJeb will throttle up directly
-    const statusResult = await this.conn.execute('PRINT SHIP:STATUS.');
-    const shipStatus = statusResult.output.toLowerCase();
-
-    if (shipStatus.includes('prelaunch')) {
-      // On launchpad with clamps - stage to release clamps and ignite engines
-      await this.conn.execute('STAGE.');
-      await delay(500);
-      this.logger.progress('[Ascent] STAGED TO LAUNCH');
+      if (!launched) {
+        throw new Error('MechJeb did not launch within timeout - check launch window');
+      }
     } else {
-      this.logger.progress('[Ascent] LAUNCH');
+      // Normal orbit mode - enable autopilot and stage manually
+      let autopilotEngaged = false;
+      for (let attempt = 1; attempt <= 10; attempt++) {
+        await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
+        await delay(500);
+
+        for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
+          const verifyResult = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
+          if (verifyResult.output.toLowerCase().includes('true')) {
+            autopilotEngaged = true;
+            this.logger.progress('[Ascent] Autopilot engaged');
+            break;
+          }
+          if (verifyResult.output.toLowerCase().includes('false')) {
+            break;
+          }
+          await delay(200);
+        }
+
+        if (autopilotEngaged) break;
+        this.logger.progress(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
+        await delay(300);
+      }
+
+      if (!autopilotEngaged) {
+        this.logger.warn('[Ascent] Autopilot may not have engaged after 10 attempts, proceeding anyway');
+      }
+
+      // Release controls
+      await this.conn.execute('UNLOCK THROTTLE.');
+      await delay(100);
+      await this.conn.execute('SAS OFF.');
+      await delay(100);
+
+      // Check if we need to stage
+      const statusResult = await this.conn.execute('PRINT SHIP:STATUS.');
+      const shipStatus = statusResult.output.toLowerCase();
+
+      if (shipStatus.includes('prelaunch')) {
+        await this.conn.execute('STAGE.');
+        await delay(500);
+        this.logger.progress('[Ascent] STAGED TO LAUNCH');
+      } else {
+        this.logger.progress('[Ascent] LAUNCH');
+      }
     }
 
     // Enable physics warp after 20 seconds if configured via env var
     // This replaces the old autoWarp parameter with global env var control
     if (config.warp.physicsMax > 0) {
-      setTimeout(async () => {
-          await this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`);
+      void setTimeout(() => {
+        this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`)
+          .catch(() => { /* Ignore warp errors during ascent */ });
       }, 20_000);
     }
 
@@ -553,11 +1025,19 @@ async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
  */
 export const launchAscentTool: ToolDefinition = {
   name: 'launch',
-  description: 'Launch from pad or ground to orbit. Automatically circularizes after ascent.',
+  description: 'Launch from pad or ground to orbit. Supports three modes: basic orbit launch, launch to rendezvous (match target phase angle), or launch to plane (match target orbital plane).',
   inputSchema: {
     altitude: z.union([distanceSchema, z.literal('auto')]).optional().default('auto')
       .describe('Optional target orbit altitude in meters, default above atmosphere.'),
     inclination: z.number().optional().default(0).describe('Optional target inclination in degrees, equatorial=0'),
+    launchMode: z.enum(['orbit', 'rendezvous', 'plane']).optional().default('orbit')
+      .describe("Launch mode: 'orbit' (default), 'rendezvous' (intercept target), or 'plane' (match target orbital plane)"),
+    target: z.string().optional()
+      .describe("Optional. Aligns for launch to target and waits/warps for optimal window."),
+    phaseAngle: z.number().optional().default(0)
+      .describe("Phase angle for rendezvous mode in degrees (default: 0)"),
+    lanDifference: z.number().optional().default(0)
+      .describe("LAN offset from target for plane mode in degrees (default: 0)"),
     wait: z.union([z.boolean(), z.literal('auto')]).optional().default('auto')
       .describe('Wait for orbit and stream progress updates.'),
   },
@@ -578,9 +1058,43 @@ export const launchAscentTool: ToolDefinition = {
       return ctx.errorResponse('launch', validation.error ?? 'Invalid vessel state');
     }
 
-    // Resolve 'auto' altitude to default based on body's atmosphere
+    // Smart parameter resolution: if target is provided or already exists, auto-select launch params
+    let smartParams: SmartLaunchParams | null = null;
+    const targetArg = args.target as string | undefined;
+
+    if (targetArg || await hasTarget(conn)) {
+      smartParams = await resolveSmartLaunchParams(conn, targetArg, logger);
+
+      // Check for errors (e.g., trying to do interplanetary from a moon)
+      if (smartParams.error) {
+        return ctx.errorResponse('launch', smartParams.error);
+      }
+
+      // Log the chosen strategy
+      if (smartParams.strategyMessage) {
+        logger.progress(`[Ascent] ${smartParams.strategyMessage}`);
+      }
+
+      // Handle pre-launch actions (must succeed before launch)
+      if (smartParams.prelaunchAction === 'warp_to_overhead' && smartParams.target) {
+        await warpUntilBodyOverhead(conn, smartParams.target, logger);
+      } else if (smartParams.prelaunchAction === 'warp_to_transfer_window') {
+        const warpError = await warpToTransferWindow(conn, logger);
+        if (warpError) {
+          return ctx.errorResponse('launch', `Cannot launch to ${smartParams.target}: ${warpError}`);
+        }
+      }
+    }
+
+    // Determine final launch parameters (smart params override args when available)
     const altArg = args.altitude as number | 'auto';
-    const altitude = altArg === 'auto' ? await getDefaultLaunchAltitude(conn) : altArg;
+    const defaultAltitude = altArg === 'auto' ? await getDefaultLaunchAltitude(conn) : altArg;
+
+    // Use smart params if resolved, otherwise use args (nullish coalescing)
+    const altitude = smartParams?.altitude ?? defaultAltitude;
+    const inclination = smartParams?.inclination ?? (args.inclination as number);
+    const launchMode = smartParams?.launchMode ?? (args.launchMode as LaunchMode);
+    const target = smartParams?.target ?? targetArg;
 
     // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor on completion)
     await setKosOperation(conn, 'ascent', 'launch', String(altitude));
@@ -589,8 +1103,12 @@ export const launchAscentTool: ToolDefinition = {
       const program = new AscentProgram(conn, logger);
       const handle = await program.launchToOrbit({
         altitude,
-        inclination: args.inclination as number,
+        inclination,
         autoStage: true,
+        launchMode,
+        target,
+        phaseAngle: args.phaseAngle as number,
+        lanDifference: args.lanDifference as number,
       });
 
       // Resolve 'auto' to client-appropriate default
@@ -645,8 +1163,16 @@ export const launchAscentTool: ToolDefinition = {
       } else {
         // Return immediately - operation continues in background
         // Safety monitor in kOS will auto-clear _MCP_OP when orbit is achieved
+        let launchMsg = `Launch started! Target: ${(altitude / 1000).toFixed(0)} km orbit.`;
+        if (smartParams?.strategyMessage) {
+          launchMsg = `${smartParams.strategyMessage}\nLaunch started! Target: ${(altitude / 1000).toFixed(0)} km orbit at ${inclination.toFixed(1)}° inclination.`;
+        } else if (launchMode === 'rendezvous') {
+          launchMsg = `Launch to Rendezvous started! Target: ${target}, ${(altitude / 1000).toFixed(0)} km orbit`;
+        } else if (launchMode === 'plane') {
+          launchMsg = `Launch to Plane started! Target: ${target}'s orbital plane, ${(altitude / 1000).toFixed(0)} km orbit`;
+        }
         return ctx.successResponse('launch',
-          `Launch started! Target: ${(altitude / 1000).toFixed(0)} km orbit.\nPoll status for progress. MechJeb is flying.`);
+          `${launchMsg}\nPoll status for progress. MechJeb is flying.`);
       }
     } catch (error) {
       // Clear operation state on error

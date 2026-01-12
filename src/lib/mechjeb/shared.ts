@@ -3,6 +3,7 @@
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
+import type { McpLogger } from '../tool-types.js';
 
 /**
  * Unlock steering and throttle controls.
@@ -430,27 +431,44 @@ export async function formatResultingOrbit(conn: KosConnection): Promise<string>
  * Call this after creating a maneuver node to warn about dangerous trajectories.
  *
  * @param conn kOS connection
+ * @param logger Optional logger for debugging
  * @returns Warning string if dangerous, undefined if safe
  */
-export async function checkPostBurnPeriapsis(conn: KosConnection): Promise<string | undefined> {
-  // Query post-burn periapsis and atmosphere in one atomic command
-  const result = await conn.execute(
-    'IF HASNODE { PRINT "PE|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(SHIP:BODY:ATM:HEIGHT) + "|" + SHIP:BODY:NAME. } ELSE { PRINT "NONODE". }',
-    3000
-  );
+export async function checkPostBurnPeriapsis(conn: KosConnection, logger?: McpLogger): Promise<string | undefined> {
+  try {
+    // Query post-burn periapsis and atmosphere in one atomic command
+    // Handle airless bodies by checking ATM:EXISTS first
+    const result = await conn.execute(
+      'IF HASNODE { ' +
+      'LOCAL atmH IS CHOOSE SHIP:BODY:ATM:HEIGHT IF SHIP:BODY:ATM:EXISTS ELSE 0. ' +
+      'PRINT "PE|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(atmH) + "|" + SHIP:BODY:NAME. ' +
+      '} ELSE { PRINT "NONODE". }',
+      3000
+    );
 
-  const match = result.output.match(/PE\|(-?\d+)\|(\d+)\|(.+)/);
-  if (!match) return undefined;
+    logger?.info(`[checkPostBurnPeriapsis] Raw output: ${result.output}`);
 
-  const postBurnPe = Number.parseInt(match[1]);
-  const atmHeight = Number.parseInt(match[2]);
-  const bodyName = match[3].trim();
+    const match = result.output.match(/PE\|(-?\d+)\|(\d+)\|(.+)/);
+    if (!match) {
+      logger?.warn(`[checkPostBurnPeriapsis] Failed to parse output: ${result.output}`);
+      return undefined;
+    }
 
-  if (postBurnPe < 0) {
-    return `⚠️ CRASH WARNING: Post-burn periapsis ${(postBurnPe / 1000).toFixed(1)}km below ${bodyName} surface!`;
-  } else if (atmHeight > 0 && postBurnPe < atmHeight) {
-    return `⚠️ REENTRY WARNING: Post-burn periapsis ${(postBurnPe / 1000).toFixed(1)}km below ${bodyName} atmosphere (${(atmHeight / 1000).toFixed(0)}km)!`;
+    const postBurnPe = Number.parseInt(match[1]);
+    const atmHeight = Number.parseInt(match[2]);
+    const bodyName = match[3].trim();
+
+    logger?.info(`[checkPostBurnPeriapsis] PostBurnPe=${postBurnPe}, atmHeight=${atmHeight}, body=${bodyName}`);
+
+    if (postBurnPe < 0) {
+      return `⚠️ CRASH WARNING: Post-burn periapsis ${(postBurnPe / 1000).toFixed(1)}km below ${bodyName} surface!`;
+    } else if (atmHeight > 0 && postBurnPe < atmHeight) {
+      return `⚠️ REENTRY WARNING: Post-burn periapsis ${(postBurnPe / 1000).toFixed(1)}km below ${bodyName} atmosphere (${(atmHeight / 1000).toFixed(0)}km)!`;
+    }
+
+    return undefined;
+  } catch (error) {
+    logger?.error(`[checkPostBurnPeriapsis] Error: ${error}`);
+    return undefined;
   }
-
-  return undefined;
 }

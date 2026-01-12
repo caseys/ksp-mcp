@@ -2,14 +2,9 @@
  * Adjust Apoapsis - Change orbit high point
  */
 
-import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, formatResultingOrbit, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
 import { validateVesselState, STABLE_ORBIT_REQUIREMENTS } from '../../kos/vessel/validate.js';
-import { ManeuverOrchestrator } from '../orchestrator.js';
-import type { ToolDefinition } from '../../tool-types.js';
-import { executeSchema, distanceSchema } from '../../tool-types.js';
-import { formatTime,  fmtVel } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to adjust apoapsis.
@@ -40,67 +35,3 @@ export async function adjustApoapsis(
   }
   return executeManeuverCommand(conn, cmd, 10_000, 'adjust_apoapsis');
 }
-
-// ============================================================================
-// Tool Definition
-// ============================================================================
-
-export const adjustApoapsisTool: ToolDefinition = {
-  name: 'adjust_apoapsis',
-  description: 'Change orbit high point. Use to raise/lower orbit.',
-  inputSchema: {
-    altitude: z.union([distanceSchema, z.literal('auto')])
-      .optional()
-      .default('auto')
-      .describe('Target apoapsis altitude in meters (default: current + 10km)'),
-    timeRef: z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW', 'ALTITUDE'])
-      .optional()
-      .default('PERIAPSIS')
-      .describe('When to execute the maneuver'),
-    execute: executeSchema,
-  },
-  annotations: {
-    readOnlyHint: false,
-    destructiveHint: true,
-    idempotentHint: false,
-    openWorldHint: false,
-  },
-  tier: 2,
-  handler: async (args, ctx, extra) => {
-    try {
-      const conn = await ctx.ensureConnected();
-      const orchestrator = new ManeuverOrchestrator(conn);
-      const logger = ctx.createLogger(extra);
-
-      // Resolve 'auto' altitude: current apoapsis + 10km
-      const altArg = args.altitude as number | 'auto';
-      let altitude: number;
-      if (altArg === 'auto') {
-        const orbitInfo = await ctx.getBasicOrbitInfo(conn);
-        altitude = orbitInfo ? orbitInfo.apoapsis + 10_000 : 100_000;
-      } else {
-        altitude = altArg;
-      }
-
-      const result = await orchestrator.adjustApoapsis(altitude, args.timeRef as string, {
-        execute: args.execute as boolean,
-        logger,
-        callerTool: 'adjust_apoapsis',
-      });
-
-      if (result.success) {
-        let text = result.executed
-          ? 'Burn complete'
-          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
-        if (result.executed) {
-          text += await formatResultingOrbit(conn);
-        }
-        return ctx.successResponse('adjust_apoapsis', text);
-      } else {
-        return ctx.errorResponse('adjust_apoapsis', result.error ?? 'Failed');
-      }
-    } catch (error) {
-      return ctx.errorResponse('adjust_apoapsis', error instanceof Error ? error.message : String(error));
-    }
-  },
-};

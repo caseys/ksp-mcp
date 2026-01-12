@@ -4,3 +4,4 @@
 
 export { transferTool } from './transfer.js';
 export { inclinationTool } from './inclination.js';
+export { adjustOrbitTool } from './adjust-orbit.js';
