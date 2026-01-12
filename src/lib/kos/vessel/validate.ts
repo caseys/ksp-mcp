@@ -160,13 +160,12 @@ export async function validateVesselState(
 
   // Check allowed statuses
   if (requirements.allowedStatuses && !requirements.allowedStatuses.includes(status)) {
-    const allowedNames = requirements.allowedStatuses.map(s => STATUS_NAMES[s]).join(' or ');
+    // Format status in uppercase for readability
+    const statusUpper = status.toUpperCase().replace('_', ' ');
     return {
       valid: false,
       stateInfo,
-      error: `Cannot use ${toolName}: Vessel is ${STATUS_NAMES[status]}.\n` +
-             `${toolName} requires the vessel to be ${allowedNames}.\n\n` +
-             `Current status: ${status.toUpperCase()} at ${bodyName}`,
+      error: `Ship is ${statusUpper}. ${toolName} must be started from orbit.`,
     };
   }
 
@@ -267,6 +266,14 @@ export async function validateVesselState(
  */
 export const ORBITAL_REQUIREMENTS: VesselStateRequirements = {
   forbiddenStatuses: ['prelaunch', 'landed', 'splashed'],
+};
+
+/**
+ * Strict validation requirements requiring ORBITING status.
+ * Used for transfer tools that need a stable orbit.
+ */
+export const ORBITING_ONLY_REQUIREMENTS: VesselStateRequirements = {
+  allowedStatuses: ['orbiting'],
 };
 
 /**

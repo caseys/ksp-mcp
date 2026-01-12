@@ -8,7 +8,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { formatTime, fmtDist, fmtVel } from '../../utils/format.js';
+import { formatTime, fmtDist, fmtVel, formatMeasurements } from '../../utils/format.js';
 
 // ============================================================================
 // Types
@@ -81,8 +81,7 @@ void (undefined as unknown as PositionTarget);
 /**
  * Clean up MechJeb status strings:
  * - Add newline before "Course correction" (MechJeb concatenates without separator)
- * - Format meter values with fmtDist (e.g., "196m" → "196m", "15000m" → "15km")
- * - Handles integers and decimals, but NOT m/s (velocity)
+ * - Format measurements (distances, velocities, times) using formatMeasurements()
  */
 function formatMechJebStatus(status: string): string {
   let result = status;
@@ -90,12 +89,8 @@ function formatMechJebStatus(status: string): string {
   // Add newline before "Course correction" (MechJeb concatenates status lines)
   result = result.replaceAll(/(\S)(Course correction)/g, '$1\n$2');
 
-  // Format meter values: patterns like "196m" or "15000.5m" but NOT "15m/s"
-  // Use negative lookahead to exclude m/s (velocity)
-  result = result.replaceAll(/(\d+(?:\.\d+)?)m(?!\/)/g, (match, meters) => {
-    const m = parseFloat(meters);
-    return fmtDist(m);
-  });
+  // Format all embedded measurements (distances, velocities, times)
+  result = formatMeasurements(result);
 
   return result;
 }

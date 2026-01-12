@@ -6,7 +6,7 @@ import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, queryTargetEncounterInfo, sanitizeError, type ManeuverResult } from '../shared.js';
 import { clearNodes } from '../../kos/nodes.js';
 import { validateTarget } from '../../kos/target/validate.js';
-import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
+import { validateVesselState, ORBITING_ONLY_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import { z } from 'zod';
 import type { ToolDefinition } from '../../tool-types.js';
@@ -157,8 +157,8 @@ export async function hohmannTransfer(
   capture = false,
   rendezvous = true
 ): Promise<ManeuverResult> {
-  // Validate vessel state: must not be on ground
-  const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'hohmann_transfer');
+  // Validate vessel state: must be in stable orbit
+  const vesselValidation = await validateVesselState(conn, ORBITING_ONLY_REQUIREMENTS, 'hohmann_transfer');
   if (!vesselValidation.valid) {
     return { success: false, error: vesselValidation.error };
   }

@@ -31,9 +31,9 @@ export async function interplanetaryTransfer(
   const { waitForPhaseAngle = true, logger } = options;
   const log = logger ?? nullLogger;
 
-  // Validate vessel state: must be orbiting a planet (not a moon)
+  // Validate vessel state: must be ORBITING a planet (not a moon)
   const vesselValidation = await validateVesselState(conn, {
-    forbiddenStatuses: ['prelaunch', 'landed', 'splashed'],
+    allowedStatuses: ['orbiting'],
     requireAtPlanet: true,
   }, 'interplanetary_transfer');
   if (!vesselValidation.valid) {

@@ -69,3 +69,33 @@ export function formatOrbit(apoapsisM: number, periapsisM: number): string {
 export function fmtVel(metersPerSecond: number): string {
   return `${Math.round(metersPerSecond)}_m/sec`;
 }
+
+/**
+ * Format embedded measurements in a sentence:
+ * - Distances: "2400000m" → "2400km", "203m" → "203m"
+ * - Velocities: "27.2 m/s" or "27.2m/s" → "27_m/sec"
+ * - Times: "5s" or "30s" → "5sec" or "30sec"
+ */
+export function formatMeasurements(text: string): string {
+  let result = text;
+
+  // Format velocities first (before distances, since m/s contains 'm')
+  // Matches: "27.2 m/s", "27.2m/s", "100 m/s"
+  result = result.replaceAll(/(\d+(?:\.\d+)?)\s*m\/s\b/g, (_, num) => {
+    return fmtVel(parseFloat(num));
+  });
+
+  // Format distances: "2400000m", "203m" (but not "m/s" which was already handled)
+  // Matches: digits followed by 'm' not followed by '/' or letters
+  result = result.replaceAll(/(\d+(?:\.\d+)?)m(?![/a-z])/gi, (_, num) => {
+    return fmtDist(parseFloat(num));
+  });
+
+  // Format times: "5s", "30s" (standalone seconds, not part of words)
+  // Matches: digits followed by 's' at word boundary
+  result = result.replaceAll(/(\d+(?:\.\d+)?)s\b/g, (_, num) => {
+    return formatTime(parseFloat(num));
+  });
+
+  return result;
+}

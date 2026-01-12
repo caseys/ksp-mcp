@@ -165,14 +165,19 @@ async function monitorLanding(
     onPoll: (state) => {
       // Log progress if status changed
       if (state.status.status !== lastStatusText) {
+        lastStatusText = state.status.status;
         let statusText;
         if (/Coasting toward deceleration/.test(state.status.status)) {
-          conn.execute(`SET WARP TO +1.`);     
-          statusText = 'Coasting toward deceleration burn'; 
+          conn.execute(`SET WARP TO +1.`);
+          statusText = 'Coasting toward deceleration burn';
+        } else if (/Warping to start of braking burn/.test(state.status.status)) {
+          conn.execute(`SET WARP TO +1.`);          
+        } else if (state.status.status === 'Off') {
+          statusText = 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.';
+        } else {
+            statusText = state.status.status;
         }
-        statusText = state.status.status === 'Off' ? 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.' : state.status.status;
         log.progress(`[Landing] ${statusText}`);
-        lastStatusText = state.status.status;
       }
 
       // Log touchdown
@@ -342,7 +347,7 @@ export const landTool: ToolDefinition = {
         // Continue with landing
       } else {
         // Stable orbit - normal landing
-        logger.progress(`[Landing] Stable orbit confirmed (Pe=${fmtDist(periapsis)}, ecc=${eccentricity.toFixed(3)})`);
+        logger.progress(`[Landing] Stable orbit confirmed`);
       }
 
       // Step 1: Resolve landing target

@@ -9,7 +9,7 @@
 
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import { getTargetValidationInfo, type TargetClass } from '../../kos/target/validate.js';
-import { getVesselStateInfo, type BodyType } from '../../kos/vessel/validate.js';
+import { getVesselStateInfo, validateVesselState, ORBITING_ONLY_REQUIREMENTS, type BodyType } from '../../kos/vessel/validate.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
 import { formatTime,  fmtVel } from '../../utils/format.js';
@@ -37,6 +37,12 @@ export const transferTool: ToolDefinition = {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
       const logger = ctx.createLogger(extra);
+
+      // Validate vessel state FIRST: must be in orbit before checking SOI/target
+      const vesselValidation = await validateVesselState(conn, ORBITING_ONLY_REQUIREMENTS, 'transfer');
+      if (!vesselValidation.valid) {
+        return ctx.errorResponse('transfer', vesselValidation.error ?? 'Invalid vessel state');
+      }
 
       // Auto-select target if not provided (use 2nd closest like hohmann)
       let target = args.target as string | undefined;
