@@ -11,8 +11,8 @@ import { validateVesselState, getVesselStateInfo, ORBITAL_REQUIREMENTS } from '.
 import { clearNodes } from '../../kos/nodes.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
-import { formatTime, fmtVel, fmtDist } from '../../utils/format.js';
-import { formatResultingOrbit, checkPostBurnPeriapsis } from '../shared.js';
+import { formatTime, fmtVel, fmtDist, fmtPeAp } from '../../utils/format.js';
+import { checkPostBurnPeriapsis } from '../shared.js';
 
 export const adjustOrbitTool: ToolDefinition = {
   name: 'adjust_orbit',
@@ -257,13 +257,34 @@ export const adjustOrbitTool: ToolDefinition = {
         }
       }
 
-      const finalOrbit = await formatResultingOrbit(conn);
+      // Get final orbit info for result message
+      const finalOrbitInfo = await ctx.getBasicOrbitInfo(conn);
+      const finalPe = finalOrbitInfo?.periapsis ?? targetPe;
+      const finalAp = finalOrbitInfo?.apoapsis ?? targetAp;
+
+      // Check if circular: ap and pe within 10% of each other
+      const isCircular = finalAp > 0 && Math.abs(finalAp - finalPe) / finalAp < 0.1;
       const burnSummary = burns.length > 1 ? ` (${burns.join(' + ')})` : '';
 
+      // Build action description based on what was achieved
+      let actionDescription: string;
+      if (isCircular) {
+        actionDescription = `Orbit circularized`;
+      } else if (raisingAp && raisingPe) {
+        actionDescription = `Orbit raised successfully`;
+      } else if (!raisingAp && !raisingPe) {
+        actionDescription = `Orbit lowered successfully`;
+      } else if (raisingAp) {
+        actionDescription = `Apoapsis raised successfully`;
+      } else if (raisingPe) {
+        actionDescription = `Periapsis raised successfully`;
+      } else {
+        actionDescription = `Orbit adjusted successfully`;
+      }
+
       return ctx.successResponse(toolName,
-        `Orbit adjusted to Pe=${fmtDist(targetPe)}, Ap=${fmtDist(targetAp)}\n` +
-        `Total Δv: ${fmtVel(totalDeltaV)}${burnSummary}` +
-        finalOrbit);
+        `${actionDescription}: ${fmtPeAp(finalPe, finalAp)}\n` +
+        `Total Δv: ${fmtVel(totalDeltaV)}${burnSummary}`);
 
     } catch (error) {
       return ctx.errorResponse('adjust_orbit', error instanceof Error ? error.message : String(error));

@@ -59,7 +59,7 @@ export async function findLandingSite(
   const {
     maxAltitude = 4000,
     searchWindow = 2400,
-    searchStep = 20,
+    searchStep = 10,  // Finer search for stricter sun/radio thresholds
   } = options;
 
   // Build the kOS script for site finding
@@ -128,7 +128,7 @@ async function runSiteSearch(
     requireRadio: boolean;
   }
 ): Promise<LandingSiteResult> {
-  const { maxAltitude, searchWindow, searchStep, requireSun, requireRadio } = options;
+  const { maxAltitude, searchWindow: _searchWindow, searchStep, requireSun, requireRadio } = options;
 
   // Check if we're in Kerbin SOI (for radio contact check)
   const soiCheck = await conn.execute(
@@ -138,18 +138,16 @@ async function runSiteSearch(
   const inKerbinSOI = soiCheck.output.includes('KERBIN_SOI');
 
   // Build kOS script (no // comments - they break when newlines are removed!)
+  // Key fixes:
+  // 1. Use POSITIONAT for sun/Kerbin at candidate landing time (fixes Minmus bug)
+  // 2. Reduced sun angle: 54° (40% reduction from 90°, centered on sun)
+  // 3. Reduced radio angle: 72° (20% safety margin)
   const script = `
 SET sb TO SHIP:BODY.
-SET sun_pos TO SUN:POSITION.
-SET kerbin_pos TO BODY("Kerbin"):POSITION.
 SET max_alt TO ${maxAltitude}.
-SET window TO ${searchWindow}.
 SET step TO ${searchStep}.
 SET require_sun TO ${requireSun ? 'TRUE' : 'FALSE'}.
 SET require_radio TO ${requireRadio && inKerbinSOI ? 'TRUE' : 'FALSE'}.
-SET sb_pos TO sb:POSITION.
-SET sun_dir TO (sun_pos - sb_pos):NORMALIZED.
-SET kerbin_dir TO (kerbin_pos - sb_pos):NORMALIZED.
 SET period TO SHIP:ORBIT:PERIOD.
 SET min_approach TO period / 16.
 SET found TO FALSE.
@@ -169,10 +167,12 @@ UNTIL dt > (min_approach + period) OR found {
     IF alt_est <= max_alt {
       SET surf_pos TO geo:POSITION.
       SET upVec TO (surf_pos - sb:POSITION):NORMALIZED.
-      SET sun_angle TO VANG(upVec, sun_pos - surf_pos).
-      SET is_sunlit TO sun_angle < 90.
-      SET kerbin_angle TO VANG(upVec, kerbin_pos - surf_pos).
-      SET has_radio TO kerbin_angle < 90.
+      SET sun_pos_at_ut TO POSITIONAT(SUN, ut).
+      SET kerbin_pos_at_ut TO POSITIONAT(BODY("Kerbin"), ut).
+      SET sun_angle TO VANG(upVec, sun_pos_at_ut - surf_pos).
+      SET is_sunlit TO sun_angle < 54.
+      SET kerbin_angle TO VANG(upVec, kerbin_pos_at_ut - surf_pos).
+      SET has_radio TO kerbin_angle < 72.
       SET sun_ok TO (NOT require_sun) OR is_sunlit.
       SET radio_ok TO (NOT require_radio) OR has_radio.
       IF sun_ok AND radio_ok {

@@ -63,6 +63,27 @@ export function formatOrbit(apoapsisM: number, periapsisM: number): string {
 }
 
 /**
+ * Format Pe/Ap for display. If circular (within 10%), show single value.
+ * Examples:
+ *   - Circular: "100km" or "100km (circular)" if showCircularLabel=true
+ *   - Elliptical: "Pe: 80km, Ap: 120km"
+ */
+export function fmtPeAp(periapsisM: number, apoapsisM: number, showCircularLabel = false): string {
+  const pe = Math.abs(periapsisM);
+  const ap = Math.abs(apoapsisM);
+
+  // Check if circular: ap and pe within 10% of each other
+  const isCircular = ap > 0 && Math.abs(ap - pe) / ap < 0.1;
+
+  if (isCircular) {
+    const avgAlt = (pe + ap) / 2;
+    return showCircularLabel ? `${fmtDist(avgAlt)} (circular)` : fmtDist(avgAlt);
+  }
+
+  return `Pe: ${fmtDist(pe)}, Ap: ${fmtDist(ap)}`;
+}
+
+/**
  * Format velocity for TTS: @20m/sec or @-20m/sec
  * Note: number touches 'm' with no space for TTS clarity
  */
