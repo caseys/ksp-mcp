@@ -4,8 +4,8 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, type ManeuverResult } from '../shared.js';
-import { getTargetValidationInfo } from '../../kos/target/validate.js';
+import { queryNodeInfo, queryWrongEncounterDetails, type ManeuverResult } from '../shared.js';
+import { getTargetValidationInfo, type TargetInfo } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
@@ -34,6 +34,35 @@ async function queryNodePeriapsis(conn: KosConnection): Promise<{ hasEncounter: 
 
   const match = result.output.match(/ENC\|(-?[\d.]+)/);
   return { hasEncounter: true, periapsis: match ? parseFloat(match[1]) : 0 };
+}
+
+/**
+ * Check if a pending maneuver node would create an encounter with the target.
+ * Returns encounter info from the node's predicted orbit.
+ */
+async function queryNodeEncounter(conn: KosConnection): Promise<{ hasNode: boolean; hasEncounter: boolean; encounterBody?: string }> {
+  const result = await conn.execute(
+    'IF HASNODE { ' +
+    'IF NEXTNODE:ORBIT:HASNEXTPATCH { ' +
+    'PRINT "NODE_ENC|" + NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. ' +
+    '} ELSE { PRINT "NODE_NOENC". } ' +
+    '} ELSE { PRINT "NONODE". }',
+    3000
+  );
+
+  if (result.output.includes('NONODE')) {
+    return { hasNode: false, hasEncounter: false };
+  }
+  if (result.output.includes('NODE_NOENC')) {
+    return { hasNode: true, hasEncounter: false };
+  }
+
+  const match = result.output.match(/NODE_ENC\|(\w+)/);
+  return {
+    hasNode: true,
+    hasEncounter: match !== null,
+    encounterBody: match?.[1],
+  };
 }
 
 /**
@@ -80,6 +109,159 @@ async function queryActualPeriapsis(conn: KosConnection): Promise<{ hasEncounter
   return { hasEncounter: true, periapsis: value };
 }
 
+/**
+ * Info about closest approach to target (even without formal SOI encounter)
+ */
+interface ClosestApproachInfo {
+  hasApproach: boolean;
+  distance: number;          // meters
+  time: number;              // seconds from now
+  inCurrentPatch: boolean;   // true if in current orbit, false if future patch
+  patchBody?: string;        // body name if in future patch
+  intermediateBody?: string; // if there's an encounter with a body before reaching target
+}
+
+/**
+ * Query closest approach to target, even if no formal SOI encounter exists.
+ * Uses SHIP:ORBIT:TARGETDISTANCE and TARGETTIME for current patch,
+ * and iterates NEXTPATCH to find closest approach in future conics.
+ */
+async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproachInfo> {
+  const script = `
+    LOCAL found IS FALSE.
+    LOCAL dist IS 0.
+    LOCAL t IS 0.
+    LOCAL inCurrent IS TRUE.
+    LOCAL patchBody IS "".
+    LOCAL intermediate IS "".
+
+    IF HASTARGET AND SHIP:ORBIT:TARGETDISTANCE > 0 {
+      SET found TO TRUE.
+      SET dist TO SHIP:ORBIT:TARGETDISTANCE.
+      SET t TO SHIP:ORBIT:TARGETTIME.
+    }
+
+    IF SHIP:ORBIT:HASNEXTPATCH {
+      LOCAL nextBody IS SHIP:ORBIT:NEXTPATCH:BODY:NAME.
+      IF HASTARGET AND nextBody <> TARGET:NAME {
+        SET intermediate TO nextBody.
+      }
+    }
+
+    IF NOT found {
+      LOCAL patch IS SHIP:ORBIT.
+      LOCAL count IS 0.
+      UNTIL count > 5 {
+        IF patch:HASNEXTPATCH {
+          SET patch TO patch:NEXTPATCH.
+          SET patchBody TO patch:BODY:NAME.
+          IF HASTARGET AND patch:TARGETDISTANCE > 0 {
+            SET found TO TRUE.
+            SET dist TO patch:TARGETDISTANCE.
+            SET t TO patch:TARGETTIME.
+            SET inCurrent TO FALSE.
+            BREAK.
+          }
+        } ELSE { BREAK. }
+        SET count TO count + 1.
+      }
+    }
+
+    IF found {
+      PRINT "CA|" + ROUND(dist) + "|" + ROUND(t) + "|" + inCurrent + "|" + patchBody + "|" + intermediate.
+    } ELSE {
+      PRINT "NOCA".
+    }
+  `.trim().replaceAll('\n', ' ');
+
+  const result = await conn.execute(script, 10_000);
+  const output = result.output.trim();
+
+  // Check for no closest approach
+  if (output.endsWith('NOCA')) {
+    return { hasApproach: false, distance: 0, time: 0, inCurrentPatch: true };
+  }
+
+  // Parse CA|dist|time|inCurrent|patchBody|intermediate
+  const match = output.match(/CA\|(\d+)\|(\d+)\|(True|False)\|([^|]*)\|([^|]*)$/i);
+  if (!match) {
+    return { hasApproach: false, distance: 0, time: 0, inCurrentPatch: true };
+  }
+
+  return {
+    hasApproach: true,
+    distance: parseInt(match[1]),
+    time: parseInt(match[2]),
+    inCurrentPatch: match[3].toLowerCase() === 'true',
+    patchBody: match[4] || undefined,
+    intermediateBody: match[5] || undefined,
+  };
+}
+
+/**
+ * Handle detour scenario when an intermediate body is between us and target.
+ * Analyzes trajectory and returns appropriate guidance or error.
+ */
+async function handleDetourScenario(
+  conn: KosConnection,
+  caInfo: ClosestApproachInfo,
+  targetInfo: TargetInfo,
+  logger?: McpLogger
+): Promise<IterativeCourseResult | null> {
+  const intermediateBody = caInfo.intermediateBody!;
+
+  // Query encounter details with intermediate body
+  // Note: This function expects nodes to exist, but we may not have nodes yet
+  // We'll need to check what we can query without nodes
+  const details = await queryWrongEncounterDetails(conn, intermediateBody);
+
+  if (!details) {
+    // Can't get details - just inform user about the situation
+    logger?.info(`[CourseCorrect] Intermediate body ${intermediateBody} detected but can't query details`);
+    return {
+      success: false,
+      error: `Encounter with ${intermediateBody} before reaching ${targetInfo.name}.\n` +
+             `Closest approach to ${targetInfo.name}: ${(caInfo.distance / 1000).toFixed(0)}km in ${formatTime(caInfo.time)}\n\n` +
+             `Options:\n` +
+             `1. Complete ${intermediateBody} flyby first, then retarget ${targetInfo.name}\n` +
+             `2. Use course_correct with target=${intermediateBody} to adjust flyby`,
+      attempts: 0,
+      finalPeriapsis: 0,
+    };
+  }
+
+  const encPeKm = (details.encounterPeriapsis / 1000).toFixed(0);
+
+  if (details.isCrash) {
+    // Crash trajectory with intermediate - must fix first
+    return {
+      success: false,
+      error: `CRASH TRAJECTORY at ${intermediateBody}! Periapsis: ${encPeKm}km\n` +
+             `Target was ${targetInfo.name}, but ${intermediateBody} is in the way.\n\n` +
+             `REQUIRED: Use course_correct with target=${intermediateBody} to raise periapsis first.`,
+      attempts: 0,
+      finalPeriapsis: details.encounterPeriapsis,
+    };
+  }
+
+  if (details.hasCloseApproach) {
+    // Safe flyby of intermediate, close approach to actual target exists
+    logger?.info(`[CourseCorrect] Safe ${intermediateBody} flyby (${encPeKm}km) en route to ${targetInfo.name}`);
+    // Return null to signal "proceed with normal course correction"
+    return null;
+  }
+
+  // Safe encounter but no close approach to target - suggest detour
+  return {
+    success: false,
+    error: `Encounter with ${intermediateBody} (Pe: ${encPeKm}km) blocks direct path to ${targetInfo.name}.\n` +
+           `Closest approach to ${targetInfo.name}: ${(caInfo.distance / 1000).toFixed(0)}km\n\n` +
+           `Suggestion: Complete ${intermediateBody} flyby first, then retarget ${targetInfo.name}.`,
+    attempts: 0,
+    finalPeriapsis: 0,
+  };
+}
+
 // RCS pulses removed - prograde/retrograde thrust doesn't map directly to
 // periapsis changes at distant targets due to orbital geometry. Instead,
 // use iterative MechJeb course correction nodes.
@@ -121,12 +303,54 @@ export async function courseCorrection(
   }
 
   if (!targetInfo.hasEncounter) {
-    return {
-      success: false,
-      error: `No encounter with ${targetInfo.name}.\ncourse_correct requires an existing encounter (trajectory through target's SOI).\n\nUse hohmann_transfer first to establish an encounter.`,
-      attempts: 0,
-      finalPeriapsis: 0,
-    };
+    // No formal SOI encounter from ship's current orbit
+    // Check if there's a pending node that WOULD create an encounter
+    const nodeEnc = await queryNodeEncounter(conn);
+    if (nodeEnc.hasNode && nodeEnc.hasEncounter) {
+      // There's already a transfer node planned - user needs to execute it first
+      const isCorrectTarget = nodeEnc.encounterBody?.toLowerCase() === targetInfo.name.toLowerCase();
+      if (isCorrectTarget) {
+        logger?.info(`[CourseCorrect] Pending node creates ${targetInfo.name} encounter - execute it first`);
+        return {
+          success: false,
+          error: `Transfer node already planned with ${targetInfo.name} encounter.\n` +
+                 `Execute the existing node first (use execute_node), then course_correct.`,
+          attempts: 0,
+          finalPeriapsis: 0,
+        };
+      } else {
+        // Node creates encounter with different body
+        logger?.info(`[CourseCorrect] Pending node creates ${nodeEnc.encounterBody} encounter, not ${targetInfo.name}`);
+      }
+    }
+
+    // Check for closest approach
+    const caInfo = await queryClosestApproach(conn);
+
+    if (!caInfo.hasApproach) {
+      // No approach at all - suggest hohmann transfer
+      return {
+        success: false,
+        error: `No trajectory toward ${targetInfo.name}.\nUse hohmann_transfer first to establish a transfer orbit.`,
+        attempts: 0,
+        finalPeriapsis: 0,
+      };
+    }
+
+    // Check for intermediate body (detour scenario)
+    if (caInfo.intermediateBody) {
+      logger?.info(`[CourseCorrect] Intermediate encounter: ${caInfo.intermediateBody}`);
+      const detourResult = await handleDetourScenario(conn, caInfo, targetInfo, logger);
+      if (detourResult !== null) {
+        // Detour handler returned a result (error or guidance)
+        return detourResult;
+      }
+      // null means "proceed with normal course correction" (safe flyby en route)
+    }
+
+    // Have closest approach but no SOI entry - log and continue
+    logger?.info(`[CourseCorrect] Closest approach: ${(caInfo.distance / 1000).toFixed(0)}km in ${formatTime(caInfo.time)}` +
+                 (caInfo.inCurrentPatch ? ' (current patch)' : ` (after ${caInfo.patchBody} encounter)`));
   }
 
   logger?.info(`[CourseCorrect] Creating node for ${(targetPeriapsis / 1000).toFixed(1)}km target`);

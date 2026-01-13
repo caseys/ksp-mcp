@@ -3,8 +3,10 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, queryTargetEncounterInfo, sanitizeError, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, queryTargetEncounterInfo, queryWrongEncounterDetails, sanitizeError, type ManeuverResult } from '../shared.js';
+import { rcsFineTune, createPeriapsisQuery } from '../execute-node.js';
 import { clearNodes } from '../../kos/nodes.js';
+import { delay } from '../../utils/progress.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITING_ONLY_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
@@ -24,58 +26,6 @@ interface TransferAttemptResult {
   deltaV?: number;
   timeToNode?: number;
   nodesCreated?: number;
-}
-
-/**
- * Details about a wrong encounter situation
- */
-interface WrongEncounterDetails {
-  encounterBody: string;
-  encounterPeriapsis: number;  // altitude above surface in meters
-  transferApoapsis: number;     // transfer orbit apoapsis in parent SOI
-  targetSMA: number;            // target's semi-major axis
-  isCrash: boolean;             // true if encounter periapsis < 10km
-  hasCloseApproach: boolean;    // true if transfer apoapsis >= 85% of target SMA
-}
-
-/**
- * Query details about a wrong encounter situation.
- * Must be called while nodes still exist (before clearing).
- */
-async function queryWrongEncounterDetails(
-  conn: KosConnection,
-  encounterBody: string
-): Promise<WrongEncounterDetails | null> {
-  try {
-    const result = await conn.execute(
-      `LOCAL encPe IS NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS. ` +
-      `LOCAL xferAp IS NEXTNODE:ORBIT:APOAPSIS. ` +
-      `LOCAL tgtSMA IS TARGET:ORBIT:SEMIMAJORAXIS. ` +
-      `PRINT encPe + "|" + xferAp + "|" + tgtSMA.`,
-      5000
-    );
-
-    const match = result.output.match(/([-\d.]+)\|([-\d.]+)\|([-\d.]+)/);
-    if (!match) return null;
-
-    const encounterPeriapsis = parseFloat(match[1]);
-    const transferApoapsis = parseFloat(match[2]);
-    const targetSMA = parseFloat(match[3]);
-
-    const SAFE_PE_THRESHOLD = 10_000;  // 10km minimum safe periapsis
-    const CLOSE_APPROACH_RATIO = 0.85;  // Must reach 85% of target's orbital altitude
-
-    return {
-      encounterBody,
-      encounterPeriapsis,
-      transferApoapsis,
-      targetSMA,
-      isCrash: encounterPeriapsis < SAFE_PE_THRESHOLD,
-      hasCloseApproach: transferApoapsis >= targetSMA * CLOSE_APPROACH_RATIO,
-    };
-  } catch {
-    return null;
-  }
 }
 
 /**
@@ -397,20 +347,79 @@ export const hohmannTransferTool: ToolDefinition = {
         // Query current encounter info for guidance
         const encounterInfo = await queryTargetEncounterInfo(conn);
 
-        if (encounterInfo && encounterInfo.targetType === 'body') {
-          const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
-          const encPeKm = (peAlt / 1000).toFixed(0);
-          text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km`;
+        // Post-burn RCS fine-tune: IMPROVE accuracy after main burn executes
+        // Only applies when burn was executed and we have an encounter that needs refinement
+        let didFineTune = false;
+        if (result.executed && encounterInfo?.targetType === 'body') {
+          const currentPe = encounterInfo.periapsisInTargetSOI ?? 0;
+          const atmosphereHeight = encounterInfo.atmosphereHeight ?? 0;
 
-          // CLEAR directive based on trajectory safety
-          if (peAlt < 10_000) {
+          // Acceptable range: 40km (or atmo+40km) to 1000km
+          const minSafePe = atmosphereHeight > 0 ? atmosphereHeight + 40_000 : 40_000;
+          const maxAcceptablePe = 1_000_000; // 1000km
+
+          // Fine-tune target: minimum safe altitude
+          const targetPe = minSafePe;
+
+          // Fine-tune if periapsis is outside acceptable range
+          const needsFineTune = currentPe < minSafePe || currentPe > maxAcceptablePe;
+
+          if (needsFineTune) {
+            const atmNote = atmosphereHeight > 0 ? ` (atmo: ${(atmosphereHeight / 1000).toFixed(0)}km)` : '';
+            logger.info?.(`[Hohmann] Post-burn Pe: ${(currentPe / 1000).toFixed(0)}km${atmNote}, fine-tuning to ${targetPe / 1000}km...`);
+
+            // Align and enable RCS for fine-tuning
+            await conn.execute('SAS ON. WAIT 0.3. SET SASMODE TO "PROGRADE". RCS ON.', 5000);
+            await delay(2000);
+
+            const fineTuneResult = await rcsFineTune(conn, {
+              queryProperty: createPeriapsisQuery(),
+              targetValue: targetPe,
+              controlAxis: 'fore',
+              directionStrategy: 'higher-means-negative',
+              tolerance: { relative: 0.25 },
+              limits: { maxPulses: 15, maxReversals: 3 },
+              logger,
+              logPrefix: 'Hohmann',
+            });
+
+            // Cleanup RCS
+            await conn.execute('SET SHIP:CONTROL:FORE TO 0. RCS OFF.', 3000);
+            didFineTune = true;
+
+            if (fineTuneResult.success) {
+              const finalPeKm = (fineTuneResult.finalValue / 1000).toFixed(0);
+              text += `\nRCS fine-tuned: ${(currentPe / 1000).toFixed(0)}km → ${finalPeKm}km`;
+              logger.progress?.(`[Hohmann] Fine-tuned to ${finalPeKm}km (${fineTuneResult.pulsesUsed} pulses)`);
+            } else {
+              logger.info?.(`[Hohmann] Fine-tune incomplete: ${fineTuneResult.reason}`);
+            }
+          }
+        }
+
+        // Re-query encounter info if fine-tuning occurred (to get updated periapsis)
+        const finalEncounterInfo = didFineTune ? await queryTargetEncounterInfo(conn) : encounterInfo;
+
+        if (finalEncounterInfo && finalEncounterInfo.targetType === 'body') {
+          const peAlt = finalEncounterInfo.periapsisInTargetSOI ?? 0;
+          const encPeKm = (peAlt / 1000).toFixed(0);
+          const finalAtmoHeight = finalEncounterInfo.atmosphereHeight ?? 0;
+          const finalMinSafePe = finalAtmoHeight > 0 ? finalAtmoHeight + 40_000 : 40_000;
+
+          text += `\nEncounter: ${finalEncounterInfo.targetName} at ${encPeKm}km`;
+
+          // CLEAR directive based on trajectory safety (must be above atmosphere + 40km, or 40km for airless)
+          if (peAlt < finalMinSafePe) {
             // Unsafe trajectory - MUST fix before warping
-            text += ` - UNSAFE trajectory!`;
+            const reason = finalAtmoHeight > 0
+              ? `below safe altitude (atmo: ${(finalAtmoHeight / 1000).toFixed(0)}km)`
+              : 'too low';
+            text += ` - UNSAFE (${reason})!`;
             text += `\nREQUIRED: Use course_correct to fix trajectory before doing anything else.`;
           } else {
             // Safe trajectory - can proceed
             text += ` (safe)`;
-            text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+            text += `\nNext: warp to ${finalEncounterInfo.targetName} SOI, then circularize`;
           }
         }
 

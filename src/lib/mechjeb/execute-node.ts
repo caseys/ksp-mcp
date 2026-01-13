@@ -40,6 +40,287 @@ export interface ExecuteNodeProgress {
   executorEnabled?: boolean;
 }
 
+// ============================================================================
+// RCS Fine-Tune System - Reusable orbital property adjustment via RCS pulses
+// ============================================================================
+
+/** Control axis for RCS pulses */
+export type ControlAxis = 'fore' | 'starboard' | 'top';
+// fore = prograde/retrograde
+// starboard = normal (left/right)
+// top = radial (up/down)
+
+/** Property query function - returns current value or null if unavailable */
+export type PropertyQuery = (conn: KosConnection) => Promise<number | null>;
+
+/** Direction strategy for initial pulse direction */
+export type DirectionStrategy =
+  | 'higher-means-negative'  // If value > target, pulse negative (-1) - default for periapsis
+  | 'higher-means-positive'  // If value > target, pulse positive (+1)
+  | ((current: number, target: number) => 1 | -1);  // Custom function
+
+/** Configuration for RCS fine-tuning */
+export interface FineTuneConfig {
+  /** Function to query current property value (returns meters/degrees/etc) */
+  queryProperty: PropertyQuery;
+
+  /** Target value in base units */
+  targetValue: number;
+
+  /** Control axis (default: 'fore') */
+  controlAxis?: ControlAxis;
+
+  /** How to determine initial pulse direction (default: 'higher-means-negative') */
+  directionStrategy?: DirectionStrategy;
+
+  /** Tolerance - property is "good enough" when within this */
+  tolerance?: {
+    absolute?: number;  // e.g., 1000 (meters)
+    relative?: number;  // e.g., 0.25 (25% of target)
+  };
+
+  /** Limits for termination */
+  limits?: {
+    maxPulses?: number;      // Default: 20
+    maxReversals?: number;   // Default: 3
+  };
+
+  /** Pulse duration tuning */
+  pulse?: {
+    initial?: number;   // Default: 0.05s (50ms)
+    min?: number;       // Default: 0.01s (10ms)
+    max?: number;       // Default: 0.25s (250ms)
+  };
+
+  /** Logger for progress messages */
+  logger?: McpLogger;
+
+  /** Prefix for log messages (default: 'FineTune') */
+  logPrefix?: string;
+}
+
+/** Result from RCS fine-tuning */
+export interface FineTuneResult {
+  success: boolean;
+  finalValue: number;
+  targetValue: number;
+  pulsesUsed: number;
+  reason: 'tolerance' | 'maxPulses' | 'maxReversals' | 'lostProperty' | 'error';
+  error?: string;
+}
+
+// ============================================================================
+// Property Query Helpers - Pre-built queries for common orbital properties
+// ============================================================================
+
+/**
+ * Parse a value with units (e.g., "214.1 km", "50000 m", "1.2 Mm")
+ * Returns null if parsing fails.
+ */
+function parseUnitValue(output: string): number | null {
+  const match = output.match(/([0-9.]+)\s*(m|km|Mm|Gm)?/i);
+  if (!match) return null;
+
+  let value = parseFloat(match[1]);
+  const unit = (match[2] || 'm').toLowerCase();
+
+  switch (unit) {
+    case 'km': value *= 1000; break;
+    case 'mm': value *= 1_000_000; break;
+    case 'gm': value *= 1_000_000_000; break;
+  }
+
+  return value;
+}
+
+/** Query periapsis in target SOI (for body encounters) */
+async function queryPeriapsis(conn: KosConnection): Promise<number | null> {
+  const result = await conn.execute('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
+  return parseUnitValue(result.output);
+}
+
+/** Get a PropertyQuery for periapsis in target SOI */
+export function createPeriapsisQuery(): PropertyQuery {
+  return queryPeriapsis;
+}
+
+// ============================================================================
+// RCS Fine-Tune Core Function
+// ============================================================================
+
+/**
+ * Get the kOS control suffix for a control axis.
+ */
+function getControlSuffix(axis: ControlAxis): string {
+  switch (axis) {
+    case 'fore': return 'FORE';
+    case 'starboard': return 'STARBOARD';
+    case 'top': return 'TOP';
+  }
+}
+
+/**
+ * Fine-tune an orbital property using RCS pulses.
+ *
+ * Pre-requisites:
+ * - RCS must be enabled before calling
+ * - SAS should be ON and set appropriately for the control axis
+ * - Any maneuver nodes should be removed (we're adjusting actual orbit)
+ *
+ * @param conn kOS connection
+ * @param config Fine-tune configuration
+ */
+export async function rcsFineTune(
+  conn: KosConnection,
+  config: FineTuneConfig
+): Promise<FineTuneResult> {
+  const {
+    queryProperty,
+    targetValue,
+    controlAxis = 'fore',
+    directionStrategy = 'higher-means-negative',
+    tolerance = { relative: 0.25 },
+    limits = { maxPulses: 20, maxReversals: 3 },
+    pulse = { initial: 0.05, min: 0.01, max: 0.25 },
+    logger,
+    logPrefix = 'FineTune',
+  } = config;
+
+  const log = logger ?? nullLogger;
+  const controlSuffix = getControlSuffix(controlAxis);
+
+  // Calculate tolerance value
+  const toleranceValue = tolerance.absolute ?? (tolerance.relative ?? 0.25) * targetValue;
+
+  // Get initial value
+  let currentValue = await queryProperty(conn);
+  if (currentValue === null) {
+    return {
+      success: false,
+      finalValue: 0,
+      targetValue,
+      pulsesUsed: 0,
+      reason: 'lostProperty',
+      error: 'Could not read initial property value',
+    };
+  }
+
+  // Determine initial direction
+  let direction: 1 | -1;
+  if (typeof directionStrategy === 'function') {
+    direction = directionStrategy(currentValue, targetValue);
+  } else if (directionStrategy === 'higher-means-positive') {
+    direction = currentValue > targetValue ? 1 : -1;
+  } else {
+    // 'higher-means-negative' (default)
+    direction = currentValue > targetValue ? -1 : 1;
+  }
+
+  let lastValue = currentValue;
+  let wrongWayCount = 0;
+  let pulseCount = 0;
+  let pulseDuration = pulse.initial ?? 0.05;
+  const minPulse = pulse.min ?? 0.01;
+  const maxPulse = pulse.max ?? 0.25;
+  const maxPulses = limits.maxPulses ?? 20;
+  const maxReversals = limits.maxReversals ?? 3;
+
+  while (pulseCount < maxPulses) {
+    currentValue = await queryProperty(conn);
+
+    // Check if we lost the property (returns null or invalid)
+    if (currentValue === null || currentValue <= 0) {
+      log.warn(`[${logPrefix}] Lost property! Reversing direction and retrying...`);
+      direction = direction === 1 ? -1 : 1;
+      wrongWayCount++;
+      await delay(500);
+      currentValue = await queryProperty(conn);
+      if ((currentValue === null || currentValue <= 0) && wrongWayCount > 2) {
+        log.warn(`[${logPrefix}] Property lost after ${wrongWayCount} reversals, stopping`);
+        return {
+          success: false,
+          finalValue: lastValue,
+          targetValue,
+          pulsesUsed: pulseCount,
+          reason: 'lostProperty',
+        };
+      }
+      if (currentValue === null || currentValue <= 0) continue;
+    }
+
+    const error = Math.abs(currentValue - targetValue);
+
+    // Check if within tolerance
+    if (error <= toleranceValue) {
+      log.progress(`[${logPrefix}] RCS done: ${(currentValue / 1000).toFixed(0)}km (${pulseCount} pulse${pulseCount !== 1 ? 's' : ''})`);
+      return {
+        success: true,
+        finalValue: currentValue,
+        targetValue,
+        pulsesUsed: pulseCount,
+        reason: 'tolerance',
+      };
+    }
+
+    // Check if last pulse made things worse
+    if (pulseCount > 0 && lastValue > 0) {
+      const lastError = Math.abs(lastValue - targetValue);
+      if (error > lastError + 1000) { // Got worse by more than 1km
+        log.progress(`[${logPrefix}] RCS: wrong direction (${(lastValue / 1000).toFixed(0)}→${(currentValue / 1000).toFixed(0)}km), reversing`);
+        direction = direction === 1 ? -1 : 1;
+        wrongWayCount++;
+        if (wrongWayCount > maxReversals) {
+          log.warn(`[${logPrefix}] Too many direction reversals, stopping`);
+          return {
+            success: false,
+            finalValue: currentValue,
+            targetValue,
+            pulsesUsed: pulseCount,
+            reason: 'maxReversals',
+          };
+        }
+      }
+    }
+
+    // Pulse RCS
+    await conn.execute(`SET SHIP:CONTROL:${controlSuffix} TO ${direction}. WAIT ${pulseDuration.toFixed(3)}. SET SHIP:CONTROL:${controlSuffix} TO 0.`);
+    pulseCount++;
+    lastValue = currentValue;
+
+    await delay(200);
+
+    // Check new value and adjust pulse duration
+    const newValue = await queryProperty(conn);
+    if (newValue !== null && newValue > 0) {
+      const changePerPulse = Math.abs(newValue - currentValue);
+
+      // Log every few pulses
+      if (pulseCount <= 2 || pulseCount % 3 === 0) {
+        log.progress(`[${logPrefix}] RCS: ${(newValue / 1000).toFixed(0)}km (dir=${direction > 0 ? '+' : '-'})`);
+      }
+
+      // Adjust pulse duration based on change rate
+      if (changePerPulse > error * 0.5) {
+        pulseDuration = Math.max(minPulse, pulseDuration * 0.5);
+      } else if (changePerPulse < error * 0.05 && pulseDuration < maxPulse) {
+        pulseDuration = Math.min(maxPulse, pulseDuration * 1.5);
+      }
+
+      currentValue = newValue;
+    }
+  }
+
+  // Max pulses reached
+  log.warn(`[${logPrefix}] Max pulses (${maxPulses}) reached`);
+  return {
+    success: false,
+    finalValue: currentValue ?? lastValue,
+    targetValue,
+    pulsesUsed: pulseCount,
+    reason: 'maxPulses',
+  };
+}
+
 // Configuration
 const MAX_RETRIES = 3;
 const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes
@@ -334,45 +615,21 @@ export async function executeNode(
     .catch(() => false);
 
   if (dvRequired < TINY_BURN_THRESHOLD && hasEncounter && targetPeriapsis) {
+    // For tiny burns, use RCS pulses to REPLACE the burn entirely
+    // This prevents engine/alignment artifacts from affecting trajectory more than the burn
+
     // Save node ETA before removing (for warp timing)
     const savedNodeEta = await queryNumber(conn, 'NEXTNODE:ETA').catch(() => 0);
 
     // Remove the node - we'll use periapsis monitoring instead
     await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
 
-    // Get target periapsis from MechJeb INFO
-    const getTargetPe = async (): Promise<number> => {
-      const result = await conn.execute('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
-      // Match number with optional unit (e.g., "214.1 km", "50000 m", "1.2 Mm")
-      const match = result.output.match(/([0-9.]+)\s*(m|km|Mm|Gm)?/i);
-      if (!match) {
-        // Try to get any number from output as fallback
-        const numMatch = result.output.match(/[\d.]+/);
-        return numMatch ? parseFloat(numMatch[0]) * 1000 : 0; // Assume km if no unit
-      }
-      let value = parseFloat(match[1]);
-      const unit = (match[2] || 'm').toLowerCase();
-      switch (unit) {
-        case 'km':
-          value *= 1000;
-          break;
-        case 'mm':
-          value *= 1_000_000;
-          break;
-        case 'gm':
-          value *= 1_000_000_000;
-          break;
-      }
-      return value;
-    };
-
-    // Get initial periapsis and determine target
-    const initialPe = await getTargetPe();
     const targetPe = targetPeriapsis ?? 50_000;
-    const tolerance = targetPe * 0.25; // 25% tolerance
+    const periapsisQuery = createPeriapsisQuery();
 
-    // Validate initial periapsis query worked
-    if (initialPe <= 0) {
+    // Validate we can read periapsis before proceeding
+    const initialPe = await periapsisQuery(conn);
+    if (initialPe === null || initialPe <= 0) {
       log.warn(`${logPrefix} Could not read target periapsis, skipping RCS fine-tune`);
       await clearKosOperation(conn).catch(() => { /* ignore */ });
       return { success: false, nodesExecuted: 0, error: 'Could not read target periapsis for RCS fine-tuning' };
@@ -401,55 +658,21 @@ export async function executeNode(
       await delay(500);
     }
 
-    // Align PROGRADE with SAS (no RCS)
+    // Align PROGRADE with SAS, then enable RCS for fine-tuning
     await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "PROGRADE". RCS OFF.');
     await delay(2000);
-
-    // RCS fine-tuning loop
     await conn.execute('RCS ON.');
 
-    const maxPulses = 20;
-    let pulseCount = 0;
-    let pulseDuration = 0.1;
-    let currentPe = initialPe;
-
-    while (pulseCount < maxPulses) {
-      currentPe = await getTargetPe();
-      const error = Math.abs(currentPe - targetPe);
-
-      // Check if within tolerance
-      if (error <= tolerance) {
-        log.progress(`${logPrefix} RCS done: ${(currentPe / 1000).toFixed(0)}km (${pulseCount} pulse${pulseCount !== 1 ? 's' : ''})`);
-        break;
-      }
-
-      // Determine direction: if Pe too high, need retrograde thrust (FORE = -1)
-      const direction = currentPe > targetPe ? -1 : 1;
-
-      // Pulse RCS
-      await conn.execute(`SET SHIP:CONTROL:FORE TO ${direction}. WAIT ${pulseDuration.toFixed(2)}. SET SHIP:CONTROL:FORE TO 0.`);
-      pulseCount++;
-
-      await delay(200);
-
-      // Check new periapsis and adjust pulse duration
-      const newPe = await getTargetPe();
-      const changePerPulse = Math.abs(newPe - currentPe);
-
-      // Log every few pulses or on significant change
-      if (pulseCount <= 2 || pulseCount % 3 === 0) {
-        log.progress(`${logPrefix} RCS: ${(newPe / 1000).toFixed(0)}km`);
-      }
-
-      // Adjust pulse duration based on change rate
-      if (changePerPulse > error * 0.5) {
-        pulseDuration = Math.max(0.02, pulseDuration * 0.5);
-      } else if (changePerPulse < error * 0.05 && pulseDuration < 0.5) {
-        pulseDuration = Math.min(0.5, pulseDuration * 1.5);
-      }
-
-      currentPe = newPe;
-    }
+    // Use abstracted RCS fine-tune
+    const fineTuneResult = await rcsFineTune(conn, {
+      queryProperty: periapsisQuery,
+      targetValue: targetPe,
+      controlAxis: 'fore',
+      directionStrategy: 'higher-means-negative',
+      tolerance: { relative: 0.25 },
+      logger: log,
+      logPrefix,
+    });
 
     // Cleanup
     await conn.execute('SET SHIP:CONTROL:FORE TO 0. RCS OFF. SAS ON. SET SASMODE TO "PROGRADE".');
@@ -457,12 +680,11 @@ export async function executeNode(
     // Clear operation state
     try { await clearKosOperation(conn); } catch { /* ignore */ }
 
-    const finalError = Math.abs(currentPe - targetPe);
     return {
-      success: finalError <= tolerance,
+      success: fineTuneResult.success,
       nodesExecuted: 1,
       deltaV: { required: dvRequired, available: dvShipTotal, remaining: 0 },
-      attempts: pulseCount
+      attempts: fineTuneResult.pulsesUsed,
     };
   }
 

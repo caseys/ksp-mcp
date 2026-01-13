@@ -56,6 +56,61 @@ export interface VesselEncounterInfo {
 export type TargetEncounterInfo = BodyEncounterInfo | VesselEncounterInfo;
 
 /**
+ * Details about a wrong encounter situation (encounter with unexpected body)
+ */
+export interface WrongEncounterDetails {
+  encounterBody: string;
+  encounterPeriapsis: number;  // altitude above surface in meters
+  transferApoapsis: number;     // transfer orbit apoapsis in parent SOI
+  targetSMA: number;            // target's semi-major axis
+  isCrash: boolean;             // true if encounter periapsis < 10km
+  hasCloseApproach: boolean;    // true if transfer apoapsis >= 85% of target SMA
+}
+
+/**
+ * Query details about a wrong encounter situation.
+ * Must be called while nodes still exist (before clearing).
+ *
+ * @param conn kOS connection
+ * @param encounterBody Name of the body we're encountering
+ */
+export async function queryWrongEncounterDetails(
+  conn: KosConnection,
+  encounterBody: string
+): Promise<WrongEncounterDetails | null> {
+  try {
+    const result = await conn.execute(
+      `LOCAL encPe IS NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS. ` +
+      `LOCAL xferAp IS NEXTNODE:ORBIT:APOAPSIS. ` +
+      `LOCAL tgtSMA IS TARGET:ORBIT:SEMIMAJORAXIS. ` +
+      `PRINT encPe + "|" + xferAp + "|" + tgtSMA.`,
+      5000
+    );
+
+    const match = result.output.match(/([-\d.]+)\|([-\d.]+)\|([-\d.]+)/);
+    if (!match) return null;
+
+    const encounterPeriapsis = parseFloat(match[1]);
+    const transferApoapsis = parseFloat(match[2]);
+    const targetSMA = parseFloat(match[3]);
+
+    const SAFE_PE_THRESHOLD = 10_000;  // 10km minimum safe periapsis
+    const CLOSE_APPROACH_RATIO = 0.85;  // Must reach 85% of target's orbital altitude
+
+    return {
+      encounterBody,
+      encounterPeriapsis,
+      transferApoapsis,
+      targetSMA,
+      isCrash: encounterPeriapsis < SAFE_PE_THRESHOLD,
+      hasCloseApproach: transferApoapsis >= targetSMA * CLOSE_APPROACH_RATIO,
+    };
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Parse a numeric value from kOS output
  * Looks for patterns like "23.80  m/s" or just bare numbers (including negative)
  * Returns 0 if input is undefined, null, or doesn't contain a number
