@@ -237,6 +237,22 @@ export const courseCorrectTool: ToolDefinition = {
         target = autoTarget ?? undefined;  // Never pass 'auto' to kOS
       }
 
+      // Check if already at target body - no course correction needed
+      if (target) {
+        const bodyCheck = await conn.execute(
+          `PRINT SHIP:BODY:NAME.`,
+          2000
+        );
+        const currentBody = bodyCheck.output.trim().split('\n').pop()?.trim() ?? '';
+        if (currentBody.toLowerCase() === target.toLowerCase()) {
+          // Already at target - get orbit info
+          const orbitInfo = await ctx.getBasicOrbitInfo(conn);
+          return ctx.successResponse('course_correct',
+            `Already at ${target}! No course correction needed.\n` +
+            `Orbit: Pe=${Math.round((orbitInfo?.periapsis ?? 0) / 1000)}km, Ap=${Math.round((orbitInfo?.apoapsis ?? 0) / 1000)}km`);
+        }
+      }
+
       const targetDistance = args.targetDistance as number;
       const shouldExecute = args.execute as boolean;
 

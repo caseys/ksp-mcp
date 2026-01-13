@@ -750,12 +750,35 @@ export const warpTool: ToolDefinition = {
 
       // Handle string targets that might be body/vessel names
       if (typeof target === 'string' && !knownTargets.includes(target)) {
+        // Check if already in target body's SOI
+        const currentBody = await queryValue(conn, 'SHIP:BODY:NAME');
+        if (currentBody.toLowerCase().includes(target.toLowerCase())) {
+          const orbitInfo = await conn.execute(
+            'PRINT ROUND(PERIAPSIS/1000) + "|" + ROUND(APOAPSIS/1000).',
+            2000
+          );
+          const [pe, ap] = orbitInfo.output.split('|').map(s => s.trim());
+          return ctx.successResponse('warp',
+            `Already at ${currentBody}! No warp needed.\n` +
+            `Orbit: Pe=${pe}km, Ap=${ap}km`);
+        }
+
         const resolved = await resolveTargetName(conn, target, trajInfo, logger);
         if (!resolved.resolved) {
           return ctx.errorResponse('warp', resolved.error ?? `Unknown target: ${target}`);
         }
         target = resolved.warpTarget!;
         logger.info(`[Warp] Resolved "${args.target}" to ${typeof target === 'number' ? `${target}s` : target}`);
+      }
+
+      // Check if warping to 'soi' but trajectory leads to current body (no actual SOI change)
+      if (target === 'soi' && trajInfo.hasSOIChange) {
+        const currentBody = await queryValue(conn, 'SHIP:BODY:NAME');
+        if (trajInfo.soiBody?.toLowerCase() === currentBody.toLowerCase()) {
+          return ctx.successResponse('warp',
+            `Already at ${currentBody}! Trajectory returns to current SOI.\n` +
+            `Use transfer tool to create an encounter with a different body.`);
+        }
       }
 
       let result: WarpResult;

@@ -54,8 +54,40 @@ export const inclinationTool: ToolDefinition = {
         angleArg
       );
 
+      // Check current inclination to see if change is needed
+      const incCheck = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2).', 2000);
+      const currentInc = Number.parseFloat(incCheck.output.match(/[\d.]+/)?.[0] ?? '0');
+      const INCLINATION_TOLERANCE = 0.5; // 0.5 degree tolerance
+
       let result;
       let responseText: string;
+
+      if (mode === 'match_planes') {
+        // For match_planes, check if already matched with target
+        if (target && target !== 'auto') {
+          await conn.execute(`SET TARGET TO ${target.includes(' ') ? `"${target}"` : target}.`, 3000);
+        }
+        const targetIncCheck = await conn.execute(
+          'IF HASTARGET { PRINT ROUND(TARGET:ORBIT:INCLINATION, 2). } ELSE { PRINT "NOTGT". }',
+          2000
+        );
+        if (!targetIncCheck.output.includes('NOTGT')) {
+          const targetInc = Number.parseFloat(targetIncCheck.output.match(/[\d.]+/)?.[0] ?? '-999');
+          if (Math.abs(currentInc - targetInc) < INCLINATION_TOLERANCE) {
+            return ctx.successResponse('inclination',
+              `Already matched with target plane!\n` +
+              `Inclination: ${currentInc}° (target: ${targetInc}°)`);
+          }
+        }
+      } else {
+        // For change_inclination, check if already at target angle
+        const targetAngle = angle ?? 0;
+        if (Math.abs(currentInc - targetAngle) < INCLINATION_TOLERANCE) {
+          return ctx.successResponse('inclination',
+            `Already at target inclination!\n` +
+            `Current: ${currentInc}° (target: ${targetAngle}°)`);
+        }
+      }
 
       if (mode === 'match_planes') {
         logger.progress(`[Inclination] Matching orbital plane with target: ${target}`);
