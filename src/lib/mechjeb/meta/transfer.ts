@@ -70,6 +70,27 @@ export const transferTool: ToolDefinition = {
       // Get vessel state to know if we're at a moon or planet
       const vesselState = await getVesselStateInfo(conn);
 
+      // Check if already at target SOI
+      if ((targetInfo.class === 'moon' || targetInfo.class === 'planet') && vesselState.bodyName.toLowerCase() === targetInfo.name.toLowerCase()) {
+          // Already at target - check orbit type
+          if (vesselState.eccentricity >= 1) {
+            return ctx.successResponse('transfer',
+              `Transfer complete - already at ${targetInfo.name}!\n` +
+              `Orbit is hyperbolic (ecc=${vesselState.eccentricity.toFixed(2)}).\n` +
+              `Next: Use circularize to establish stable orbit.`);
+          }
+          return ctx.successResponse('transfer',
+            `Transfer complete - already orbiting ${targetInfo.name}!\n` +
+            `Orbit: Pe=${Math.round(vesselState.periapsis / 1000)}km, Ap=${Math.round(vesselState.apoapsis / 1000)}km`);
+        }
+
+      // Check for hyperbolic orbit before planning transfer
+      if (vesselState.eccentricity >= 1) {
+        return ctx.errorResponse('transfer',
+          `Cannot plan transfer from hyperbolic trajectory (ecc=${vesselState.eccentricity.toFixed(2)}).\n` +
+          `Use circularize first to establish stable orbit, then transfer.`);
+      }
+
       // Route based on target class and vessel location
       const { transferType, error } = determineTransferType(
         targetInfo.class,

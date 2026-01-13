@@ -23,6 +23,7 @@ import {
 import { findLandingSite } from './find-site.js';
 import { getVesselStateInfo } from '../../kos/vessel/validate.js';
 import { circularize } from '../basic/circularize.js';
+import { ManeuverOrchestrator } from '../orchestrator.js';
 import { fmtVel, fmtDist, formatTime } from '../../utils/format.js';
 
 // ============================================================================
@@ -348,6 +349,59 @@ export const landTool: ToolDefinition = {
       } else {
         // Stable orbit - normal landing
         logger.progress(`[Landing] Stable orbit confirmed`);
+      }
+
+      // Step 0.7: Lower orbit if too high for efficient landing
+      // Ideal landing orbit: 50km for vacuum bodies, 50km above atmosphere for atmospheric bodies
+      if (!isHyperbolic && !isImpactTrajectory) {
+        const bodyInfo = await conn.execute(
+          'IF SHIP:BODY:ATM:EXISTS { PRINT SHIP:BODY:ATM:HEIGHT + "|" + SHIP:BODY:NAME. } ELSE { PRINT "0|" + SHIP:BODY:NAME. }',
+          3000
+        );
+        const bodyMatch = bodyInfo.output.match(/(\d+)\|/);
+        const atmHeight = bodyMatch ? Number.parseInt(bodyMatch[1]) : 0;
+
+        // Calculate ideal landing orbit altitude
+        const IDEAL_LANDING_ALT = 50_000; // 50km base
+        const idealOrbitAlt = atmHeight > 0 ? atmHeight + IDEAL_LANDING_ALT : IDEAL_LANDING_ALT;
+
+        // Get current orbit
+        const orbitInfo = await ctx.getBasicOrbitInfo(conn);
+        const currentPe = orbitInfo?.periapsis ?? 0;
+
+        // Consider orbit "too high" if periapsis is more than 20km above ideal
+        const TOO_HIGH_MARGIN = 20_000; // 20km margin
+        const isTooHigh = currentPe > idealOrbitAlt + TOO_HIGH_MARGIN;
+
+        if (isTooHigh) {
+          const hasAtm = atmHeight > 0;
+          logger.progress(`[Landing] Orbit too high for efficient landing (Pe=${fmtDist(currentPe)})`);
+          logger.progress(`[Landing] Lowering to ${fmtDist(idealOrbitAlt)} (${hasAtm ? `${fmtDist(atmHeight)} atm + 50km` : '50km vacuum landing orbit'})`);
+
+          const orchestrator = new ManeuverOrchestrator(conn);
+
+          // Lower periapsis first (burn at apoapsis)
+          const peResult = await orchestrator.adjustPeriapsis(idealOrbitAlt, 'APOAPSIS', {
+            execute: true, logger, callerTool: 'land',
+          });
+          if (!peResult.success) {
+            return ctx.errorResponse('land', `Failed to lower orbit: ${peResult.error}`);
+          }
+          logger.progress(`[Landing] Periapsis lowered: ${fmtVel(peResult.deltaV ?? 0)}`);
+
+          // Lower apoapsis (burn at periapsis) for more circular orbit
+          const apResult = await orchestrator.adjustApoapsis(idealOrbitAlt, 'PERIAPSIS', {
+            execute: true, logger, callerTool: 'land',
+          });
+          if (!apResult.success) {
+            // Non-fatal - we can land from elliptical orbit
+            logger.info(`[Landing] Could not circularize, proceeding with elliptical orbit`);
+          } else {
+            logger.progress(`[Landing] Apoapsis lowered: ${fmtVel(apResult.deltaV ?? 0)}`);
+          }
+
+          logger.progress(`[Landing] Now at landing orbit, proceeding...`);
+        }
       }
 
       // Step 1: Resolve landing target
