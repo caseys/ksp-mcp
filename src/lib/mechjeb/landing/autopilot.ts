@@ -88,6 +88,118 @@ async function getValidLandingTarget(conn: KosConnection): Promise<{
   return { valid: false };
 }
 
+// ============================================================================
+// Vessel Structure Scanning
+// ============================================================================
+
+interface VesselScanResult {
+  hasLandingLegs: boolean;
+  landingLegStage: number | null;  // Lowest stage with legs
+  jettisonStage: number | null;    // Decoupler stage to fire (null = none found)
+  error?: string;
+}
+
+/**
+ * Scan vessel structure for landing legs and decouplers.
+ * Returns info about landing legs and any decoupler/separator below them.
+ */
+async function scanVesselForLanding(conn: KosConnection): Promise<VesselScanResult> {
+  // Note: p:MODULES returns a list of module NAME STRINGS, not module objects
+  // So we compare m directly (e.g., m = "ModuleWheelDeployment"), not m:NAME
+  //
+  // Landing legs may be at stage -1 (removed from staging) - that's fine, we just
+  // need to confirm they exist. Decouplers must be in staging sequence (stage >= 0).
+  const script = `
+    LOCAL hasLegs IS FALSE.
+    LOCAL decStages IS LIST().
+
+    FOR p IN SHIP:PARTS {
+      FOR m IN p:MODULES {
+        IF m = "ModuleLandingLeg" OR m = "ModuleWheelDeployment" OR m = "ModuleWheelBase" {
+          SET hasLegs TO TRUE.
+        }
+      }
+    }
+
+    IF NOT hasLegs {
+      PRINT "NOLEGS".
+    } ELSE {
+      FOR p IN SHIP:PARTS {
+        IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
+          IF p:STAGE >= 0 {
+            IF NOT decStages:CONTAINS(p:STAGE) { decStages:ADD(p:STAGE). }
+          }
+        }
+      }
+
+      IF decStages:LENGTH = 0 {
+        PRINT "LEGS|NODEC".
+      } ELSE {
+        LOCAL maxDecStage IS decStages[0].
+        FOR s IN decStages { IF s > maxDecStage { SET maxDecStage TO s. } }
+        PRINT "LEGS|DEC|" + maxDecStage.
+      }
+    }
+  `.trim().replaceAll('\n', ' ');
+
+  const result = await conn.execute(script, 10_000);
+  // kOS output may be all on one line - look for our markers at the END
+  const rawOutput = result.output.trim();
+
+  // Parse result - check patterns at END of output string
+  if (rawOutput.endsWith('NOLEGS')) {
+    return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null };
+  }
+
+  if (rawOutput.endsWith('LEGS|NODEC')) {
+    return { hasLandingLegs: true, landingLegStage: null, jettisonStage: null };
+  }
+
+  // LEGS|DEC|<decStage>
+  const decMatch = rawOutput.match(/LEGS\|DEC\|(\d+)$/);
+  if (decMatch) {
+    return { hasLandingLegs: true, landingLegStage: null, jettisonStage: parseInt(decMatch[1]) };
+  }
+
+  return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null, error: `Failed to parse vessel scan: ${rawOutput.slice(-50)}` };
+}
+
+/**
+ * Jettison stages by staging down to fire the target stage.
+ * In KSP, firing a stage means pressing spacebar, which decrements STAGE:NUMBER.
+ * We stage until STAGE:NUMBER < targetStage, meaning the target stage itself is fired.
+ */
+async function jettisonStage(
+  conn: KosConnection,
+  targetStage: number,
+  logger?: McpLogger
+): Promise<{ success: boolean; error?: string }> {
+  const log = logger ?? nullLogger;
+
+  // Stage down until we're BELOW the target stage (meaning we've fired it)
+  const script = `
+    SET startStage TO STAGE:NUMBER.
+    UNTIL STAGE:NUMBER < ${targetStage} {
+      STAGE.
+      WAIT 0.5.
+    }
+    PRINT "STAGED|" + startStage + "|" + STAGE:NUMBER.
+  `.trim().replaceAll('\n', ' ');
+
+  const result = await conn.execute(script, 30_000);
+  const output = result.output.trim();
+
+  const match = output.match(/STAGED\|(\d+)\|(\d+)/);
+  if (match) {
+    const startStage = parseInt(match[1]);
+    const endStage = parseInt(match[2]);
+    log.info(`[Jettison] Staged from ${startStage} to ${endStage}`);
+    return { success: true };
+  }
+
+  return { success: false, error: 'Failed to parse staging result' };
+}
+
 // Configuration
 const DEFAULT_POLL_INTERVAL_MS = 5000; // 5 seconds
 const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
@@ -406,6 +518,33 @@ export const landTool: ToolDefinition = {
           // Cleanup after orbit lowering: stop warp and unlock controls
           // MechJeb node executor may have left warp or steering engaged
           await conn.execute('SET WARP TO 0. UNLOCK STEERING. UNLOCK THROTTLE. WAIT 0.5.', 5000);
+        }
+      }
+
+      // Step 0.8: Scan vessel structure for landing legs and jettison transfer stage
+      logger.progress('[Landing] Scanning vessel structure...');
+      const vesselScan = await scanVesselForLanding(conn);
+
+      if (vesselScan.error) {
+        return ctx.errorResponse('land', `Vessel scan failed: ${vesselScan.error}`);
+      }
+
+      if (!vesselScan.hasLandingLegs) {
+        return ctx.errorResponse('land',
+          'No landing legs detected! Cannot land safely without landing legs.\n' +
+          'Vessel must have parts with ModuleLandingLeg, ModuleWheelDeployment, or ModuleWheelBase.');
+      }
+
+      logger.progress('[Landing] Landing legs detected');
+
+      // Jettison stages below landing legs if decoupler found
+      if (vesselScan.jettisonStage !== null) {
+        logger.progress(`[Landing] Jettisoning stage ${vesselScan.jettisonStage} (below landing legs)`);
+        const jettisonResult = await jettisonStage(conn, vesselScan.jettisonStage, logger);
+        if (!jettisonResult.success) {
+          logger.warn(`[Landing] Jettison failed: ${jettisonResult.error}, continuing anyway`);
+        } else {
+          logger.progress('[Landing] Stage jettisoned successfully');
         }
       }
 
