@@ -481,6 +481,7 @@ export class AscentHandle {
 
     let lastLogTime = 0;
     let lastStatus = '';
+    let hasWarpedToCirc = false;
 
     interface AscentPollState {
       enabled: boolean;
@@ -546,13 +547,36 @@ export class AscentHandle {
           this.logger.progress(`[Ascent] no status`);
         } else if (state.status === 'Off') {
           //this.logger.progress(`[Ascent] primary ascent burn complete.`);
-        } else if (/liftoff/i.test(state.status)) {
-          this.logger.progress(`[Ascent] special awaiting handler`);
+        } else if ((state.status).includes('Awaiting liftoff')) {
+          this.logger.progress(`[Ascent] LAUNCH!! LAUNCH!!`);
+        } else if ((state.status).includes('Vertical ascent')) {
+          this.logger.progress(`[Ascent] Roll program at ${state.periapsis} meters`);
+        } else if ((state.status).includes('Coasting to circularization burn')) {
+          // Warp to circularization burn (only once)
+          if (!hasWarpedToCirc && config.warp.onRails) {
+            hasWarpedToCirc = true;
+            try {
+              // Get node ETA and warp to 15s before burn starts
+              const etaResult = await this.conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 3000);
+              const nodeEta = Number.parseFloat(etaResult.output.match(/([\d.]+)/)?.[1] ?? '0');
+              if (nodeEta > 30) {
+                const warpTarget = nodeEta - 15;
+                this.logger.progress(`[Ascent] Warping to circularization burn (T-${Math.round(nodeEta)}s)`);
+                await this.conn.execute('SET WARP TO 0.', 2000);
+                await delay(500);
+                await this.conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
+              } else {
+                this.logger.progress(`[Ascent] Coasting to circularization burn`);
+              }
+            } catch {
+              this.logger.progress(`[Ascent] Coasting to circularization burn`);
+            }
+          }
         } else if (state?.status && state.status !== lastStatus) {
           this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
-          lastStatus = state.status;
-          lastLogTime = now;
         }
+        lastStatus = state?.status;
+        lastLogTime = now;
 
         // Log progress every 20 seconds at least
         if (now - lastLogTime >= 20_000) {
@@ -584,7 +608,7 @@ export class AscentHandle {
           const fixResult = await orchestrator.changeEccentricity(0, 'X_FROM_NOW', {
             execute: true,
             logger: this.logger,
-            callerTool: 'ascent_auto_fix',
+            callerTool: 'fine_tuninng_ascent',
             xFromNowSeconds: 15,  // Create node 15 seconds from now
           });
 
@@ -604,7 +628,7 @@ export class AscentHandle {
             }
             this.logger.progress(`[Ascent] Orbit corrected to ${formatOrbit(apoapsis, periapsis)}, ecc=${eccentricity.toFixed(4)}`);
           } else {
-            this.logger.warn(`[Ascent] Auto-fix failed: ${fixResult.error ?? 'unknown'}`);
+            this.logger.warn(`[Ascent] Ascent fine tune failed: ${fixResult.error ?? 'unknown'}`);
           }
         }
 
@@ -818,8 +842,7 @@ export class AscentProgram {
       autoStage = true,
       launchMode = 'orbit',
       target,
-      phaseAngle = 0,
-      lanDifference = 0,
+      // phaseAngle and lanDifference removed - always reset to 0 internally
     } = options;
 
     // Wait for MechJeb to be ready (critical after save reload)
@@ -856,25 +879,38 @@ export class AscentProgram {
       skipCircularization: false,  // Let MechJeb handle circularization
       autowarp: config.warp.physicsMax > 0,  // Enable MechJeb autowarp if physics warp is enabled
       overrideWarpToPlane: config.warp.physicsMax <= 0,  // Skip plane warp if autowarp disabled (inverse)
-      // Reset launch mode flags
+      // Roll control: enable force roll and set angle to match inclination
+      forceRoll: inclination !== 0,  // Enable roll control for non-equatorial launches
+      verticalRoll: 0,  // Default vertical roll
+      turnRoll: inclination,  // Roll angle matches target inclination
+      // ALWAYS reset ALL launch mode fields to defaults - MechJeb persists stale values
       launchingToPlane: false,
       launchingToRendezvous: false,
-     launchPhaseAngle: 0, launchLANDifference: 0,};
+      launchPhaseAngle: 0,
+      launchLANDifference: 0,
+      desiredLan: 0,
+    };
 
     // Configure launch mode specific settings
-    // Always reset launch mode values to prevent stale data from previous MechJeb usage
-
     if (launchMode === 'rendezvous') {
       ascentSettings.launchingToRendezvous = true;
-      ascentSettings.launchPhaseAngle = phaseAngle;  // Use provided value (default 0)
+      // phaseAngle stays at 0 (reset above)
     } else if (launchMode === 'plane') {
       ascentSettings.launchingToPlane = true;
-      ascentSettings.launchLANDifference = lanDifference;  // Use provided value (default 0)
+      // lanDifference stays at 0 (reset above)
       // For plane mode, let MechJeb calculate inclination from target
       delete ascentSettings.desiredInclination;
+      // But keep roll settings to match the target inclination
+      ascentSettings.forceRoll = true;
+      ascentSettings.turnRoll = inclination;
     }
 
+    this.logger.info(`[Ascent] Roll config: forceRoll=${ascentSettings.forceRoll}, turnRoll=${ascentSettings.turnRoll}`);
     await this.configure(ascentSettings);
+
+    // Verify roll settings were applied
+    const rollCheck = await this.conn.execute('PRINT "ROLL|" + ADDONS:MJ:ASCENT:FORCEROLL + "|" + ADDONS:MJ:ASCENT:TURNROLL.');
+    this.logger.progress(`[Ascent] Roll check: ${rollCheck.output.trim()}`);
 
     // Let MechJeb process the configuration
     await delay(500);
@@ -883,9 +919,13 @@ export class AscentProgram {
     // For normal orbit mode, use our staged launch
     if (launchMode === 'plane' || launchMode === 'rendezvous') {
       // Enable autopilot and start countdown - MechJeb will warp to launch window
-      await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
+      this.logger.progress(`[Ascent] Enabling ascent autopilot for ${launchMode} mode...`);
+      const enableResult = await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE. PRINT ADDONS:MJ:ASCENT:ENABLED.');
+      this.logger.info(`[Ascent] Enable result: ${enableResult.output}`);
       await delay(500);
-      await this.conn.execute('ADDONS:MJ:ASCENT:STARTCOUNTDOWN(TIME:SECONDS + 999999).');
+
+      const countdownResult = await this.conn.execute('PRINT ADDONS:MJ:ASCENT:STARTCOUNTDOWN(TIME:SECONDS + 999999).');
+      this.logger.info(`[Ascent] Countdown result: ${countdownResult.output}`);
       await delay(1000);
 
       // Wait for MechJeb to warp to window and launch
@@ -1025,19 +1065,14 @@ async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
  */
 export const launchAscentTool: ToolDefinition = {
   name: 'launch',
-  description: 'Launch from pad or ground to orbit. Supports three modes: basic orbit launch, launch to rendezvous (match target phase angle), or launch to plane (match target orbital plane).',
+  description: 'Launch from pad or ground to orbit. With a target, automatically selects optimal launch mode (rendezvous for vessels, plane-matching for moons, transfer window for planets).',
   inputSchema: {
     altitude: z.union([distanceSchema, z.literal('auto')]).optional().default('auto')
-      .describe('Optional target orbit altitude in meters, default above atmosphere.'),
-    inclination: z.number().optional().default(0).describe('Optional target inclination in degrees, equatorial=0'),
-    launchMode: z.enum(['orbit', 'rendezvous', 'plane']).optional().default('orbit')
-      .describe("Launch mode: 'orbit' (default), 'rendezvous' (intercept target), or 'plane' (match target orbital plane)"),
+      .describe('Target orbit altitude in meters. Default: safe altitude above atmosphere.'),
+    inclination: z.number().optional().default(0)
+      .describe('Target inclination in degrees (0=equatorial). Overridden when launching to target.'),
     target: z.string().optional()
-      .describe("Optional. Aligns for launch to target and waits/warps for optimal window."),
-    phaseAngle: z.number().optional().default(0)
-      .describe("Phase angle for rendezvous mode in degrees (default: 0)"),
-    lanDifference: z.number().optional().default(0)
-      .describe("LAN offset from target for plane mode in degrees (default: 0)"),
+      .describe('Target name. Auto-selects launch mode and timing based on target type.'),
     wait: z.union([z.boolean(), z.literal('auto')]).optional().default('auto')
       .describe('Wait for orbit and stream progress updates.'),
   },
@@ -1093,7 +1128,7 @@ export const launchAscentTool: ToolDefinition = {
     // Use smart params if resolved, otherwise use args (nullish coalescing)
     const altitude = smartParams?.altitude ?? defaultAltitude;
     const inclination = smartParams?.inclination ?? (args.inclination as number);
-    const launchMode = smartParams?.launchMode ?? (args.launchMode as LaunchMode);
+    const launchMode = smartParams?.launchMode ?? 'orbit';
     const target = smartParams?.target ?? targetArg;
 
     // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor on completion)
@@ -1107,8 +1142,6 @@ export const launchAscentTool: ToolDefinition = {
         autoStage: true,
         launchMode,
         target,
-        phaseAngle: args.phaseAngle as number,
-        lanDifference: args.lanDifference as number,
       });
 
       // Resolve 'auto' to client-appropriate default
@@ -1140,16 +1173,61 @@ export const launchAscentTool: ToolDefinition = {
               `Inclination: ${inc.toFixed(1)}° | Eccentricity: ${ecc.toFixed(4)} | Period: ${formatTime(period)}`,
             ];
 
-            // Add guidance based on orbit quality
-            if (ecc < 0.01) {
-              lines.push('Orbit is nearly circular - ready for maneuvers.');
-            } else if (ecc < 0.05) {
-              lines.push('Orbit is circular and stable.');
+            // Add target-specific completion info
+            if (target && (launchMode === 'plane' || launchMode === 'rendezvous')) {
+              try {
+                if (launchMode === 'plane') {
+                  // Check inclination match with target
+                  const tgtQuery = await conn.execute(
+                    'IF HASTARGET { SET TGT TO ADDONS:MJ:TARGET. PRINT "TGT|" + TARGET:NAME + "|" + TGT:TARGETINCLINATION. } ELSE { PRINT "NOTGT". }',
+                    3000
+                  );
+                  const tgtMatch = tgtQuery.output.match(/TGT\|([^|]+)\|([\d.]+)/);
+                  if (tgtMatch) {
+                    const tgtName = tgtMatch[1];
+                    const tgtInc = Number.parseFloat(tgtMatch[2]);
+                    const incOffset = Math.abs(inc - tgtInc);
+                    if (incOffset < 0.5) {
+                      lines.push(`Plane match with ${tgtName}: excellent (${incOffset.toFixed(2)}° offset)`);
+                    } else if (incOffset < 2) {
+                      lines.push(`Plane match with ${tgtName}: good (${incOffset.toFixed(1)}° offset)`);
+                    } else {
+                      lines.push(`Plane match with ${tgtName}: ${incOffset.toFixed(1)}° offset - may need adjustment`);
+                    }
+                  }
+                } else if (launchMode === 'rendezvous') {
+                  // Check distance and closest approach to target vessel
+                  const rdzQuery = await conn.execute(
+                    'IF HASTARGET { PRINT "RDZ|" + TARGET:NAME + "|" + ROUND(TARGET:DISTANCE) + "|" + ROUND(ADDONS:MJ:TARGET:CLOSESTAPPROACHDISTANCE). } ELSE { PRINT "NOTGT". }',
+                    3000
+                  );
+                  const rdzMatch = rdzQuery.output.match(/RDZ\|([^|]+)\|([\d.]+)\|([\d.]+)/);
+                  if (rdzMatch) {
+                    const tgtName = rdzMatch[1];
+                    const distance = Number.parseFloat(rdzMatch[2]);
+                    const closestApproach = Number.parseFloat(rdzMatch[3]);
+                    const distStr = distance > 1_000_000 ? `${(distance/1_000_000).toFixed(1)}Mm` :
+                                   (distance > 1000 ? `${(distance/1000).toFixed(0)}km` : `${distance.toFixed(0)}m`);
+                    const caStr = closestApproach > 1_000_000 ? `${(closestApproach/1_000_000).toFixed(1)}Mm` :
+                                 (closestApproach > 1000 ? `${(closestApproach/1000).toFixed(0)}km` : `${closestApproach.toFixed(0)}m`);
+                    lines.push(`Rendezvous with ${tgtName}: ${distStr} away, closest approach ${caStr}`);
+                  }
+                }
+              } catch { /* ignore target query errors */ }
+              lines.push(`Next: Use transfer tool to intercept ${target}.`);
+            } else if (target) {
+              lines.push(`Next: Use transfer tool to go to ${target}.`);
             } else {
-              lines.push(`Orbit is elliptical (ecc=${ecc.toFixed(3)}) - consider circularizing if needed.`);
+              // Add guidance based on orbit quality
+              if (ecc < 0.01) {
+                lines.push('Orbit is nearly circular - ready for maneuvers.');
+              } else if (ecc < 0.05) {
+                lines.push('Orbit is circular and stable.');
+              } else {
+                lines.push(`Orbit is elliptical (ecc=${ecc.toFixed(3)}) - consider circularizing if needed.`);
+              }
+              lines.push('Next: Use transfer tool to go to a moon or planet, or status to see available targets.');
             }
-
-            lines.push('Next: Use transfer tool to go to a moon or planet, or status to see available targets.');
 
             return ctx.successResponse('launch', lines.join('\n'));
           } else {

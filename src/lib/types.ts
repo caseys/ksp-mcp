@@ -142,8 +142,5 @@ export interface LaunchOptions {
   launchMode?: LaunchMode;
   /** Target name for rendezvous/plane modes (required if launchMode is not 'orbit') */
   target?: string;
-  /** Phase angle for rendezvous mode in degrees (default: 0) */
-  phaseAngle?: number;
-  /** LAN difference for plane mode in degrees (default: 0) */
-  lanDifference?: number;
+  // phaseAngle and lanDifference removed - always reset to 0 internally
 }
