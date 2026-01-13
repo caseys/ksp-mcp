@@ -180,6 +180,7 @@ async function monitorLanding(
         }
         log.progress(`[Landing] ${statusText}`);
       }
+      conn.execute(`SET WARP TO +1.`);
 
       // Log touchdown
       if (state.isLanded) {
@@ -401,6 +402,10 @@ export const landTool: ToolDefinition = {
           }
 
           logger.progress(`[Landing] Now at landing orbit, proceeding...`);
+
+          // Cleanup after orbit lowering: stop warp and unlock controls
+          // MechJeb node executor may have left warp or steering engaged
+          await conn.execute('SET WARP TO 0. UNLOCK STEERING. UNLOCK THROTTLE. WAIT 0.5.', 5000);
         }
       }
 
@@ -579,25 +584,33 @@ export const landTool: ToolDefinition = {
           await conn.execute(alignScript, 25_000);
 
           logger.progress('[Landing] Burning to deorbit...');
-          // Burn retrograde until periapsis is negative
+          // Burn retrograde until periapsis is negative (with timeout)
           const burnScript = `
             LOCK STEERING TO RETROGRADE.
             LOCK THROTTLE TO 1.
-            WAIT UNTIL PERIAPSIS < 0.
-            LOCK THROTTLE TO 0.
-            WAIT 0.1.
+            SET burnStart TO TIME:SECONDS.
+            SET burnTimeout TO burnStart + 90.
+            UNTIL PERIAPSIS < 0 OR TIME:SECONDS > burnTimeout {
+              WAIT 0.1.
+            }
             LOCK THROTTLE TO 0.
             WAIT 0.1.
             UNLOCK THROTTLE.
             UNLOCK STEERING.
-            PRINT "Deorbit complete. PE=" + ROUND(PERIAPSIS).
+            IF PERIAPSIS < 0 { PRINT "Deorbit complete. PE=" + ROUND(PERIAPSIS). }
+            ELSE { PRINT "Deorbit timeout. PE=" + ROUND(PERIAPSIS). }
           `.trim().replaceAll('\n', ' ');
-          const burnResult = await conn.execute(burnScript, 60_000);
-          // Extract just the "Deorbit complete" message, format periapsis
-          const peMatch = burnResult.output.match(/Deorbit complete\. PE=([-\d]+)/);
+          const burnResult = await conn.execute(burnScript, 120_000);
+          // Extract result from deorbit burn
+          const peMatch = burnResult.output.match(/Deorbit (complete|timeout)\. PE=([-\d]+)/);
           if (peMatch) {
-            const pe = parseInt(peMatch[1]);
-            logger.progress(`[Landing] Deorbit complete, Pe=${fmtDist(pe)}`);
+            const status = peMatch[1];
+            const pe = parseInt(peMatch[2]);
+            if (status === 'complete') {
+              logger.progress(`[Landing] Deorbit complete, Pe=${fmtDist(pe)}`);
+            } else {
+              logger.progress(`[Landing] Deorbit burn timeout, Pe=${fmtDist(pe)} - continuing anyway`);
+            }
           }
         }
       }

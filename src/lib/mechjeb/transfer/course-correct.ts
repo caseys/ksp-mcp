@@ -253,7 +253,7 @@ export const courseCorrectTool: ToolDefinition = {
         }
       }
 
-      const targetDistance = args.targetDistance as number;
+      let targetDistance = args.targetDistance as number;
       const shouldExecute = args.execute as boolean;
 
       // Validate target distance range
@@ -266,11 +266,10 @@ export const courseCorrectTool: ToolDefinition = {
           `For landing, use 50-100km periapsis, then use landing tools.`);
       }
 
+      // Clamp to max instead of erroring - user likely passed distance-to-target instead of periapsis
       if (targetDistance > MAX_DISTANCE) {
-        return ctx.errorResponse('course_correct',
-          `Target periapsis ${(targetDistance / 1000).toFixed(0)}km is too high (max: 2500km).\n` +
-          `For orbit insertion, use 50-100km. For landing approach, use 100km.\n` +
-          `Received value may have wrong units - use "50km" or "100000" (meters).`);
+        logger.info(`[CourseCorrect] Requested ${(targetDistance / 1000).toFixed(0)}km exceeds max, using ${MAX_DISTANCE / 1000}km`);
+        targetDistance = MAX_DISTANCE;
       }
 
       const TOLERANCE = 0.25; // 25% tolerance for actual result

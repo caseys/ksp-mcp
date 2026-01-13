@@ -7,7 +7,7 @@
 
 import { z } from 'zod';
 import { ManeuverOrchestrator } from '../orchestrator.js';
-import { validateVesselState, ORBITING_ONLY_REQUIREMENTS } from '../../kos/vessel/validate.js';
+import { validateVesselState, getVesselStateInfo, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { clearNodes } from '../../kos/nodes.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
@@ -52,10 +52,42 @@ export const adjustOrbitTool: ToolDefinition = {
         targetAp = altInput;
       }
 
-      // Validate vessel state: must be in orbit
-      const vesselValidation = await validateVesselState(conn, ORBITING_ONLY_REQUIREMENTS, toolName);
+      // Validate vessel state: must be in orbit or escaping (hyperbolic)
+      const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, toolName);
       if (!vesselValidation.valid) {
         return ctx.errorResponse(toolName, vesselValidation.error ?? 'Invalid vessel state');
+      }
+
+      // Check for hyperbolic orbit - handle specially
+      const stateInfo = await getVesselStateInfo(conn);
+      const isHyperbolic = stateInfo.eccentricity >= 1;
+
+      if (isHyperbolic) {
+        // Hyperbolic trajectory: altitude is target periapsis, burn in 1 minute
+        const targetPe = Array.isArray(altInput) ? Math.min(altInput[0], altInput[1]) : altInput;
+
+        logger.progress(`[AdjustOrbit] Hyperbolic trajectory: adjusting Pe to ${fmtDist(targetPe)}`);
+
+        const result = await orchestrator.adjustPeriapsis(targetPe, 'X_FROM_NOW', {
+          execute,
+          logger,
+          callerTool: toolName,
+          xFromNowSeconds: 60,  // 1 minute ahead
+        });
+
+        if (!result.success) {
+          return ctx.errorResponse(toolName, result.error ?? 'Failed to plan periapsis adjustment');
+        }
+
+        if (!execute) {
+          return ctx.successResponse(toolName,
+            `Periapsis adjustment planned: ${fmtVel(result.deltaV ?? 0)} in T-60s\n` +
+            `Target periapsis: ${fmtDist(targetPe)}`);
+        }
+
+        return ctx.successResponse(toolName,
+          `Periapsis adjusted: ${fmtVel(result.deltaV ?? 0)}\n` +
+          `Target periapsis: ${fmtDist(targetPe)}`);
       }
 
       // Get current orbit info

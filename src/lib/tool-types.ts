@@ -135,8 +135,25 @@ export const executeSchema = z.boolean()
   .describe('Execute the maneuver node after planning. Optional, defaults to true.');
 
 /**
- * Parse distance string with optional units (km, m, Mm) to meters.
- * Handles LLM outputs like "50km", "50 km", or "100m" and converts to meters.
+ * Unit multipliers to convert to meters.
+ * Keys are lowercase, sorted by length descending for regex matching.
+ */
+const DISTANCE_UNITS: Record<string, number> = {
+  'gm': 1_000_000_000,  // Gigameters
+  'mm': 1_000_000,      // Megameters
+  'km': 1000,          // Kilometers
+  'm': 1,               // Meters
+};
+
+// Build regex pattern from unit keys, sorted by length descending to match longer units first
+const unitPattern = Object.keys(DISTANCE_UNITS)
+  .sort((a, b) => b.length - a.length) // eslint-disable-line unicorn/no-array-sort
+  .join('|');
+const DISTANCE_REGEX = new RegExp(String.raw`^([\d.]+)\s*(${unitPattern})?$`, 'i');
+
+/**
+ * Parse distance string with optional units to meters.
+ * Handles LLM outputs like "50km", "50 km", "1.5Mm", "0.74 Gm" and converts to meters.
  *
  * SMART DEFAULT: For orbital measurements, bare numbers < 10000 are assumed to be km.
  * This matches how humans talk about orbits ("raise to 100" means 100km, not 100m).
@@ -161,22 +178,18 @@ export function parseDistance(val: unknown): number | 'auto' {
 
   const trimmed = val.trim();
 
-  // Match number with optional unit: "50", "50km", "50 km", "1.5Mm"
-  const match = trimmed.match(/^([\d.]+)\s*(km|m|Mm)?$/i);
+  // Match number with optional unit
+  const match = trimmed.match(DISTANCE_REGEX);
   if (!match) {
-    throw new Error(`Invalid distance format: ${val}. Use "50km", "100m", or "1.5Mm"`);
+    throw new Error(`Invalid distance format: ${val}. Use "50km", "100m", "1.5Mm", or "0.5Gm"`);
   }
 
   const num = Number.parseFloat(match[1]);
   const unit = match[2]?.toLowerCase();
 
-  // If unit specified, use it
-  if (unit) {
-    switch (unit) {
-      case 'km': return num * 1000;
-      case 'mm': return num * 1_000_000;
-      case 'm': return num;
-    }
+  // If unit specified, look up multiplier
+  if (unit && DISTANCE_UNITS[unit]) {
+    return num * DISTANCE_UNITS[unit];
   }
 
   // No unit specified - smart default based on magnitude

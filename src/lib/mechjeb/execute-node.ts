@@ -630,6 +630,8 @@ export async function executeNode(
           lastLogTime = now;
         }
 
+        conn.execute(`SET WARP TO +1.`);
+
         // Disabled: using kOS WARPTO instead of kickstart pulses
         // Kickstart warp if coasting to node (high dV = not burning yet)
         // if (state.dvRemaining > 10) {

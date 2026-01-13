@@ -186,23 +186,45 @@ export const circularizeTool: ToolDefinition = {
           `Orbit is already circular (${apoKm}km x ${peKm}km, ecc=${currentEcc.toFixed(4)}). No circularization needed.`);
       }
 
+      const orchestrator = new ManeuverOrchestrator(conn);
+
       // Auto-detect best timeRef if 'auto'
       let timeRef = args.timeRef as string;
       if (timeRef === 'auto') {
         const orbitInfo = await conn.execute(
-          'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS.'
+          'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS + "|" + ROUND(PERIAPSIS).'
         );
-        const parts = orbitInfo.output.split('|').map(s => Number.parseFloat(s.trim()));
-        const [ecc, etaApo, etaPe] = parts;
+        const parts = orbitInfo.output.split('|').map(s => s.trim());
+        const ecc = Number.parseFloat(parts[0] ?? '0');
+        const etaApo = Number.parseFloat(parts[1] ?? '0');
+        const etaPe = Number.parseFloat(parts[2] ?? '0');
+        const currentPe = Number.parseFloat(parts[3]?.match(/[\d.-]+/)?.[0] ?? '0');
 
         if (ecc >= 1) {
           timeRef = 'PERIAPSIS';  // Hyperbolic orbit - no apoapsis
+
+          // If periapsis is too high (>2500km), lower it first for efficient capture
+          if (currentPe > 2_500_000) {
+            const targetPe = 250_000;  // 250km
+            logger.progress(`[Circularize] Hyperbolic with high Pe (${Math.round(currentPe/1000)}km), lowering to ${targetPe/1000}km first`);
+
+            const peResult = await orchestrator.adjustPeriapsis(targetPe, 'X_FROM_NOW', {
+              execute: true,
+              logger,
+              callerTool: 'circularize',
+              xFromNowSeconds: 60,
+            });
+
+            if (!peResult.success) {
+              return ctx.errorResponse('circularize', `Failed to lower periapsis: ${peResult.error}`);
+            }
+
+            logger.progress(`[Circularize] Periapsis lowered, proceeding with circularization`);
+          }
         } else {
           timeRef = etaApo < etaPe ? 'APOAPSIS' : 'PERIAPSIS';  // Nearest apse
         }
       }
-
-      const orchestrator = new ManeuverOrchestrator(conn);
       const result = await orchestrator.circularize(timeRef, {
         execute: args.execute as boolean,
         logger,

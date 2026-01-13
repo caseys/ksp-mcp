@@ -543,6 +543,7 @@ export class AscentHandle {
       onPoll: async (state) => {
         // Log status changes (skip 'Off' - completion is logged after potential auto-fix)
         const now = Date.now();
+        this.conn.execute(`SET WARP TO +1.`);
         if (!state?.status) {
           this.logger.progress(`[Ascent] no status`);
         } else if (state.status === 'Off') {
