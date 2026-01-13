@@ -48,7 +48,6 @@ const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 
 // Alignment configuration
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
-const RCS_TRIGGER_TIME = 2000; // ms - enable RCS if no progress after this
 const STEERING_RESET_TRIGGER_TIME = 5000; // ms - unlock and re-lock steering if still stuck
 const MAX_ALIGN_TIME = 300_000; // ms - 5 minutes, keep trying (warn after 30s)
 
@@ -77,8 +76,9 @@ function formatExecutorState(state: string): string {
  * @param conn kOS connection
  * @param logger Optional MCP logger for progress updates
  * @param logPrefix Prefix for log messages (e.g., '[Maneuver]')
+ * @param noRcs If true, don't use RCS during alignment (for small burns)
  */
-async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]'): Promise<boolean> {
+async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]', noRcs = false): Promise<boolean> {
   const log = logger ?? nullLogger;
 
   // Verify node exists before trying to align
@@ -92,22 +92,39 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
   log.progress(`${logPrefix} Align: initial angle ${fmtNum(initialAngle)}°`);
 
-  // Save RCS state
+  // Save RCS state (prefixed with _ as we disable but don't restore)
   const rcsState = await conn.execute('PRINT RCS.');
-  const wasRcsOn = rcsState.output.includes('True');
+  const _wasRcsOn = rcsState.output.includes('True');
 
-  // Start with kOS LOCK STEERING only (no SAS - they conflict)
-  await conn.execute('SAS OFF. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR.');
-  log.progress(`${logPrefix} Aligning for maneuver...`);
+  // If noRcs mode, ensure RCS is off to prevent trajectory changes during alignment
+  if (noRcs) {
+    await conn.execute('RCS OFF.');
+  }
+
+  // Try SAS MANEUVER mode first (preferred - uses game's autopilot)
+  let usingSasMode = false;
+  try {
+    const sasResult = await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER". PRINT SASMODE.', 3000);
+    if (sasResult.output.includes('MANEUVER')) {
+      log.progress(`${logPrefix} Aligning with SAS MANEUVER...`);
+      usingSasMode = true;
+    } else {
+      // SAS MANEUVER not available - use LOCK STEERING
+      log.progress(`${logPrefix} SAS MANEUVER not available, using LOCK STEERING...`);
+      await conn.execute('SAS OFF. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR.');
+    }
+  } catch {
+    // Error setting SAS - fall back to LOCK STEERING
+    log.progress(`${logPrefix} Aligning with LOCK STEERING...`);
+    await conn.execute('SAS OFF. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR.');
+  }
 
   const alignStartTime = Date.now();
   let warnedSlow = false;
 
   let lastAngle = 180;
   let noProgressSince = Date.now();
-  let triedRcs = false;
-  let triedSasManeuver = false;
-  let usingSasMode = false;  // Track if we switched to SAS mode
+  let triedLockSteering = false;
 
   interface AlignState {
     angle: number;
@@ -148,46 +165,35 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
         warnedSlow = true;
       }
 
+      // Pulse RCS on every iteration to help rotation, then turn off
+      // Skip RCS for small burns where it would affect trajectory more than the burn
+      if (!noRcs) {
+        try {
+          await conn.execute('RCS ON. WAIT 0.15. RCS OFF.');
+        } catch {
+          // Ignore RCS errors during blackout
+        }
+      }
+
       // Check for progress (improvement of at least 0.5 degrees)
       const timeSinceProgress = Date.now() - noProgressSince;
       if (state.angle < lastAngle - 0.5) {
         noProgressSince = Date.now();
         lastAngle = state.angle;
-        // Reset fallback flags on progress - current method is working
-        triedRcs = false;
-        triedSasManeuver = false;
-      } else if (timeSinceProgress > STEERING_RESET_TRIGGER_TIME && !triedSasManeuver) {
-        // No progress for 5s - try SAS MANEUVER mode instead
-        // Some vessels may not have this capability, so handle gracefully
+        // Reset fallback flag on progress - current method is working
+        triedLockSteering = false;
+      } else if (timeSinceProgress > STEERING_RESET_TRIGGER_TIME && usingSasMode && !triedLockSteering) {
+        // SAS not making progress for 5s - try LOCK STEERING instead
         try {
-          log.progress(`${logPrefix} LOCK STEERING stuck, trying SAS MANEUVER... (${fmtNum(state.angle)}°)`);
-          await conn.execute('UNLOCK STEERING. WAIT 0.1.');
-          // Try to enable SAS MANEUVER - may fail if vessel doesn't support it
-          const sasResult = await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER". PRINT SASMODE.', 3000);
-          if (sasResult.output.includes('MANEUVER')) {
-            log.progress(`${logPrefix} Switched to SAS MANEUVER mode`);
-            usingSasMode = true;
-          } else {
-            // SAS MANEUVER not available - fall back to LOCK STEERING
-            log.progress(`${logPrefix} SAS MANEUVER not available, continuing with LOCK STEERING`);
-            await conn.execute('SAS OFF. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR.');
-          }
-          triedSasManeuver = true;
+          log.progress(`${logPrefix} SAS stuck, trying LOCK STEERING... (${fmtNum(state.angle)}°)`);
+          await conn.execute('SAS OFF. WAIT 0.1. LOCK STEERING TO NEXTNODE:BURNVECTOR.');
+          usingSasMode = false;
+          triedLockSteering = true;
           noProgressSince = Date.now();
         } catch {
           // Error switching modes - continue with current method
           log.progress(`${logPrefix} Mode switch failed, continuing...`);
-          triedSasManeuver = true;
-        }
-      } else if (timeSinceProgress > RCS_TRIGGER_TIME && !triedRcs) {
-        // No progress for 2s - enable RCS to help rotation
-        try {
-          await conn.execute('RCS ON.');
-          log.progress(`${logPrefix} Enabled RCS (${fmtNum(state.angle)}°)`);
-          triedRcs = true;
-          noProgressSince = Date.now();
-        } catch {
-          // Ignore RCS enable errors during blackout
+          triedLockSteering = true;
         }
       }
     },
@@ -204,11 +210,9 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
     // Ignore cleanup errors
   }
 
-  // Restore RCS state
+  // Ensure RCS is off at end of alignment
   try {
-    if (!wasRcsOn) {
-      await conn.execute('RCS OFF.');
-    }
+    await conn.execute('RCS OFF.');
   } catch {
     // Ignore errors during cleanup
   }
@@ -230,6 +234,8 @@ export interface ExecuteNodeOptions {
   async?: boolean; // If true, return immediately after starting executor
   logger?: McpLogger; // Logger for MCP notifications
   callerTool?: string; // Name of tool that initiated execution (for logging context)
+  noRcsAlign?: boolean; // If true, don't use RCS during alignment (for small burns where RCS would affect trajectory)
+  targetPeriapsis?: number; // Target periapsis in meters (for RCS fine-tuning mode)
 }
 
 /**
@@ -255,6 +261,8 @@ export async function executeNode(
     async: asyncMode = false,
     logger,
     callerTool,
+    noRcsAlign = false,
+    targetPeriapsis,
   } = options;
 
   const log = logger ?? nullLogger;
@@ -304,11 +312,159 @@ export async function executeNode(
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
 
+  // For small burns (< 10 m/s), skip RCS during alignment as it would affect trajectory more than the burn
+  const skipRcsForSmallBurn = dvRequired < 10;
+  const useNoRcs = noRcsAlign || skipRcsForSmallBurn;
+  if (skipRcsForSmallBurn) {
+    log.progress(`${logPrefix} Small burn (${fmtVel(dvRequired)}), skipping RCS during alignment`);
+  }
+
   // Best-effort alignment before warp - MechJeb will handle final alignment
   // We don't fail on alignment issues since MechJeb's executor has its own alignment phase
-  await alignToNode(conn, logger, logPrefix).catch(() => {
+  await alignToNode(conn, logger, logPrefix, useNoRcs).catch(() => {
     log.warn(`${logPrefix} Pre-alignment failed, MechJeb will align during execution`);
   });
+
+  // For very small burns (< 5 m/s), use RCS pulses instead of MechJeb executor
+  // This prevents engine/alignment artifacts from affecting trajectory more than the burn
+  // BUT only if we have an actual encounter - RCS fine-tune needs valid TPERI readings
+  const TINY_BURN_THRESHOLD = 5;
+  const hasEncounter = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000)
+    .then(r => r.output.includes('True'))
+    .catch(() => false);
+
+  if (dvRequired < TINY_BURN_THRESHOLD && hasEncounter && targetPeriapsis) {
+    // Save node ETA before removing (for warp timing)
+    const savedNodeEta = await queryNumber(conn, 'NEXTNODE:ETA').catch(() => 0);
+
+    // Remove the node - we'll use periapsis monitoring instead
+    await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
+
+    // Get target periapsis from MechJeb INFO
+    const getTargetPe = async (): Promise<number> => {
+      const result = await conn.execute('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
+      // Match number with optional unit (e.g., "214.1 km", "50000 m", "1.2 Mm")
+      const match = result.output.match(/([0-9.]+)\s*(m|km|Mm|Gm)?/i);
+      if (!match) {
+        // Try to get any number from output as fallback
+        const numMatch = result.output.match(/[\d.]+/);
+        return numMatch ? parseFloat(numMatch[0]) * 1000 : 0; // Assume km if no unit
+      }
+      let value = parseFloat(match[1]);
+      const unit = (match[2] || 'm').toLowerCase();
+      switch (unit) {
+        case 'km':
+          value *= 1000;
+          break;
+        case 'mm':
+          value *= 1_000_000;
+          break;
+        case 'gm':
+          value *= 1_000_000_000;
+          break;
+      }
+      return value;
+    };
+
+    // Get initial periapsis and determine target
+    const initialPe = await getTargetPe();
+    const targetPe = targetPeriapsis ?? 50_000;
+    const tolerance = targetPe * 0.25; // 25% tolerance
+
+    // Validate initial periapsis query worked
+    if (initialPe <= 0) {
+      log.warn(`${logPrefix} Could not read target periapsis, skipping RCS fine-tune`);
+      await clearKosOperation(conn).catch(() => { /* ignore */ });
+      return { success: false, nodesExecuted: 0, error: 'Could not read target periapsis for RCS fine-tuning' };
+    }
+
+    log.progress(`${logPrefix} RCS fine-tune: ${(initialPe / 1000).toFixed(0)}km → ${(targetPe / 1000).toFixed(0)}km target`);
+
+    // Warp to 5 seconds before original node time (using saved ETA since node is removed)
+    if (savedNodeEta > 10 && config.warp.onRails) {
+      log.progress(`${logPrefix} Warping (${formatTime(savedNodeEta)})...`);
+      await stopWarp(conn);
+      const warpTargetTime = savedNodeEta - 5;
+      await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetTime}).`, 5000);
+
+      // Wait for warp to complete by checking TIMEWARP:RATE
+      let warpWait = 0;
+      const maxWarpWait = 600; // 10 minute max warp time
+      while (warpWait < maxWarpWait) {
+        await delay(1000);
+        warpWait++;
+        const warpCheck = await conn.execute('PRINT KUNIVERSE:TIMEWARP:RATE.', 2000);
+        const rate = parseFloat(warpCheck.output.match(/[\d.]+/)?.[0] || '1');
+        if (rate <= 1) break; // Warp complete
+      }
+      await stopWarp(conn);
+      await delay(500);
+    }
+
+    // Align PROGRADE with SAS (no RCS)
+    await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "PROGRADE". RCS OFF.');
+    await delay(2000);
+
+    // RCS fine-tuning loop
+    await conn.execute('RCS ON.');
+
+    const maxPulses = 20;
+    let pulseCount = 0;
+    let pulseDuration = 0.1;
+    let currentPe = initialPe;
+
+    while (pulseCount < maxPulses) {
+      currentPe = await getTargetPe();
+      const error = Math.abs(currentPe - targetPe);
+
+      // Check if within tolerance
+      if (error <= tolerance) {
+        log.progress(`${logPrefix} RCS done: ${(currentPe / 1000).toFixed(0)}km (${pulseCount} pulse${pulseCount !== 1 ? 's' : ''})`);
+        break;
+      }
+
+      // Determine direction: if Pe too high, need retrograde thrust (FORE = -1)
+      const direction = currentPe > targetPe ? -1 : 1;
+
+      // Pulse RCS
+      await conn.execute(`SET SHIP:CONTROL:FORE TO ${direction}. WAIT ${pulseDuration.toFixed(2)}. SET SHIP:CONTROL:FORE TO 0.`);
+      pulseCount++;
+
+      await delay(200);
+
+      // Check new periapsis and adjust pulse duration
+      const newPe = await getTargetPe();
+      const changePerPulse = Math.abs(newPe - currentPe);
+
+      // Log every few pulses or on significant change
+      if (pulseCount <= 2 || pulseCount % 3 === 0) {
+        log.progress(`${logPrefix} RCS: ${(newPe / 1000).toFixed(0)}km`);
+      }
+
+      // Adjust pulse duration based on change rate
+      if (changePerPulse > error * 0.5) {
+        pulseDuration = Math.max(0.02, pulseDuration * 0.5);
+      } else if (changePerPulse < error * 0.05 && pulseDuration < 0.5) {
+        pulseDuration = Math.min(0.5, pulseDuration * 1.5);
+      }
+
+      currentPe = newPe;
+    }
+
+    // Cleanup
+    await conn.execute('SET SHIP:CONTROL:FORE TO 0. RCS OFF. SAS ON. SET SASMODE TO "PROGRADE".');
+
+    // Clear operation state
+    try { await clearKosOperation(conn); } catch { /* ignore */ }
+
+    const finalError = Math.abs(currentPe - targetPe);
+    return {
+      success: finalError <= tolerance,
+      nodesExecuted: 1,
+      deltaV: { required: dvRequired, available: dvShipTotal, remaining: 0 },
+      attempts: pulseCount
+    };
+  }
 
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
@@ -493,10 +649,10 @@ export async function executeNode(
           // Clear the residual node to avoid "No maneuver nodes present!" errors
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
         }
-        // Enable SAS stability mode to stop any spin from MechJeb releasing control
+        // Enable SAS prograde to maintain heading and avoid RCS drift affecting trajectory
         try {
-          await conn.execute('SAS ON. WAIT 0.1. SET SASMODE TO "STABILITY".');
-        } catch { /* ignore stabilization errors */ }
+          await conn.execute('SAS ON. WAIT 0.1. SET SASMODE TO "PROGRADE".');
+        } catch { /* ignore SAS errors */ }
         // Clear operation state on success (safety monitor may have already cleared)
         try { await clearKosOperation(conn); } catch { /* ignore */ }
         return {

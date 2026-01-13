@@ -71,13 +71,20 @@ export function fmtVel(metersPerSecond: number): string {
 }
 
 /**
- * Format embedded measurements in a sentence:
- * - Distances: "2400000m" → "2400km", "203m" → "203m"
- * - Velocities: "27.2 m/s" or "27.2m/s" → "27_m/sec"
- * - Times: "5s" or "30s" → "5sec" or "30sec"
+ * Format embedded measurements in a sentence or a raw number:
+ * - If given a number, formats it as a distance (meters → km/Mm)
+ * - If given a string with measurements:
+ *   - Distances: "2400000m" → "2400km", "203m" → "203m"
+ *   - Velocities: "27.2 m/s" or "27.2m/s" → "27_m/sec"
+ *   - Times: "5s" or "30s" → "5sec" or "30sec"
  */
-export function formatMeasurements(text: string): string {
-  let result = text;
+export function formatMeasurements(input: string | number): string {
+  // If it's a number, format as distance
+  if (typeof input === 'number') {
+    return fmtDist(input);
+  }
+
+  let result = input;
 
   // Format velocities first (before distances, since m/s contains 'm')
   // Matches: "27.2 m/s", "27.2m/s", "100 m/s"

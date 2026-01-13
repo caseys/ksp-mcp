@@ -14,7 +14,7 @@ import type {
   LaunchMode
 } from '../types.js';
 import { delay } from '../utils/progress.js';
-import { formatOrbit, formatTime, fmtNum } from '../utils/format.js';
+import { formatOrbit, formatTime, fmtNum, formatMeasurements } from '../utils/format.js';
 import { clearNodes } from '../kos/nodes.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
@@ -548,9 +548,9 @@ export class AscentHandle {
         } else if (state.status === 'Off') {
           //this.logger.progress(`[Ascent] primary ascent burn complete.`);
         } else if ((state.status).includes('Awaiting liftoff')) {
-          this.logger.progress(`[Ascent] LAUNCH!! LAUNCH!!`);
+          this.logger.progress(`[Ascent] LAUNCH! LAUNCH!`);
         } else if ((state.status).includes('Vertical ascent')) {
-          this.logger.progress(`[Ascent] Roll program at ${state.periapsis} meters`);
+          this.logger.progress(`[Ascent] Roll program at ${formatMeasurements(state.apoapsis)}`);
         } else if ((state.status).includes('Coasting to circularization burn')) {
           // Warp to circularization burn (only once)
           if (!hasWarpedToCirc && config.warp.onRails) {
@@ -682,6 +682,8 @@ export class AscentProgram {
    */
   async waitForMechJebReady(): Promise<void> {
     const MAX_ATTEMPTS = 30;  // ~15 seconds max
+
+    this.logger.info('[Ascent] in 3, 2, 1... ');
 
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
       // Use SET then PRINT for reliable output (inline MechJeb addon access can be lost)

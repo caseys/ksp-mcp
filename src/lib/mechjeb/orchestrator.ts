@@ -61,6 +61,8 @@ export interface ManeuverOptions {
   rendezvous?: boolean;
   /** Time in seconds for X_FROM_NOW timeRef. Used by operations that support X_FROM_NOW. */
   xFromNowSeconds?: number;
+  /** Target periapsis in meters (for RCS fine-tuning in course corrections). */
+  targetPeriapsis?: number;
 }
 
 /**
@@ -92,7 +94,8 @@ export async function withTargetAndExecute(
   execute: boolean,
   planFn: () => Promise<ManeuverResult>,
   logger?: McpLogger,
-  callerTool?: string
+  callerTool?: string,
+  targetPeriapsis?: number
 ): Promise<OrchestratedResult> {
 
   // Handle target setting if provided (skip 'auto' - that should be resolved by caller)
@@ -118,7 +121,7 @@ export async function withTargetAndExecute(
   }
 
   // Execute the node
-  const execResult = await executeNode(conn, { logger, callerTool });
+  const execResult = await executeNode(conn, { logger, callerTool, targetPeriapsis });
 
   if (!execResult.success) {
     return {
@@ -435,7 +438,8 @@ export class ManeuverOrchestrator {
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       courseCorrection(this.conn, finalPeA, logger),
       logger,
-      callerTool
+      callerTool,
+      finalPeA  // Pass target periapsis for RCS fine-tuning
     );
   }
 
