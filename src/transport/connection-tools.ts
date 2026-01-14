@@ -39,20 +39,31 @@ IF NOT (DEFINED KSP_MCP_SAFETY_INIT) {
   GLOBAL KSP_MCP_SIGNAL_LOST IS FALSE.
   GLOBAL KSP_MCP_WARP_PENDING IS FALSE.
   GLOBAL _MCP_OP IS "".
+  GLOBAL KSP_MCP_HEARTBEAT IS TIME:SECONDS.
   FUNCTION KSP_MCP_MJ_ACTIVE { RETURN ADDONS:MJ:ASCENT:ENABLED OR ADDONS:MJ:LANDING:ENABLED OR ADDONS:MJ:NODE:ENABLED. }
   FUNCTION KSP_MCP_RELEASE { IF _MCP_OP <> "" AND KSP_MCP_MJ_ACTIVE() { PRINT "[ksp-mcp] Signal lost but MechJeb active - not releasing.". RETURN. } UNLOCK STEERING. UNLOCK THROTTLE. SET SHIP:CONTROL:NEUTRALIZE TO TRUE. IF NOT SAS { SAS ON. } }
-  FUNCTION KSP_MCP_TIDAL_LOCKED { LOCAL rt IS SHIP:BODY:ROTATIONPERIOD. LOCAL op IS SHIP:BODY:ORBIT:PERIOD. RETURN ABS(rt - op) / op < 1e-6. }
-  FUNCTION KSP_MCP_WARP_TIME { LOCAL rt IS SHIP:BODY:ROTATIONPERIOD * 0.4. RETURN MAX(300, MIN(rt, 3600)). }
+  FUNCTION KSP_MCP_FIND_RADIO { LOCAL sb IS SHIP:BODY. LOCAL is_tidal IS ABS(sb:ROTATIONPERIOD - sb:ORBIT:PERIOD) / sb:ORBIT:PERIOD < 1e-5. IF is_tidal AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") { LOCAL uv IS (SHIP:POSITION - sb:POSITION):NORMALIZED. LOCAL ka IS VANG(uv, BODY("Kerbin"):POSITION - SHIP:POSITION). IF ka > 90 { RETURN -2. } } LOCAL max_dt IS CHOOSE SHIP:ORBIT:PERIOD IF SHIP:STATUS = "ORBITING" ELSE sb:ROTATIONPERIOD. LOCAL step IS MAX(30, max_dt / 60). LOCAL dt IS step. UNTIL dt > max_dt { LOCAL ut IS TIME:SECONDS + dt. LOCAL fp IS POSITIONAT(SHIP, ut). LOCAL uv IS (fp - sb:POSITION):NORMALIZED. LOCAL kp IS POSITIONAT(BODY("Kerbin"), ut). LOCAL ka IS VANG(uv, kp - fp). IF ka < 72 { RETURN dt. } SET dt TO dt + step. } RETURN -1. }
   WHEN NOT HOMECONNECTION:ISCONNECTED THEN { IF NOT KSP_MCP_SIGNAL_LOST { KSP_MCP_RELEASE(). SET KSP_MCP_SIGNAL_LOST TO TRUE. PRINT "[ksp-mcp] Signal lost - controls released.". } PRESERVE. }
   WHEN HOMECONNECTION:ISCONNECTED THEN { IF KSP_MCP_SIGNAL_LOST { SET KSP_MCP_SIGNAL_LOST TO FALSE. SET KSP_MCP_WARP_PENDING TO FALSE. PRINT "[ksp-mcp] Signal restored.". } PRESERVE. }
-  WHEN (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") AND NOT HOMECONNECTION:ISCONNECTED AND NOT KSP_MCP_WARP_PENDING THEN { SET KSP_MCP_WARP_PENDING TO TRUE. IF KSP_MCP_TIDAL_LOCKED() { PRINT "[ksp-mcp] Tidally locked body - cannot warp to signal.". } ELSE { LOCAL wt IS KSP_MCP_WARP_TIME(). LOCAL i IS 0. PRINT "[ksp-mcp] Landed in blackout - warping " + ROUND(wt/60) + "m to signal...". UNTIL HOMECONNECTION:ISCONNECTED OR i >= 20 { KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + wt). WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED. WAIT 1. SET i TO i + 1. } IF HOMECONNECTION:ISCONNECTED { PRINT "[ksp-mcp] Signal restored after warp.". } ELSE { PRINT "[ksp-mcp] Max warp attempts - still no signal.". } SET KSP_MCP_WARP_PENDING TO FALSE. } PRESERVE. }
-  WHEN _MCP_OP <> "" THEN { LOCAL parts IS _MCP_OP:SPLIT("|"). LOCAL op IS parts[0]. LOCAL done IS FALSE. IF op = "ascent" AND PERIAPSIS > 0 AND SHIP:STATUS = "ORBITING" { SET done TO TRUE. } IF op = "landing" AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") { SET done TO TRUE. } IF op = "node" AND NOT ADDONS:MJ:NODE:ENABLED AND NOT HASNODE { SET done TO TRUE. } IF done { PRINT "[ksp-mcp] Operation complete: " + op. SET _MCP_OP TO "". } PRESERVE. }
+  WHEN (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") AND NOT HOMECONNECTION:ISCONNECTED AND NOT KSP_MCP_WARP_PENDING THEN { SET KSP_MCP_WARP_PENDING TO TRUE. LOCAL wt IS KSP_MCP_FIND_RADIO(). IF wt > 0 { PRINT "[ksp-mcp] Landed in blackout - radio in " + ROUND(wt/60) + "m, warping...". KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + wt). WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED. WAIT 2. IF HOMECONNECTION:ISCONNECTED { PRINT "[ksp-mcp] Signal restored after warp.". } ELSE { PRINT "[ksp-mcp] Warp complete but still no signal.". } } ELSE IF wt = -2 { PRINT "[ksp-mcp] Permanent blackout - landed on dark side of tidally locked body.". } ELSE { PRINT "[ksp-mcp] No radio window found.". } SET KSP_MCP_WARP_PENDING TO FALSE. PRESERVE. }
+  WHEN _MCP_OP <> "" THEN { LOCAL parts IS _MCP_OP:SPLIT("|"). LOCAL op IS parts[0]. LOCAL done IS FALSE. IF op = "ascent" AND PERIAPSIS > 0 AND SHIP:STATUS = "ORBITING" { SET done TO TRUE. } IF op = "landing" AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") { SET done TO TRUE. } IF op = "node" AND NOT HASNODE { PRINT "[ksp-mcp] Node removed, triggering completion.". SET done TO TRUE. } IF done { PRINT "[ksp-mcp] Operation complete: " + op + ", radio=" + HOMECONNECTION:ISCONNECTED. IF NOT HOMECONNECTION:ISCONNECTED AND NOT KSP_MCP_WARP_PENDING { SET KSP_MCP_WARP_PENDING TO TRUE. LOCAL wt IS KSP_MCP_FIND_RADIO(). PRINT "[ksp-mcp] Find radio returned: " + wt. IF wt > 0 { PRINT "[ksp-mcp] No radio - warping " + ROUND(wt/60) + "m to contact...". KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + wt). WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED. WAIT 2. IF HOMECONNECTION:ISCONNECTED { PRINT "[ksp-mcp] Signal restored.". } ELSE { PRINT "[ksp-mcp] Warp done but no signal.". } } ELSE IF wt = -2 { PRINT "[ksp-mcp] Permanent blackout - results may not return.". } ELSE { PRINT "[ksp-mcp] No radio window - results may not return.". } SET KSP_MCP_WARP_PENDING TO FALSE. } SET _MCP_OP TO "". } PRESERVE. }
+  WHEN TIME:SECONDS > KSP_MCP_HEARTBEAT + 30 THEN { SET KSP_MCP_HEARTBEAT TO TIME:SECONDS. PRINT "[ksp-mcp] Heartbeat: op=" + _MCP_OP + ", hasNode=" + HASNODE + ", radio=" + HOMECONNECTION:ISCONNECTED. PRESERVE. }
   PRINT "[ksp-mcp] Safety monitor active.".
 }`.trim();
 
 /**
  * Inject the safety monitor script.
  * Called after successful connection.
+ *
+ * NOTE: Remote terminal commands are queued but NOT executed during radio blackout.
+ * WHEN triggers registered via remote terminal are part of the terminal's program
+ * context and are suspended during blackout. For true persistence, the safety
+ * monitor would need to be in a boot file on the vessel.
+ *
+ * Despite this limitation, the safety monitor is still useful for:
+ * - Releasing controls on signal loss (fires immediately when signal drops)
+ * - Auto-warp when LANDED in blackout (fires when signal is restored)
+ * - Operation tracking and cleanup when signal is available
  */
 async function injectSafetyMonitor(conn: KosConnection): Promise<void> {
   try {

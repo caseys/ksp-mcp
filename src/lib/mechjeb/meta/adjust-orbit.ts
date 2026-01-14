@@ -13,6 +13,7 @@ import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, distanceSchema } from '../../tool-types.js';
 import { formatTime, fmtVel, fmtDist, fmtPeAp } from '../../utils/format.js';
 import { checkPostBurnPeriapsis } from '../shared.js';
+import { ensureRadioContact } from '../../../utils/radio-contact.js';
 
 export const adjustOrbitTool: ToolDefinition = {
   name: 'adjust_orbit',
@@ -36,6 +37,15 @@ export const adjustOrbitTool: ToolDefinition = {
       const logger = ctx.createLogger(extra);
       const execute = args.execute as boolean;
       const toolName = 'adjust_orbit';
+
+      // Ensure radio contact before planning (can't plan without communication)
+      const radioResult = await ensureRadioContact(conn, { logger, context: toolName });
+      if (!radioResult.success) {
+        return ctx.errorResponse(toolName, radioResult.error ?? 'Cannot establish radio contact');
+      }
+      if (radioResult.warpedSeconds && radioResult.warpedSeconds > 0) {
+        logger.progress(`[${toolName}] Warped ${formatTime(radioResult.warpedSeconds)} to radio contact`);
+      }
 
       // Parse altitude input
       const altInput = args.altitude as number | number[];
