@@ -26,6 +26,33 @@ interface TransferAttemptResult {
   deltaV?: number;
   timeToNode?: number;
   nodesCreated?: number;
+  /** Close approach without SOI encounter (for low-gravity bodies like Minmus) */
+  closeApproach?: {
+    distance: number;  // meters
+    time: number;      // seconds from now
+  };
+}
+
+/**
+ * Query close approach to target even without SOI encounter.
+ * Uses the maneuver node's predicted orbit to check TARGETDISTANCE.
+ */
+async function queryCloseApproach(conn: KosConnection): Promise<{ distance: number; time: number } | null> {
+  const result = await conn.execute(
+    'IF HASTARGET AND NEXTNODE:ORBIT:TARGETDISTANCE > 0 { ' +
+    'PRINT "CA|" + ROUND(NEXTNODE:ORBIT:TARGETDISTANCE) + "|" + ROUND(NEXTNODE:ORBIT:TARGETTIME). ' +
+    '} ELSE { PRINT "NOCA". }',
+    5000
+  );
+
+  const match = result.output.match(/CA\|(\d+)\|(\d+)/);
+  if (match) {
+    return {
+      distance: Number.parseInt(match[1]),
+      time: Number.parseInt(match[2]),
+    };
+  }
+  return null;
 }
 
 /**
@@ -60,6 +87,19 @@ async function attemptHohmannTransfer(
   const encounterBody = encounterCheck.output.trim();
 
   if (encounterBody === 'NO_ENCOUNTER') {
+    // No SOI encounter, but check for close approach (important for low-gravity bodies like Minmus)
+    const closeApproach = await queryCloseApproach(conn);
+    if (closeApproach) {
+      // If we have a close approach, return success with the close approach info
+      // The caller can decide based on distance whether this is acceptable
+      return {
+        success: true,
+        deltaV: nodeInfo.deltaV,
+        timeToNode: nodeInfo.timeToNode,
+        nodesCreated: 1,
+        closeApproach,
+      };
+    }
     return { success: false, noEncounter: true };
   }
 
@@ -273,6 +313,21 @@ export async function hohmannTransfer(
     return { success: false, error: attempt.error ?? 'Hohmann transfer failed' };
   }
 
+  // Check if we have a close approach without SOI encounter (common for low-gravity bodies)
+  if (attempt.closeApproach) {
+    const distKm = (attempt.closeApproach.distance / 1000).toFixed(0);
+    return {
+      success: true,
+      deltaV: attempt.deltaV,
+      timeToNode: attempt.timeToNode,
+      nodesCreated: attempt.nodesCreated,
+      closeApproach: attempt.closeApproach,
+      warning: `Close approach with ${targetName} at ${distKm}km (no SOI encounter yet).\n` +
+               `Low-gravity bodies like Minmus may need fine-tuning.\n` +
+               `After burn: use course_correct to refine approach and achieve encounter.`,
+    };
+  }
+
   return {
     success: true,
     deltaV: attempt.deltaV,
@@ -421,6 +476,12 @@ export const hohmannTransferTool: ToolDefinition = {
             text += ` (safe)`;
             text += `\nNext: warp to ${finalEncounterInfo.targetName} SOI, then circularize`;
           }
+        } else if (result.closeApproach) {
+          // Close approach without SOI encounter (common for low-gravity bodies like Minmus)
+          const caDistKm = (result.closeApproach.distance / 1000).toFixed(0);
+          const caTime = formatTime(result.closeApproach.time);
+          text += `\nClose approach: ${caDistKm}km in ${caTime} (no SOI encounter yet)`;
+          text += `\nNext: use course_correct to refine trajectory and achieve encounter`;
         }
 
         // Add warning if present (e.g., detour due to wrong encounter)

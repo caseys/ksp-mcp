@@ -25,6 +25,11 @@ export interface ManeuverResult {
   error?: string;
   warning?: string;       // Non-error guidance (e.g., crash trajectory needs follow-up)
   targetInfo?: TargetEncounterInfo;  // Target-specific encounter info
+  /** Close approach without SOI encounter (for low-gravity bodies like Minmus) */
+  closeApproach?: {
+    distance: number;  // meters
+    time: number;      // seconds from now
+  };
 }
 
 /** Info for celestial body targets (Mun, Minmus, planets) */

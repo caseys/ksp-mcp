@@ -405,6 +405,7 @@ export class AscentHandle {
     private conn: KosConnection,
     public readonly id: string,
     public readonly targetAltitude: number,
+    private turnRoll: number = 0,
     logger?: McpLogger
   ) {
     this.logger = logger ?? nullLogger;
@@ -516,14 +517,14 @@ export class AscentHandle {
         if (!statusMatch) {
           throw new Error('Failed to parse ascent status');
         }
-
+        
         const enabled = statusMatch[1].toLowerCase() === 'true';
         const status = statusMatch[2].trim();
         const apoapsis = Number.parseInt(statusMatch[3]);
         const periapsis = Number.parseInt(statusMatch[4]);
         const body = statusMatch[5];
         const eccentricity = Number.parseFloat(statusMatch[6]);
-
+        
         // Orbit quality tiers
         const survivable = periapsis >= atmHeight;  // Above atmosphere
         const successful = periapsis >= this.targetAltitude * 0.95;  // Within 95% of target
@@ -544,7 +545,7 @@ export class AscentHandle {
       onPoll: async (state) => {
         // Log status changes (skip 'Off' - completion is logged after potential auto-fix)
         const now = Date.now();
-        this.conn.execute(`SET WARP TO +1.`);
+        //this.conn.execute(`SET WARP TO +1.`);
         if (!state?.status) {
           this.logger.progress(`[Ascent] no status`);
         } else if (state.status === 'Off') {
@@ -552,7 +553,7 @@ export class AscentHandle {
         } else if ((state.status).includes('Awaiting liftoff')) {
           this.logger.progress(`[Ascent] LAUNCH! LAUNCH!`);
         } else if ((state.status).includes('Vertical ascent')) {
-          this.logger.progress(`[Ascent] Roll program at ${formatMeasurements(state.apoapsis)}`);
+          this.logger.progress(`[Ascent] Roll program: ${this.turnRoll} degrees`);
         } else if ((state.status).includes('Coasting to circularization burn')) {
           // Warp to circularization burn (only once)
           if (!hasWarpedToCirc && config.warp.onRails) {
@@ -564,7 +565,7 @@ export class AscentHandle {
               if (nodeEta > 30) {
                 const warpTarget = nodeEta - 15;
                 this.logger.progress(`[Ascent] Warping to circularization burn (T-${Math.round(nodeEta)}s)`);
-                await this.conn.execute('SET WARP TO 0.', 2000);
+                await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "ONRAILS".', 2000);
                 await delay(500);
                 await this.conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
               } else {
@@ -575,7 +576,7 @@ export class AscentHandle {
             }
           }
         } else if (state?.status && state.status !== lastStatus) {
-          this.logger.progress(`[Ascent] ${state.status} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
+          this.logger.progress(`[Ascent] ${formatMeasurements(state.status)} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
         }
         lastStatus = state?.status;
         lastLogTime = now;
@@ -610,7 +611,7 @@ export class AscentHandle {
           const fixResult = await orchestrator.changeEccentricity(0, 'X_FROM_NOW', {
             execute: true,
             logger: this.logger,
-            callerTool: 'fine_tuninng_ascent',
+            callerTool: 'fine_tuninng_orbit',
             xFromNowSeconds: 15,  // Create node 15 seconds from now
           });
 
@@ -628,7 +629,7 @@ export class AscentHandle {
               successful = periapsis >= this.targetAltitude * 0.95;
               goodOrbit = successful && eccentricity < 0.01;
             }
-            this.logger.progress(`[Ascent] Orbit corrected to ${formatOrbit(apoapsis, periapsis)}, ecc=${eccentricity.toFixed(4)}`);
+            //this.logger.progress(`[Ascent] Orbit corrected to ${formatOrbit(apoapsis, periapsis)}, ecc=${eccentricity.toFixed(4)}`);
           } else {
             this.logger.warn(`[Ascent] Ascent fine tune failed: ${fixResult.error ?? 'unknown'}`);
           }
@@ -638,7 +639,7 @@ export class AscentHandle {
         if (goodOrbit) {
           this.logger.progress(`[Ascent] Complete! Circular orbit at ${formatOrbit(apoapsis, periapsis)} at ${body}`);
         } else if (successful) {
-          this.logger.progress(`[Ascent] Complete! ${formatOrbit(apoapsis, periapsis)} at ${body} (ecc=${eccentricity.toFixed(3)})`);
+          this.logger.progress(`[Ascent] Complete! ${formatOrbit(apoapsis, periapsis)} at ${body} (eccentricity=${eccentricity.toFixed(3)})`);
         } else if (survivable) {
           this.logger.progress(`[Ascent] Complete but below target: ${formatOrbit(apoapsis, periapsis)} at ${body}`);
         } else {
@@ -909,12 +910,11 @@ export class AscentProgram {
       ascentSettings.turnRoll = inclination;
     }
 
-    this.logger.info(`[Ascent] Roll config: forceRoll=${ascentSettings.forceRoll}, turnRoll=${ascentSettings.turnRoll}`);
     await this.configure(ascentSettings);
 
     // Verify roll settings were applied
     const rollCheck = await this.conn.execute('PRINT "ROLL|" + ADDONS:MJ:ASCENT:FORCEROLL + "|" + ADDONS:MJ:ASCENT:TURNROLL.');
-    this.logger.progress(`[Ascent] Roll check: ${rollCheck.output.trim()}`);
+    this.logger.progress(`[Ascent] Configuring ascent alignment: ${rollCheck.output.trim()}`);
 
     // Let MechJeb process the configuration
     await delay(500);
@@ -1015,7 +1015,7 @@ export class AscentProgram {
         this.logger.progress('[Ascent] LAUNCH');
       }
     }
-
+  
     // Enable physics warp after 20 seconds if configured via env var
     // This replaces the old autoWarp parameter with global env var control
     if (config.warp.physicsMax > 0) {
@@ -1023,11 +1023,15 @@ export class AscentProgram {
         this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`)
           .catch(() => { /* Ignore warp errors during ascent */ });
       }, 20_000);
-    }
+      void setTimeout(() => {
+        this.conn.execute(`SET WARP TO 2.`)
+          .catch(() => { /* Ignore warp errors during ascent */ });
+      }, 30_000);      
+    } 
 
     // Create handle for monitoring (pass logger for waitForCompletion)
     const handleId = `ascent-${++this.handleCounter}-${Date.now()}`;
-    return new AscentHandle(this.conn, handleId, altitude, this.logger);
+    return new AscentHandle(this.conn, handleId, altitude, inclination, this.logger);
   }
 }
 
