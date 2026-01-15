@@ -1042,26 +1042,112 @@ import { validateVesselState, LAUNCH_REQUIREMENTS } from '../kos/vessel/validate
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 
 /**
+ * Body orbit constraints for validation
+ */
+interface BodyOrbitConstraints {
+  bodyName: string;
+  hasAtmosphere: boolean;
+  atmosphereHeight: number;  // 0 if no atmosphere
+  minSafeAltitude: number;   // Minimum safe orbit altitude
+  recommendedAltitude: number;  // Recommended default altitude
+}
+
+/**
+ * Get body orbit constraints (atmosphere height, min safe altitude, recommended altitude)
+ */
+async function getBodyOrbitConstraints(conn: KosConnection): Promise<BodyOrbitConstraints> {
+  const NO_ATM_MIN = 15_000;  // 15km minimum for airless bodies
+  const NO_ATM_DEFAULT = 50_000;  // 50km default for airless bodies
+  const ATM_MARGIN = 1.15;  // 15% above atmosphere = minimum
+  const ATM_RECOMMENDED = 1.5;  // 50% above atmosphere = recommended
+
+  try {
+    const result = await conn.execute(
+      'PRINT SHIP:BODY:NAME + "|" + SHIP:BODY:ATM:EXISTS + "|" + (CHOOSE SHIP:BODY:ATM:HEIGHT IF SHIP:BODY:ATM:EXISTS ELSE 0).',
+      3000
+    );
+    const match = result.output.match(/([^|]+)\|(True|False)\|([\d.]+)/i);
+    if (match) {
+      const bodyName = match[1].trim();
+      const hasAtmosphere = match[2].toLowerCase() === 'true';
+      const atmosphereHeight = parseFloat(match[3]);
+
+      if (hasAtmosphere && atmosphereHeight > 0) {
+        return {
+          bodyName,
+          hasAtmosphere: true,
+          atmosphereHeight,
+          minSafeAltitude: Math.round(atmosphereHeight * ATM_MARGIN),
+          recommendedAltitude: Math.round(atmosphereHeight * ATM_RECOMMENDED),
+        };
+      } else {
+        return {
+          bodyName,
+          hasAtmosphere: false,
+          atmosphereHeight: 0,
+          minSafeAltitude: NO_ATM_MIN,
+          recommendedAltitude: NO_ATM_DEFAULT,
+        };
+      }
+    }
+  } catch {
+    // Ignore errors, return safe defaults
+  }
+
+  return {
+    bodyName: 'Unknown',
+    hasAtmosphere: true,
+    atmosphereHeight: 70_000,
+    minSafeAltitude: Math.round(70_000 * ATM_MARGIN),
+    recommendedAltitude: Math.round(70_000 * ATM_RECOMMENDED),
+  };
+}
+
+/**
+ * Validate launch altitude is safe for the current body.
+ * Returns error message if invalid, undefined if valid.
+ */
+async function validateLaunchAltitude(
+  conn: KosConnection,
+  altitude: number
+): Promise<{ valid: true } | { valid: false; error: string }> {
+  const constraints = await getBodyOrbitConstraints(conn);
+
+  if (altitude < constraints.minSafeAltitude) {
+    const altKm = (altitude / 1000).toFixed(1);
+    const minKm = (constraints.minSafeAltitude / 1000).toFixed(1);
+    const recKm = (constraints.recommendedAltitude / 1000).toFixed(1);
+
+    if (constraints.hasAtmosphere) {
+      const atmKm = (constraints.atmosphereHeight / 1000).toFixed(1);
+      return {
+        valid: false,
+        error: `Target altitude ${altKm}km is too low for ${constraints.bodyName}!\n` +
+               `Atmosphere height: ${atmKm}km\n` +
+               `Minimum safe altitude: ${minKm}km (15% above atmosphere)\n` +
+               `Recommended: Use altitude:"auto" for ${recKm}km (50% above atmosphere)`,
+      };
+    } else {
+      return {
+        valid: false,
+        error: `Target altitude ${altKm}km is too low for ${constraints.bodyName}!\n` +
+               `Minimum safe altitude: ${minKm}km\n` +
+               `Recommended: Use altitude:"auto" for ${recKm}km`,
+      };
+    }
+  }
+
+  return { valid: true };
+}
+
+/**
  * Get default launch altitude based on current body:
  * - With atmosphere: atmHeight * 1.5 (safe margin above atmosphere)
  * - Without atmosphere: 50km
  */
 async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
-  const NO_ATM_DEFAULT = 50_000; // 50km for bodies without atmosphere
-  try {
-    const result = await conn.execute(
-      'IF SHIP:BODY:ATM:EXISTS { PRINT SHIP:BODY:ATM:HEIGHT. } ELSE { PRINT 0. }',
-      3000
-    );
-    const match = result.output.match(/([\d.]+)/);
-    if (match) {
-      const atmHeight = parseFloat(match[1]);
-      return atmHeight > 0 ? Math.round(atmHeight * 1.5) : NO_ATM_DEFAULT;
-    }
-  } catch {
-    // Ignore errors
-  }
-  return NO_ATM_DEFAULT;
+  const constraints = await getBodyOrbitConstraints(conn);
+  return constraints.recommendedAltitude;
 }
 
 /**
@@ -1097,6 +1183,16 @@ export const launchAscentTool: ToolDefinition = {
       return ctx.errorResponse('launch', validation.error ?? 'Invalid vessel state');
     }
 
+    // Validate user's explicit altitude FIRST (before smart params might override it)
+    // This catches dangerous values like "104m" that small LLMs might extract
+    const altArg = args.altitude as number | 'auto';
+    if (altArg !== 'auto') {
+      const userAltValidation = await validateLaunchAltitude(conn, altArg);
+      if (!userAltValidation.valid) {
+        return ctx.errorResponse('launch', userAltValidation.error);
+      }
+    }
+
     // Smart parameter resolution: if target is provided or already exists, auto-select launch params
     let smartParams: SmartLaunchParams | null = null;
     const targetArg = args.target as string | undefined;
@@ -1126,7 +1222,7 @@ export const launchAscentTool: ToolDefinition = {
     }
 
     // Determine final launch parameters (smart params override args when available)
-    const altArg = args.altitude as number | 'auto';
+    // altArg already validated above
     const defaultAltitude = altArg === 'auto' ? await getDefaultLaunchAltitude(conn) : altArg;
 
     // Use smart params if resolved, otherwise use args (nullish coalescing)

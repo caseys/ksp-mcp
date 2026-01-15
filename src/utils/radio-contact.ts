@@ -209,6 +209,16 @@ export async function willBeInBlackoutAt(
     return isInRadioBlackout(conn);
   }
 
+  // Short-circuit for Kerbin orbits: vessels at Kerbin always have radio
+  // The angle-based algorithm breaks when SHIP:BODY = Kerbin because
+  // the "Kerbin from vessel" vector is opposite to "vessel from body" vector,
+  // resulting in ~180° angle which falsely triggers blackout detection.
+  const bodyCheck = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+  if (bodyCheck.output.includes('Kerbin')) {
+    console.error(`[willBeInBlackoutAt] At Kerbin - always has radio`);
+    return false;
+  }
+
   const script = `
 LOCAL ut IS TIME:SECONDS + ${secondsFromNow}.
 LOCAL sb IS SHIP:BODY.
