@@ -9,15 +9,12 @@ import type { KosConnection } from '../../transport/kos-connection.js';
 import { queryNumber, unlockControls, parseNumber } from './shared.js';
 import { delay } from '../utils/progress.js';
 import { formatTime, fmtNum, fmtVel } from '../utils/format.js';
-import { areWorkaroundsEnabled } from '../../config/workarounds.js';
 import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
-import { willBeInBlackoutAt } from '../../utils/radio-contact.js';
-
 export interface ExecuteNodeResult {
   success: boolean;
   nodesExecuted: number;
@@ -723,119 +720,47 @@ export async function executeNode(
     };
   }
 
+  // Enable MechJeb executor FIRST, before any warp
+  // This ensures burn will complete even if we warp into a blackout zone
+  // MechJeb runs on the vessel autonomously once enabled
+  await stopWarp(conn);
+  await conn.execute('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+  log.progress(`${logPrefix} MechJeb executor enabled`);
+
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
   // This ensures we arrive 15s before the burn should START (not before node time)
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
   const alignmentBuffer = 15; // Extra time for alignment before burn starts
   const warpLeadTime = halfBurn + alignmentBuffer;
-  // Track if node is in blackout zone (for later retry loop logic)
-  let nodeInBlackout = false;
 
   if (nodeEta > warpLeadTime + 10 && config.warp.onRails) {
     log.progress(`${logPrefix} Node in T-minus ${formatTime(nodeEta)}, burn ~${formatTime(burnDuration)}, warping to T-minus ${formatTime(warpLeadTime)}`);
 
-    // Check if node time OR arrival time will be in radio blackout (conservative check)
     const warpTargetSeconds = nodeEta - warpLeadTime;
-    const arrivalInBlackout = await willBeInBlackoutAt(conn, warpTargetSeconds);
-    const nodeTimeInBlackout = await willBeInBlackoutAt(conn, nodeEta);
-    nodeInBlackout = arrivalInBlackout || nodeTimeInBlackout;
+    await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
 
-    log.progress(`${logPrefix} Blackout check: arrival=${arrivalInBlackout}, nodeTime=${nodeTimeInBlackout}, nodeInBlackout=${nodeInBlackout}`);
-
-    if (nodeInBlackout) {
-      // Node is in blackout zone - align first, enable MechJeb, then start monitoring loop
-      // IMPORTANT: The monitoring loop must be RUNNING before we enter blackout.
-      // kOS only executes already-running scripts during blackout, not new commands.
-      log.progress(`${logPrefix} Node in blackout zone - preparing for autonomous execution`);
-
-      // Align while we still have radio contact
-      await alignToNode(conn, logger, logPrefix, useNoRcs).catch(() => {
-        log.warn(`${logPrefix} Pre-blackout alignment failed, MechJeb will handle it`);
-      });
-
-      // Enable MechJeb so it's ready to execute autonomously during blackout
-      await conn.execute('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
-      log.progress(`${logPrefix} MechJeb enabled for autonomous execution`);
-
-      // Start the blackout monitor loop BEFORE warping - this is critical!
-      // The loop will: warp to node, wait for burn, then warp to radio.
-      // Since it's already running when we enter blackout, it continues executing.
-      const blackoutScript = `
-        PRINT "[ksp-mcp] Blackout monitor started".
-        KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).
-        PRINT "[ksp-mcp] Warping to node...".
-        WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED.
-        PRINT "[ksp-mcp] Waiting for burn to complete...".
-        UNTIL NOT HASNODE { WAIT 5. }
-        PRINT "[ksp-mcp] Burn complete!".
-        IF NOT HOMECONNECTION:ISCONNECTED {
-          PRINT "[ksp-mcp] No radio - finding window...".
-          LOCAL sb IS SHIP:BODY.
-          LOCAL dt IS 60.
-          LOCAL found IS FALSE.
-          UNTIL dt > SHIP:ORBIT:PERIOD OR found {
-            LOCAL ut IS TIME:SECONDS + dt.
-            LOCAL fp IS POSITIONAT(SHIP, ut).
-            LOCAL uv IS (fp - sb:POSITION):NORMALIZED.
-            LOCAL kp IS POSITIONAT(BODY("Kerbin"), ut).
-            IF VANG(uv, kp - fp) < 72 {
-              PRINT "[ksp-mcp] Radio in " + ROUND(dt/60) + "m, warping...".
-              KUNIVERSE:TIMEWARP:WARPTO(ut).
-              WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED.
-              SET found TO TRUE.
-            }
-            SET dt TO dt + 60.
-          }
-          IF found { PRINT "[ksp-mcp] Signal restored!". }
-          ELSE { PRINT "[ksp-mcp] No radio window found.". }
-        } ELSE {
-          PRINT "[ksp-mcp] Already have radio.".
-        }
-        SET _MCP_OP TO "".
-        PRINT "[ksp-mcp] Blackout monitor complete.".
-      `.replaceAll('\n', ' ').trim();
-
-      log.progress(`${logPrefix} Starting blackout monitor (will run through blackout)...`);
-
-      // Execute the script - it will run continuously through blackout
-      // We don't await the full completion since it takes a long time
-      conn.execute(blackoutScript, 600_000).catch(() => {
-        // Script may complete after we've moved on - that's fine
-      });
-
-      // Give the script a moment to start, then let it run autonomously
-      await delay(2000);
-      log.progress(`${logPrefix} Blackout monitor running - MechJeb will execute burn autonomously`);
-
-      // Return success - the script is running on the vessel and will handle everything
-      // The script will: warp to node, wait for burn, warp to radio
-      return {
-        success: true,
-        nodesExecuted: 1,
-        deltaV: { required: dvRequired, available: dvShipTotal },
-        attempts: 1,
-      };
-    } else {
-      // Node NOT in blackout - use our more reliable warp logic
-      await stopWarp(conn);
-      await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
-
-      // Wait for warp to complete (poll until ETA is close)
-      let warpAttempts = 0;
-      const maxWarpAttempts = 600; // Max 10 minutes of warp checking (1s poll interval)
-      while (warpAttempts < maxWarpAttempts) {
-        await delay(1000);
+    // Wait for warp to complete (poll until ETA is close)
+    let warpAttempts = 0;
+    const maxWarpAttempts = 600; // Max 10 minutes of warp checking (1s poll interval)
+    while (warpAttempts < maxWarpAttempts) {
+      await delay(1000);
+      try {
         const currentEta = await queryNumber(conn, 'NEXTNODE:ETA');
         if (currentEta <= warpLeadTime + 5) {
           log.progress(`${logPrefix} Warp complete, ETA: ${formatTime(currentEta)}`);
           break;
         }
-        warpAttempts++;
         if (warpAttempts % 30 === 0) {
           log.progress(`${logPrefix} Still warping, ETA: ${formatTime(currentEta)}`);
         }
+      } catch {
+        // May be in blackout during warp - that's fine, MechJeb will handle it
+        if (warpAttempts % 30 === 0) {
+          log.progress(`${logPrefix} Warping (no signal - MechJeb handling autonomously)`);
+        }
       }
+      warpAttempts++;
     }
   }
 
@@ -859,35 +784,15 @@ export async function executeNode(
     lastAttempt = attempt;
     log.progress(`${logPrefix} Attempt ${attempt} of ${MAX_RETRIES}`);
 
-    // Workaround: Shift node time earlier by half burn duration
-    // MechJeb fires at node time instead of centering the burn
-    if (areWorkaroundsEnabled() && halfBurn > 0) {
-      // disabled for now
-      //await conn.execute(`SET nd TO NEXTNODE. SET nd:ETA TO nd:ETA - ${halfBurn.toFixed(1)}.`, 3000);
-    }
-
-    // If node is in blackout and this is attempt 1, MechJeb is already enabled and warping
-    // Skip setup commands (we may not have radio contact)
-    if (nodeInBlackout && attempt === 1) {
-      log.progress(`${logPrefix} MechJeb already enabled for blackout execution`);
-    } else {
-      // Try to enable MechJeb - may fail if in blackout during retries
+    // For retries (attempt > 1), re-enable MechJeb
+    // First attempt already enabled it before warp
+    if (attempt > 1) {
       try {
-        // Stop any active warp before executing
         await stopWarp(conn);
-
-        // Turn off SAS - MechJeb handles its own steering now
-        await conn.execute('SAS OFF.');
-
-        // Enable MechJeb node executor
-        await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+        await conn.execute('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
       } catch {
-        // May be in blackout - if MechJeb was enabled for blackout, it will execute autonomously
-        if (nodeInBlackout) {
-          log.progress(`${logPrefix} In blackout - MechJeb executing autonomously`);
-        } else {
-          throw new Error('Cannot communicate with vessel - no radio contact');
-        }
+        // May be in blackout - MechJeb will continue executing autonomously
+        log.progress(`${logPrefix} No signal - MechJeb executing autonomously`);
       }
     }
 

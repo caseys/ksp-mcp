@@ -119,34 +119,41 @@ export async function deployScript(
   kosPath: string,
   content: string
 ): Promise<{ success: boolean; method: 'direct' | 'terminal'; error?: string }> {
-  // Strip 0:/ prefix for archive path
-  const archiveRelPath = kosPath.replace(/^0:\//, '');
+  // Direct write only works for archive paths (0:/)
+  // Local volume (1:/) requires terminal transfer
+  const isArchivePath = kosPath.startsWith('0:/');
 
-  // Try direct write first
-  // IMPORTANT: Delete existing file in kOS first to invalidate cache
-  // kOS caches file content, so writing to disk doesn't update kOS's view
-  try {
-    await conn.execute(`IF EXISTS("${kosPath}") { DELETEPATH("${kosPath}"). }`, 3000);
-  } catch {
-    // Ignore delete errors - file may not exist yet
-  }
+  if (isArchivePath) {
+    // Strip 0:/ prefix for archive path
+    const archiveRelPath = kosPath.replace(/^0:\//, '');
 
-  const directSuccess = await writeToArchive(conn, archiveRelPath, content);
-
-  if (directSuccess) {
-    // File is now in archive - verify kOS can see it (should re-read from disk after delete)
+    // Try direct write first
+    // IMPORTANT: Delete existing file in kOS first to invalidate cache
+    // kOS caches file content, so writing to disk doesn't update kOS's view
     try {
-      const checkResult = await conn.execute(`PRINT EXISTS("${kosPath}").`, 3000);
-      if (checkResult.output.includes('True')) {
-        return { success: true, method: 'direct' };
-      }
-      // File written but kOS can't see it - fall through to terminal method
+      await conn.execute(`IF EXISTS("${kosPath}") { DELETEPATH("${kosPath}"). }`, 3000);
     } catch {
-      // Fall through to terminal method
+      // Ignore delete errors - file may not exist yet
+    }
+
+    const directSuccess = await writeToArchive(conn, archiveRelPath, content);
+
+    if (directSuccess) {
+      // File is now in archive - verify kOS can see it (should re-read from disk after delete)
+      try {
+        const checkResult = await conn.execute(`PRINT EXISTS("${kosPath}").`, 3000);
+        if (checkResult.output.includes('True')) {
+          return { success: true, method: 'direct' };
+        }
+        // File written but kOS can't see it - fall through to terminal method
+      } catch {
+        // Fall through to terminal method
+      }
     }
   }
 
   // Fall back to terminal transfer (slow but reliable)
+  // Works for both archive (0:/) and local (1:/) paths
   try {
     // Ensure parent directory exists
     const parentPath = kosPath.slice(0, Math.max(0, kosPath.lastIndexOf('/')));

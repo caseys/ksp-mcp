@@ -2,13 +2,17 @@
  * MCP Daemon Script Generator
  *
  * Generates the kOS boot script that provides autonomous blackout recovery.
- * This script IS the boot file - it runs on CPU startup, sets up WHEN triggers,
- * and stays alive to handle blackout conditions.
+ * This is a self-installing boot program that:
+ * 1. Runs from archive (0:/boot/) on first execution
+ * 2. Copies itself to local volume (1:/boot/)
+ * 3. Reboots the CPU
+ * 4. Thereafter runs from local, surviving radio blackouts
  *
  * When idle in blackout (no radio, no operation in progress), auto-warps to
  * the next radio contact window.
  *
- * Note: This is a boot file deployed to 0:/boot/mcp_daemon.ks
+ * Deployed to: 0:/boot/mcp_daemon.ks (archive)
+ * Self-installs to: 1:/boot/mcp_daemon.ks (local)
  */
 
 import { createHash } from 'node:crypto';
@@ -30,6 +34,16 @@ import { createHash } from 'node:crypto';
 function generateDaemonContent(version: string): string {
   return `@LAZYGLOBAL OFF.
 WAIT UNTIL SHIP:UNPACKED.
+LOCAL lp IS "1:/boot/mcp_daemon.ks".
+LOCAL ap IS "0:/boot/mcp_daemon.ks".
+IF NOT EXISTS(lp) {
+PRINT "[mcp-daemon] Installing locally...".
+IF NOT EXISTS("1:/boot") { CREATEDIR("1:/boot"). }
+COPYPATH(ap, lp).
+PRINT "[mcp-daemon] Rebooting...".
+WAIT 1.
+REBOOT.
+}
 IF DEFINED MCP_DAEMON_RUNNING AND MCP_DAEMON_RUNNING {
 PRINT "[mcp-daemon] Already running.".
 } ELSE {

@@ -13,14 +13,16 @@ import type { KosConnection } from '../transport/kos-connection.js';
 import { generateMcpDaemon, MCP_DAEMON_VERSION } from './mcp-daemon.js';
 import { deployScript } from './kos-archive.js';
 
-// Boot file path in kOS archive
-const DAEMON_PATH = '0:/boot/mcp_daemon.ks';
+// Boot file paths
+const DAEMON_PATH = '0:/boot/mcp_daemon.ks';       // Archive (deployment target)
+const LOCAL_DAEMON_PATH = '1:/boot/mcp_daemon.ks'; // Local volume (self-installed)
 
 export interface DaemonStatus {
   installed: boolean;
   running: boolean;
   version: string | null;  // Hash string like "a3f2c1b9"
   needsUpdate: boolean;
+  locallyInstalled: boolean;  // True if self-installed to local volume
 }
 
 export interface DeployResult {
@@ -33,19 +35,20 @@ export interface DeployResult {
  * Check if daemon is installed and running.
  *
  * Queries MCP_DAEMON_VERSION global variable which is set when daemon runs.
- * Also checks if boot file is correctly configured.
+ * Also checks if boot file is correctly configured and if locally installed.
  */
 export async function checkDaemonStatus(conn: KosConnection): Promise<DaemonStatus & { bootFileSet: boolean }> {
   try {
-    // Check both daemon version and boot file in one call
+    // Check daemon version, boot file, and local installation in one call
     const result = await conn.execute(
-      'PRINT "DAEMON|" + (CHOOSE MCP_DAEMON_VERSION IF DEFINED MCP_DAEMON_VERSION ELSE "") + "|" + CORE:BOOTFILENAME.',
+      `PRINT "DAEMON|" + (CHOOSE MCP_DAEMON_VERSION IF DEFINED MCP_DAEMON_VERSION ELSE "") + "|" + CORE:BOOTFILENAME + "|" + EXISTS("${LOCAL_DAEMON_PATH}").`,
       3000
     );
-    const match = result.output.match(/DAEMON\|([a-f0-9]*)\|(.+)/i);
+    const match = result.output.match(/DAEMON\|([a-f0-9]*)\|([^|]+)\|(True|False)/i);
     const version = match && match[1].length > 0 ? match[1] : null;
     const bootFile = match ? match[2].trim() : '';
     const bootFileSet = bootFile.toLowerCase().includes('mcp_daemon');
+    const locallyInstalled = match ? match[3] === 'True' : false;
 
     return {
       installed: true, // We'll check file existence separately if needed
@@ -53,9 +56,10 @@ export async function checkDaemonStatus(conn: KosConnection): Promise<DaemonStat
       version,
       needsUpdate: version !== MCP_DAEMON_VERSION,
       bootFileSet,
+      locallyInstalled,
     };
   } catch {
-    return { installed: false, running: false, version: null, needsUpdate: true, bootFileSet: false };
+    return { installed: false, running: false, version: null, needsUpdate: true, bootFileSet: false, locallyInstalled: false };
   }
 }
 

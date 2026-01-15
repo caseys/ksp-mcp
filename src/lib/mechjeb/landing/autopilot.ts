@@ -25,7 +25,7 @@ import { findLandingSite } from './find-site.js';
 import { getVesselStateInfo } from '../../kos/vessel/validate.js';
 import { circularize } from '../basic/circularize.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
-import { fmtVel, fmtDist, formatTime } from '../../utils/format.js';
+import { fmtVel, fmtDist } from '../../utils/format.js';
 
 // ============================================================================
 // Target Validation
@@ -282,10 +282,10 @@ async function monitorLanding(
         lastStatusText = state.status.status;
         let statusText;
         if (/Coasting toward deceleration/.test(state.status.status)) {
-          conn.execute(`SET WARP TO +1.`);
+           //conn.execute(`SET WARP TO +1.`);
           statusText = 'Coasting toward deceleration burn';
         } else if (/Warping to start of braking burn/.test(state.status.status)) {
-          conn.execute(`SET WARP TO +1.`);          
+          //conn.execute(`SET WARP TO +1.`);          
         } else if (state.status.status === 'Off') {
           statusText = 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.';
         } else {
@@ -293,7 +293,7 @@ async function monitorLanding(
         }
         log.progress(`[Landing] ${statusText}`);
       }
-      conn.execute(`SET WARP TO +1.`);
+      //conn.execute(`SET WARP TO +1.`);
 
       // Log touchdown
       if (state.isLanded) {
@@ -488,9 +488,7 @@ export const landTool: ToolDefinition = {
         const isTooHigh = currentPe > idealOrbitAlt + TOO_HIGH_MARGIN;
 
         if (isTooHigh) {
-          const hasAtm = atmHeight > 0;
-          logger.progress(`[Landing] Orbit too high for efficient landing (Pe=${fmtDist(currentPe)})`);
-          logger.progress(`[Landing] Lowering to ${fmtDist(idealOrbitAlt)} (${hasAtm ? `${fmtDist(atmHeight)} atm + 50km` : '50km vacuum landing orbit'})`);
+          logger.progress(`[Landing] Orbit too high for efficient landing. Lowering from (${fmtDist(currentPe)}) to ${fmtDist(idealOrbitAlt)} `);
 
           const orchestrator = new ManeuverOrchestrator(conn);
 
@@ -501,7 +499,6 @@ export const landTool: ToolDefinition = {
           if (!peResult.success) {
             return ctx.errorResponse('land', `Failed to lower orbit: ${peResult.error}`);
           }
-          logger.progress(`[Landing] Periapsis lowered: ${fmtVel(peResult.deltaV ?? 0)}`);
 
           // Lower apoapsis (burn at periapsis) for more circular orbit
           const apResult = await orchestrator.adjustApoapsis(idealOrbitAlt, 'PERIAPSIS', {
@@ -511,10 +508,8 @@ export const landTool: ToolDefinition = {
             // Non-fatal - we can land from elliptical orbit
             logger.info(`[Landing] Could not circularize, proceeding with elliptical orbit`);
           } else {
-            logger.progress(`[Landing] Apoapsis lowered: ${fmtVel(apResult.deltaV ?? 0)}`);
+            logger.progress(`[Landing] Now at landing orbit, proceeding...`);
           }
-
-          logger.progress(`[Landing] Now at landing orbit, proceeding...`);
 
           // Cleanup after orbit lowering: stop warp and unlock controls
           // MechJeb node executor may have left warp or steering engaged
@@ -663,99 +658,7 @@ export const landTool: ToolDefinition = {
         }
       }
 
-      // Step 2: Deorbit burn (only if target is within 1/4 orbit)
-      // If target is farther, let MechJeb handle timing
-
-      let skipDeorbitBurn = targetLat === undefined || targetLng === undefined;
-
-      if (!skipDeorbitBurn) {
-        // Find when we pass over target, calculate if within 1/4 orbit
-        const findBurnTimeScript = `
-          SET tgt_lng TO ${targetLng}.
-          SET period TO SHIP:ORBIT:PERIOD.
-          SET lead_time TO period / 16.
-          SET t TO 0.
-          SET found_t TO period.
-          UNTIL t > period {
-            SET pos TO POSITIONAT(SHIP, TIME:SECONDS + t).
-            SET geo TO SHIP:BODY:GEOPOSITIONOF(pos).
-            SET lng_diff TO ABS(geo:LNG - tgt_lng).
-            IF lng_diff > 180 { SET lng_diff TO 360 - lng_diff. }
-            IF lng_diff < 5 {
-              SET found_t TO t.
-              BREAK.
-            }
-            SET t TO t + 10.
-          }
-          SET quarter_orbit TO period / 4.
-          SET burn_t TO MAX(30, found_t - lead_time).
-          PRINT "BURN_T:" + ROUND(burn_t) + "|OVERFLY_T:" + ROUND(found_t) + "|QUARTER:" + ROUND(quarter_orbit).
-        `.trim().replaceAll('\n', ' ');
-
-        const burnTimeResult = await conn.execute(findBurnTimeScript, 15_000);
-        const burnMatch = burnTimeResult.output.match(/BURN_T:(\d+)\|OVERFLY_T:(\d+)\|QUARTER:(\d+)/);
-        const burnT = burnMatch ? parseInt(burnMatch[1]) : 60;
-        const overflyT = burnMatch ? parseInt(burnMatch[2]) : 120;
-        const quarterOrbit = burnMatch ? parseInt(burnMatch[3]) : 600;
-
-        if (overflyT > quarterOrbit) {
-          // Target is more than 1/4 orbit away - let MechJeb handle it
-          logger.progress(`[Landing] Target ${formatTime(overflyT)} away (>${formatTime(quarterOrbit)}), MechJeb will plan approach`);
-          skipDeorbitBurn = true;
-        } else {
-          logger.progress(`[Landing] Target overfly in ${formatTime(overflyT)}, burn in ${formatTime(burnT)}`);
-        }
-
-        if (!skipDeorbitBurn) {
-          logger.progress('[Landing] Deorbit burn - pointing retrograde...');
-          await conn.execute('LOCK STEERING TO RETROGRADE. WAIT 0.1.', 5000);
-
-          // Wait for alignment (within 15 degrees of retrograde - rough is fine for deorbit)
-          const alignScript = `
-            SET aligned TO FALSE.
-            SET timeout TO TIME:SECONDS + 20.
-            UNTIL aligned OR TIME:SECONDS > timeout {
-              SET ang TO VANG(SHIP:FACING:FOREVECTOR, -SHIP:VELOCITY:ORBIT:NORMALIZED).
-              IF ang < 15 { SET aligned TO TRUE. }
-              WAIT 0.5.
-            }
-            PRINT aligned.
-          `.trim().replaceAll('\n', ' ');
-          await conn.execute(alignScript, 25_000);
-
-          logger.progress('[Landing] Burning to deorbit...');
-          // Burn retrograde until periapsis is negative (with timeout)
-          const burnScript = `
-            LOCK STEERING TO RETROGRADE.
-            LOCK THROTTLE TO 1.
-            SET burnStart TO TIME:SECONDS.
-            SET burnTimeout TO burnStart + 90.
-            UNTIL PERIAPSIS < 0 OR TIME:SECONDS > burnTimeout {
-              WAIT 0.1.
-            }
-            LOCK THROTTLE TO 0.
-            WAIT 0.1.
-            UNLOCK THROTTLE.
-            UNLOCK STEERING.
-            IF PERIAPSIS < 0 { PRINT "Deorbit complete. PE=" + ROUND(PERIAPSIS). }
-            ELSE { PRINT "Deorbit timeout. PE=" + ROUND(PERIAPSIS). }
-          `.trim().replaceAll('\n', ' ');
-          const burnResult = await conn.execute(burnScript, 120_000);
-          // Extract result from deorbit burn
-          const peMatch = burnResult.output.match(/Deorbit (complete|timeout)\. PE=([-\d]+)/);
-          if (peMatch) {
-            const status = peMatch[1];
-            const pe = parseInt(peMatch[2]);
-            if (status === 'complete') {
-              logger.progress(`[Landing] Deorbit complete, Pe=${fmtDist(pe)}`);
-            } else {
-              logger.progress(`[Landing] Deorbit burn timeout, Pe=${fmtDist(pe)} - continuing anyway`);
-            }
-          }
-        }
-      }
-
-      // Step 3: Apply configuration if provided (optional)
+      // Step 2: Apply configuration if provided (optional)
       const config: Partial<LandingConfig> = {};
       if (args.touchdownSpeed !== undefined) config.touchdownSpeed = args.touchdownSpeed as number;
       if (args.deployGears !== undefined) config.deployGears = args.deployGears as boolean;

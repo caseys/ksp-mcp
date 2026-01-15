@@ -565,7 +565,7 @@ export class AscentHandle {
               if (nodeEta > 30) {
                 const warpTarget = nodeEta - 15;
                 this.logger.progress(`[Ascent] Warping to circularization burn (T-${Math.round(nodeEta)}s)`);
-                await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "ONRAILS".', 2000);
+                await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
                 await delay(500);
                 await this.conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
               } else {
