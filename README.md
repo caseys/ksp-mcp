@@ -550,6 +550,82 @@ For complex operations like node execution:
 ### Time Warp Commands
 Use `KUNIVERSE:TIMEWARP:WARPTO()` (non-blocking) rather than `WARPTO()` (blocking) for better control over warp completion detection.
 
+### Radio Blackout Handling
+
+During radio blackout (vessel behind a body, out of range), kOS terminal is inaccessible and archive files cannot be read. ksp-mcp handles this gracefully:
+
+| Scenario | Handler |
+|----------|---------|
+| Signal lost during polling | `pollWithBlackoutResilience` waits for restoration |
+| Node execution during blackout | MechJeb runs autonomously (enabled before warp) |
+| Idle vessel in blackout | MCP daemon auto-warps to radio contact |
+
+Key implementation:
+- **MechJeb enabled before warp**: Burns complete autonomously even if we warp into blackout
+- **`pollWithBlackoutResilience`**: Handles signal loss gracefully during any long-running operation
+- **Local scripts survive**: Scripts on vessel's local storage (`1:/`) continue through blackout
+
+### MCP Daemon
+
+The MCP daemon is a kOS boot script that provides autonomous blackout recovery. It runs on the vessel's CPU and handles situations where the vessel is idle in radio blackout.
+
+#### Features
+
+- **Heartbeat**: Updates `_MCP_HEARTBEAT` every physics tick for health monitoring
+- **Radio status**: Tracks `_MCP_RADIO` for current signal state
+- **Auto-warp to radio**: When idle in blackout (no operation in progress), automatically warps to next radio contact window
+- **Operation tracking**: Respects `_MCP_OP` flag to avoid interfering with active operations
+
+#### Self-Installing Boot File
+
+The daemon is a **self-installing boot program** that survives radio blackouts:
+
+1. **Deploy**: MCP writes daemon to archive (`0:/boot/mcp_daemon.ks`)
+2. **First run**: Daemon detects it's running from archive, copies itself to local volume (`1:/boot/mcp_daemon.ks`), and reboots
+3. **After reboot**: kOS prioritizes local `/boot/` over archive, so local copy runs
+4. **Blackout survival**: Local scripts continue running through blackouts; archive scripts halt
+
+```
+Archive (0:/)          Local (1:/)
+    │                      │
+    ▼                      ▼
+┌─────────────┐       ┌─────────────┐
+│ mcp_daemon  │──────▶│ mcp_daemon  │  (self-installs on first run)
+│   .ks       │ copy  │   .ks       │
+└─────────────┘       └─────────────┘
+                           │
+                           ▼
+                    Survives blackout
+```
+
+#### Daemon Status
+
+Check daemon status via the `status` tool or:
+
+```typescript
+import { checkDaemonStatus } from 'ksp-mcp/daemon';
+
+const status = await checkDaemonStatus(conn);
+console.log(status.running);         // Is daemon loop active?
+console.log(status.version);         // Version hash (e.g., "c3561fa5")
+console.log(status.locallyInstalled); // Is local copy installed?
+console.log(status.needsUpdate);     // Does version mismatch?
+```
+
+#### Updating the Daemon
+
+When a new version is deployed:
+1. New version written to archive
+2. Old local copy continues running until manual update
+3. To update: delete local copy and reboot
+
+```kos
+DELETEPATH("1:/boot/mcp_daemon.ks").
+REBOOT.
+```
+
+The archive copy will then self-install the new version.
+
 ## Development & Debugging
 
 ### Testing Blocking Operations
