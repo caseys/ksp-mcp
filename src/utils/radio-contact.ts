@@ -191,54 +191,6 @@ export async function warpToRadioContact(
 }
 
 /**
- * Check if vessel will be in radio blackout at a specific future time.
- *
- * Uses Kerbin visibility angle calculation at the future vessel position.
- * Angle < 72° means Kerbin is visible (has radio contact).
- *
- * @param conn kOS connection
- * @param secondsFromNow Seconds in the future to check
- * @returns true if vessel will be in blackout at that time
- */
-export async function willBeInBlackoutAt(
-  conn: KosConnection,
-  secondsFromNow: number
-): Promise<boolean> {
-  // If checking current time, use direct check
-  if (secondsFromNow <= 0) {
-    return isInRadioBlackout(conn);
-  }
-
-  // Short-circuit for Kerbin orbits: vessels at Kerbin always have radio
-  // The angle-based algorithm breaks when SHIP:BODY = Kerbin because
-  // the "Kerbin from vessel" vector is opposite to "vessel from body" vector,
-  // resulting in ~180° angle which falsely triggers blackout detection.
-  const bodyCheck = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
-  if (bodyCheck.output.includes('Kerbin')) {
-    return false;
-  }
-
-  const script = `
-LOCAL ut IS TIME:SECONDS + ${secondsFromNow}.
-LOCAL sb IS SHIP:BODY.
-LOCAL fp IS POSITIONAT(SHIP, ut).
-LOCAL uv IS (fp - sb:POSITION):NORMALIZED.
-LOCAL kp IS POSITIONAT(BODY("Kerbin"), ut).
-LOCAL ka IS VANG(uv, kp - fp).
-PRINT "RADIOCHECK|" + ROUND(ka) + "|" + (CHOOSE "BLACKOUT" IF ka >= 72 ELSE "HASRADIO").
-`.trim().replaceAll('\n', ' ');
-
-  const result = await conn.execute(script, 10_000);
-  // Parse "RADIOCHECK|angle|status" format
-  const match = result.output.match(/RADIOCHECK\|(\d+)\|(\w+)/);
-  if (match) {
-    return match[2] === 'BLACKOUT';
-  }
-  // Fallback to old parsing
-  return result.output.includes('BLACKOUT');
-}
-
-/**
  * Ensure radio contact before proceeding.
  *
  * If in blackout, warps to contact. Returns error if contact cannot be established.

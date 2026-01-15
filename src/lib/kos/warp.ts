@@ -11,7 +11,6 @@ import { type McpLogger, nullLogger } from '../tool-types.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { formatTime, fmtDist } from '../utils/format.js';
 import { hasTarget } from './target/shared.js';
-import { willBeInBlackoutAt } from '../../utils/radio-contact.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -368,18 +367,6 @@ async function warpToNode(
     };
   }
 
-  // Check if warp destination would be in radio blackout
-  const warpTargetSeconds = initialEta - leadTime;
-  const willBeBlackout = await willBeInBlackoutAt(conn, warpTargetSeconds);
-  if (willBeBlackout) {
-    return {
-      success: false,
-      error: `Cannot warp to node - destination is in radio blackout!\n` +
-             `Would lose control for ~${formatTime(warpTargetSeconds)} until signal returns.\n` +
-             `Wait for radio contact window or adjust node timing.`,
-    };
-  }
-
   log.progress(`[Warp] Warping to node T-${formatTime(leadTime)} (ETA: ${formatTime(initialEta)})`);
 
   // Clear any existing warp state before starting new warp
@@ -446,18 +433,6 @@ async function warpToSOI(
   const soiEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
 
   log.progress(`[Warp] Current body: ${currentBody}, SOI transition in ${formatTime(soiEta)}`);
-
-  // Check if warp destination would be in radio blackout
-  const warpTargetSeconds = soiEta - leadTime;
-  const willBeBlackout = await willBeInBlackoutAt(conn, warpTargetSeconds);
-  if (willBeBlackout) {
-    return {
-      success: false,
-      error: `Cannot warp to SOI transition - destination is in radio blackout!\n` +
-             `Would lose control until signal returns.\n` +
-             `Wait for radio contact window or execute circularize manually.`,
-    };
-  }
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -565,18 +540,6 @@ async function warpToOrbitalPoint(
              `S.O.I. transition in ${formatTime(crashCheck.etaToSOI ?? 0)} (before ${point.toLowerCase()} at ${formatTime(initialEta)})\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
              `Use course_correct to fix trajectory first.`,
-    };
-  }
-
-  // Check if warp destination would be in radio blackout
-  const warpTargetSeconds = initialEta - leadTime;
-  const willBeBlackout = await willBeInBlackoutAt(conn, warpTargetSeconds);
-  if (willBeBlackout) {
-    return {
-      success: false,
-      error: `Cannot warp to ${point.toLowerCase()} - destination is in radio blackout!\n` +
-             `Would lose control until signal returns.\n` +
-             `Wait for radio contact window or adjust maneuver timing.`,
     };
   }
 
@@ -697,17 +660,6 @@ export async function warpForward(
              `SOI transition in ${formatTime(crashCheck.etaToSOI ?? 0)}\n` +
              `${crashCheck.encounterBody} periapsis: ${(crashCheck.encounterPeriapsis! / 1000).toFixed(1)} km\n` +
              `Use course_correct to fix trajectory first.`,
-    };
-  }
-
-  // Check if warp destination would be in radio blackout
-  const willBeBlackout = await willBeInBlackoutAt(conn, seconds);
-  if (willBeBlackout) {
-    return {
-      success: false,
-      error: `Cannot warp forward ${formatTime(seconds)} - destination is in radio blackout!\n` +
-             `Would lose control until signal returns.\n` +
-             `Wait for radio contact window or reduce warp duration.`,
     };
   }
 
