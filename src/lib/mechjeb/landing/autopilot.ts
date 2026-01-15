@@ -165,9 +165,9 @@ async function scanVesselForLanding(conn: KosConnection): Promise<VesselScanResu
 }
 
 /**
- * Jettison stages by staging down to fire the target stage.
- * In KSP, firing a stage means pressing spacebar, which decrements STAGE:NUMBER.
- * We stage until STAGE:NUMBER < targetStage, meaning the target stage itself is fired.
+ * Jettison exactly the target decoupler stage.
+ * Stages down to reach the target stage if needed, then fires it once.
+ * Will not fire past the target stage (prevents dropping multiple stages).
  */
 async function jettisonStage(
   conn: KosConnection,
@@ -176,24 +176,38 @@ async function jettisonStage(
 ): Promise<{ success: boolean; error?: string }> {
   const log = logger ?? nullLogger;
 
-  // Stage down until we're BELOW the target stage (meaning we've fired it)
+  // Stage down to reach the target decoupler, then fire it exactly once
+  // If current stage > target: stage down to reach it, then fire
+  // If current stage = target: fire it
+  // If current stage < target: already past it, do nothing
   const script = `
     SET startStage TO STAGE:NUMBER.
-    UNTIL STAGE:NUMBER < ${targetStage} {
-      STAGE.
-      WAIT 0.5.
+    SET fired TO FALSE.
+    IF STAGE:NUMBER > ${targetStage} {
+      UNTIL STAGE:NUMBER <= ${targetStage} {
+        STAGE. WAIT 0.5.
+      }
     }
-    PRINT "STAGED|" + startStage + "|" + STAGE:NUMBER.
+    IF STAGE:NUMBER = ${targetStage} {
+      STAGE. WAIT 0.5.
+      SET fired TO TRUE.
+    }
+    PRINT "STAGED|" + startStage + "|" + STAGE:NUMBER + "|" + fired.
   `.trim().replaceAll('\n', ' ');
 
   const result = await conn.execute(script, 30_000);
   const output = result.output.trim();
 
-  const match = output.match(/STAGED\|(\d+)\|(\d+)/);
+  const match = output.match(/STAGED\|(\d+)\|(\d+)\|(True|False)/i);
   if (match) {
     const startStage = parseInt(match[1]);
     const endStage = parseInt(match[2]);
-    log.info(`[Jettison] Staged from ${startStage} to ${endStage}`);
+    const fired = match[3].toLowerCase() === 'true';
+    if (fired) {
+      log.info(`[Jettison] Fired stage ${targetStage} (was at ${startStage}, now at ${endStage})`);
+    } else {
+      log.info(`[Jettison] Already past stage ${targetStage} (current: ${endStage})`);
+    }
     return { success: true };
   }
 
@@ -203,6 +217,90 @@ async function jettisonStage(
 // Configuration
 const DEFAULT_POLL_INTERVAL_MS = 5000; // 5 seconds
 const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
+const TARGET_LANDING_TWR = 15; // Target TWR for landing - limit engines if higher
+
+/**
+ * Check TWR and limit engine thrust if too high for landing.
+ * Returns true if thrust was limited (needs reset after landing).
+ */
+async function limitThrustForLanding(
+  conn: KosConnection,
+  logger?: McpLogger
+): Promise<{ limited: boolean; originalTwr?: number; limitedTwr?: number }> {
+  const log = logger ?? nullLogger;
+
+  // Calculate current TWR and limit if needed
+  const script = `
+    LOCAL totalThrust IS 0.
+    LOCAL activeEngines IS 0.
+    FOR eng IN SHIP:ENGINES {
+      IF eng:IGNITION AND eng:AVAILABLETHRUST > 0 {
+        SET totalThrust TO totalThrust + eng:AVAILABLETHRUST.
+        SET activeEngines TO activeEngines + 1.
+      }
+    }
+    LOCAL g IS SHIP:BODY:MU / (SHIP:BODY:RADIUS + SHIP:ALTITUDE)^2.
+    LOCAL weight IS SHIP:MASS * g.
+    LOCAL twr IS CHOOSE 0 IF weight = 0 ELSE totalThrust / weight.
+    PRINT "TWR|" + ROUND(twr, 2) + "|" + ROUND(totalThrust) + "|" + ROUND(weight) + "|" + activeEngines.
+  `.trim().replaceAll('\n', ' ');
+
+  const result = await conn.execute(script, 5000);
+  const match = result.output.match(/TWR\|([\d.]+)\|(\d+)\|(\d+)\|(\d+)/);
+
+  if (!match) {
+    log.warn('[Landing] Could not calculate TWR');
+    return { limited: false };
+  }
+
+  const twr = Number.parseFloat(match[1]);
+  const activeEngines = Number.parseInt(match[4]);
+
+  if (activeEngines === 0) {
+    log.warn('[Landing] No active engines found');
+    return { limited: false };
+  }
+
+  if (twr <= TARGET_LANDING_TWR) {
+    log.info(`[Landing] TWR ${twr.toFixed(1)} is acceptable for landing`);
+    return { limited: false };
+  }
+
+  // TWR too high - calculate thrust limit percentage
+  const limitPercent = (TARGET_LANDING_TWR / twr) * 100;
+  log.progress(`[Landing] TWR ${twr.toFixed(1)} too high, limiting thrust to ${limitPercent.toFixed(0)}%`);
+
+  // Apply thrust limit to all engines
+  const limitScript = `
+    FOR eng IN SHIP:ENGINES {
+      IF eng:IGNITION {
+        SET eng:THRUSTLIMIT TO ${limitPercent.toFixed(1)}.
+      }
+    }
+    PRINT "LIMITED".
+  `.trim().replaceAll('\n', ' ');
+
+  await conn.execute(limitScript, 5000);
+
+  return { limited: true, originalTwr: twr, limitedTwr: TARGET_LANDING_TWR };
+}
+
+/**
+ * Reset engine thrust limits to 100% after landing.
+ */
+async function resetThrustLimits(conn: KosConnection, logger?: McpLogger): Promise<void> {
+  const log = logger ?? nullLogger;
+  log.info('[Landing] Resetting engine thrust limits to 100%');
+
+  const script = `
+    FOR eng IN SHIP:ENGINES {
+      SET eng:THRUSTLIMIT TO 100.
+    }
+    PRINT "RESET".
+  `.trim().replaceAll('\n', ' ');
+
+  await conn.execute(script, 5000);
+}
 
 interface LandingPollState {
   status: LandingStatus;
@@ -516,7 +614,14 @@ export const landTool: ToolDefinition = {
         }
       }
 
-      // Step 0.8: Scan vessel structure for landing legs and jettison transfer stage
+      // Step 0.8: Ensure radio contact before jettison and TWR calibration
+      // These operations require radio - warp to contact if in blackout
+      const preJettisonRadio = await warpToRadioContact(conn, { logger, context: 'Pre-jettison' });
+      if (!preJettisonRadio.success && preJettisonRadio.error?.includes('Permanent')) {
+        return ctx.errorResponse('land', `Cannot land: ${preJettisonRadio.error}`);
+      }
+
+      // Step 0.8b: Scan vessel structure for landing legs and jettison transfer stage
       logger.progress('[Landing] Scanning vessel structure...');
       const vesselScan = await scanVesselForLanding(conn);
 
@@ -542,6 +647,10 @@ export const landTool: ToolDefinition = {
           logger.progress('[Landing] Stage jettisoned successfully');
         }
       }
+
+      // Step 0.9: Check TWR and limit thrust if too high for landing
+      // This prevents the "floating up" problem on low-gravity bodies with overpowered engines
+      const thrustLimit = await limitThrustForLanding(conn, logger);
 
       // Step 1: Resolve landing target
       const targetArg = args.target as string | 'auto';
@@ -709,6 +818,11 @@ export const landTool: ToolDefinition = {
         }
 
         if (monitorResult.success) {
+          // Reset thrust limits if we modified them
+          if (thrustLimit.limited) {
+            await resetThrustLimits(conn, logger);
+          }
+
           // Query landing site details for informative response
           let landingDetails = '';
           try {
@@ -730,6 +844,10 @@ export const landTool: ToolDefinition = {
           return ctx.successResponse('land',
             `Landing complete!${landingDetails}\nVessel safely on surface.`);
         } else {
+          // Reset thrust limits if we modified them
+          if (thrustLimit.limited) {
+            await resetThrustLimits(conn, logger);
+          }
           // Clear operation on failure (safety monitor only clears on success)
           await clearKosOperation(conn);
           return ctx.errorResponse('land',
@@ -743,8 +861,9 @@ export const landTool: ToolDefinition = {
 
       return ctx.successResponse('land', message);
     } catch (error) {
-      // Clear operation state on error
+      // Reset thrust limits and clear operation state on error
       try {
+        await resetThrustLimits(conn);
         await clearKosOperation(conn);
       } catch { /* ignore cleanup errors */ }
       clearBroadcastLogger();

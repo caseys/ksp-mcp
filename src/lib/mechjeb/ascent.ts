@@ -32,7 +32,6 @@ import { getTargetOrbitInfo, getRendezvousInfo } from './targeting/shared.js';
 // Note: interplanetaryTransfer not imported - we call MechJeb directly in warpToTransferWindow
 // to bypass validation that requires being in orbit
 import { queryNodeInfo } from './shared.js';
-import { warpForward } from '../kos/warp.js';
 
 // ============================================================================
 // Smart Launch Parameter Resolution
@@ -51,7 +50,7 @@ interface SmartLaunchParams {
   /** Target name (may be changed if redirected) */
   target?: string;
   /** Pre-launch action required */
-  prelaunchAction?: 'warp_to_overhead' | 'warp_to_transfer_window';
+  prelaunchAction?: 'warp_to_transfer_window';
   /** Error message if launch is invalid */
   error?: string;
   /** Log message explaining the chosen strategy */
@@ -116,23 +115,23 @@ async function resolveSmartLaunchParams(
 
   // Step 3: Handle edge cases (heuristics)
 
-  // Case: We're on a moon and target is a planet (other than our parent)
-  if (vesselState.bodyType === 'moon' && targetInfo.class === 'planet') {
-    return {
-      launchMode: 'orbit',
-      error: `Must return to ${vesselState.parentBodyName} before interplanetary transfer to ${targetInfo.name}. Use return_from_moon tool first.`
-    };
-  }
-
   // Case: Target is parent body of our moon (e.g., targeting Kerbin from Mun)
+  // Just launch into orbit normally - user can then use return_from_moon
   if (vesselState.bodyType === 'moon' && targetInfo.name === vesselState.parentBodyName) {
     return {
       altitude: parkingAltitude,
-      // inclination left undefined - will be determined by launch direction
       launchMode: 'orbit',
       target: targetInfo.name,
-      prelaunchAction: 'warp_to_overhead',
-      strategyMessage: `Launch from ${vesselState.bodyName} to return to ${targetInfo.name} - warping until ${targetInfo.name} is overhead`
+      strategyMessage: `Launching to ${vesselState.bodyName} orbit. Use return_from_moon after reaching orbit.`
+    };
+  }
+
+  // Case: We're on a moon and target is a planet (other than our parent)
+  if (vesselState.bodyType === 'moon' && targetInfo.class === 'planet') {
+    return {
+      altitude: parkingAltitude,
+      launchMode: 'orbit',
+      strategyMessage: `Launching to ${vesselState.bodyName} orbit. Use return_from_moon then transfer to ${targetInfo.name}.`
     };
   }
 
@@ -317,70 +316,6 @@ async function warpToTransferWindow(
   } catch (error) {
     return `Transfer window calculation failed: ${error instanceof Error ? error.message : String(error)}`;
   }
-}
-
-/**
- * Warp until parent body is at zenith (directly overhead)
- * Used when launching from a moon to return to parent body
- */
-async function warpUntilBodyOverhead(
-  conn: KosConnection,
-  bodyName: string,
-  logger: McpLogger
-): Promise<void> {
-  logger.info(`[Ascent] Waiting for ${bodyName} to be overhead...`);
-
-  // Query current angle to body
-  const getAngle = async (): Promise<number> => {
-    const result = await conn.execute(
-      `SET _ANG TO VANG(BODY("${bodyName}"):DIRECTION, SHIP:UP). PRINT _ANG.`,
-      3000
-    );
-    const match = result.output.match(/([\d.]+)/);
-    return match ? Number.parseFloat(match[1]) : 90;
-  };
-
-  const OVERHEAD_THRESHOLD = 10;  // degrees from zenith
-  let angle = await getAngle();
-
-  if (angle <= OVERHEAD_THRESHOLD) {
-    logger.info(`[Ascent] ${bodyName} is already overhead (${angle.toFixed(1)}° from zenith)`);
-    return;
-  }
-
-  // Get moon's rotation period to estimate warp time
-  const rotResult = await conn.execute('PRINT SHIP:BODY:ROTATIONPERIOD.', 3000);
-  const rotMatch = rotResult.output.match(/([\d.]+)/);
-  const rotationPeriod = rotMatch ? Number.parseFloat(rotMatch[1]) : 21_600;  // Default 6 hours
-
-  // Estimate time to overhead - rough approximation based on angle
-  // The body will be overhead when we've rotated to face it
-  const estimatedWarp = (angle / 360) * rotationPeriod * 0.8;  // 80% of estimated time
-
-  if (estimatedWarp > 60) {
-    logger.info(`[Ascent] ${bodyName} is ${angle.toFixed(1)}° from overhead - warping ~${formatTime(estimatedWarp)}...`);
-    await warpForward(conn, estimatedWarp, 300_000, logger);
-  }
-
-  // Fine-tune: poll and warp in smaller increments until overhead
-  for (let i = 0; i < 10; i++) {
-    angle = await getAngle();
-    if (angle <= OVERHEAD_THRESHOLD) {
-      logger.info(`[Ascent] ${bodyName} is now overhead (${angle.toFixed(1)}° from zenith)`);
-      return;
-    }
-
-    // Warp smaller increments
-    const smallWarp = Math.min((angle / 360) * rotationPeriod * 0.5, 300);
-    if (smallWarp > 10) {
-      await warpForward(conn, smallWarp, 60_000, logger);
-    } else {
-      await delay(5000);  // Just wait real-time for small angles
-    }
-  }
-
-  // Good enough
-  logger.info(`[Ascent] ${bodyName} is approximately overhead (${angle.toFixed(1)}° from zenith)`);
 }
 
 /**
@@ -1016,18 +951,34 @@ export class AscentProgram {
       }
     }
   
-    // Enable physics warp after 20 seconds if configured via env var
-    // This replaces the old autoWarp parameter with global env var control
+    // Enable warp after 20 seconds if configured via env var
+    // Use physics warp in atmosphere (required), rails warp on airless bodies (faster)
     if (config.warp.physicsMax > 0) {
-      void setTimeout(() => {
-        this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`)
-          .catch(() => { /* Ignore warp errors during ascent */ });
-      }, 20_000);
-      void setTimeout(() => {
-        this.conn.execute(`SET WARP TO 2.`)
-          .catch(() => { /* Ignore warp errors during ascent */ });
-      }, 30_000);      
-    } 
+      // Check atmosphere before setting timeout (capture for closure)
+      this.conn.execute('PRINT SHIP:BODY:ATM:EXISTS.', 2000)
+        .then(result => {
+          const hasAtmosphere = result.output.includes('True');
+
+          if (hasAtmosphere) {
+            // Physics warp for atmospheric ascent
+            void setTimeout(() => {
+              this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`)
+                .catch(() => { /* Ignore warp errors during ascent */ });
+            }, 20_000);
+            void setTimeout(() => {
+              this.conn.execute(`SET WARP TO 2.`)
+                .catch(() => { /* Ignore warp errors during ascent */ });
+            }, 30_000);
+          } else {
+            // Rails warp for airless body ascent (faster, no physics overhead)
+            void setTimeout(() => {
+              this.conn.execute('SET WARPMODE TO "RAILS". SET WARP TO 0. WAIT 0.3. SET WARP TO 3.')
+                .catch(() => { /* Ignore warp errors during ascent */ });
+            }, 10_000);  // Start earlier on airless bodies
+          }
+        })
+        .catch(() => { /* Ignore atmosphere check errors */ });
+    }
 
     // Create handle for monitoring (pass logger for waitForCompletion)
     const handleId = `ascent-${++this.handleCounter}-${Date.now()}`;
@@ -1215,9 +1166,7 @@ export const launchAscentTool: ToolDefinition = {
       }
 
       // Handle pre-launch actions (must succeed before launch)
-      if (smartParams.prelaunchAction === 'warp_to_overhead' && smartParams.target) {
-        await warpUntilBodyOverhead(conn, smartParams.target, logger);
-      } else if (smartParams.prelaunchAction === 'warp_to_transfer_window') {
+      if (smartParams.prelaunchAction === 'warp_to_transfer_window') {
         const warpError = await warpToTransferWindow(conn, logger);
         if (warpError) {
           return ctx.errorResponse('launch', `Cannot launch to ${smartParams.target}: ${warpError}`);

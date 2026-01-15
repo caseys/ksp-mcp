@@ -36,8 +36,18 @@ function generateDaemonContent(version: string): string {
 WAIT UNTIL SHIP:UNPACKED.
 LOCAL lp IS "1:/boot/mcp_daemon.ks".
 LOCAL ap IS "0:/boot/mcp_daemon.ks".
+LOCAL needsInstall IS FALSE.
 IF NOT EXISTS(lp) {
+SET needsInstall TO TRUE.
 PRINT "[mcp-daemon] Installing locally...".
+} ELSE IF DEFINED MCP_DAEMON_VERSION AND MCP_DAEMON_VERSION <> "${version}" {
+SET needsInstall TO TRUE.
+PRINT "[mcp-daemon] Updating mcp_daemon: " + MCP_DAEMON_VERSION + " -> ${version}...".
+} ELSE IF NOT (DEFINED MCP_DAEMON_VERSION) {
+SET needsInstall TO TRUE.
+PRINT "[mcp-daemon] Version unknown, reinstalling...".
+}
+IF needsInstall {
 IF NOT EXISTS("1:/boot") { CREATEDIR("1:/boot"). }
 COPYPATH(ap, lp).
 PRINT "[mcp-daemon] Rebooting...".
@@ -53,10 +63,58 @@ IF NOT (DEFINED _MCP_OP) { GLOBAL _MCP_OP IS "". }
 GLOBAL _MCP_HEARTBEAT IS TIME:SECONDS.
 GLOBAL _MCP_RADIO IS HOMECONNECTION:ISCONNECTED.
 LOCAL lastCheck IS 0.
+LOCAL lastHdg IS V(0,0,0).
+LOCAL stallCooldown IS 0.
+LOCAL wasLanding IS FALSE.
 PRINT "[mcp-daemon] v" + MCP_DAEMON_VERSION + " active.".
 UNTIL FALSE {
 SET _MCP_HEARTBEAT TO TIME:SECONDS.
 SET _MCP_RADIO TO HOMECONNECTION:ISCONNECTED.
+IF _MCP_OP:STARTSWITH("landing") {
+SET wasLanding TO TRUE.
+}
+IF wasLanding AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") {
+PRINT "[mcp-daemon] Touchdown - stabilizing...".
+SAS ON.
+WAIT 0.3.
+SET SASMODE TO "RADIALOUT".
+SET wasLanding TO FALSE.
+SET _MCP_OP TO "".
+}
+IF _MCP_OP:STARTSWITH("landing") AND SHIP:STATUS <> "LANDED" AND SHIP:STATUS <> "SPLASHED" {
+LOCAL rAlt IS ALT:RADAR.
+LOCAL vel IS SHIP:VERTICALSPEED.
+LOCAL hdg IS SHIP:FACING:FOREVECTOR.
+LOCAL hdgChg IS VANG(hdg, lastHdg).
+SET lastHdg TO hdg.
+IF rAlt < 250 AND vel > -0.5 AND hdgChg > 8 AND TIME:SECONDS > stallCooldown {
+PRINT "[mcp-daemon] Landing stall detected (alt=" + ROUND(rAlt) + "m, vel=" + ROUND(vel,1) + ", spin=" + ROUND(hdgChg) + "deg)".
+SET stallCooldown TO TIME:SECONDS + 10.
+SET LAND TO ADDONS:MJ:LANDING.
+SET LAND:ENABLED TO FALSE.
+SAS ON.
+WAIT 0.5.
+SET SASMODE TO "STABILITYASSIST".
+PRINT "[mcp-daemon] Stabilizing, waiting for 7m/s descent...".
+LOCAL waitStart IS TIME:SECONDS.
+UNTIL SHIP:VERTICALSPEED < -7 OR SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" OR TIME:SECONDS > waitStart + 15 {
+WAIT 0.2.
+}
+IF SHIP:STATUS <> "LANDED" AND SHIP:STATUS <> "SPLASHED" {
+PRINT "[mcp-daemon] Re-enabling landing (vel=" + ROUND(SHIP:VERTICALSPEED,1) + ")".
+SAS OFF.
+LAND:LANDUNTARGETED().
+WAIT 0.5.
+IF NOT LAND:ENABLED {
+PRINT "[mcp-daemon] MechJeb rejected, holding radial out...".
+SAS ON.
+RCS ON.
+WAIT 0.3.
+SET SASMODE TO "RADIALOUT".
+}
+}
+}
+}
 IF TIME:SECONDS - lastCheck > 10 {
 SET lastCheck TO TIME:SECONDS.
 IF NOT _MCP_RADIO AND _MCP_OP = "" {
