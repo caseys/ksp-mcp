@@ -5,7 +5,6 @@
  * Two altitudes: Set periapsis to lower value, apoapsis to higher value
  */
 
-import { z } from 'zod';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import { validateVesselState, getVesselStateInfo, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { clearNodes } from '../../kos/nodes.js';
@@ -19,7 +18,7 @@ export const adjustOrbitTool: ToolDefinition = {
   name: 'adjust_orbit',
   description: 'Raise or lower orbit. One altitude sets circular orbit, two altitudes set periapsis (lower) and apoapsis (higher).',
   inputSchema: {
-    altitude: z.union([distanceSchema, z.array(distanceSchema).length(2)])
+    altitude: distanceSchema
       .describe('Target altitude in meters. Single value for circular orbit, or [low, high] for elliptical.'),
     execute: executeSchema,
   },
@@ -73,31 +72,64 @@ export const adjustOrbitTool: ToolDefinition = {
       const isHyperbolic = stateInfo.eccentricity >= 1;
 
       if (isHyperbolic) {
-        // Hyperbolic trajectory: altitude is target periapsis, burn in 1 minute
-        const targetPe = Array.isArray(altInput) ? Math.min(altInput[0], altInput[1]) : altInput;
+        // Hyperbolic trajectory: first burn adjusts periapsis
+        // If two altitudes provided, second burn at periapsis sets apoapsis (captures into orbit)
+        const hyperbolicPe = Array.isArray(altInput) ? Math.min(altInput[0], altInput[1]) : altInput;
+        const hyperbolicAp = Array.isArray(altInput) ? Math.max(altInput[0], altInput[1]) : null;
+        const hasCaptureburn = hyperbolicAp !== null && hyperbolicAp !== hyperbolicPe;
 
-        logger.progress(`[AdjustOrbit] Hyperbolic trajectory: adjusting Pe to ${fmtDist(targetPe)}`);
+        logger.progress(`[AdjustOrbit] Hyperbolic trajectory: adjusting Pe to ${fmtDist(hyperbolicPe)}`);
 
-        const result = await orchestrator.adjustPeriapsis(targetPe, 'X_FROM_NOW', {
+        // First burn: adjust periapsis (time-based, 1 minute from now)
+        const peResult = await orchestrator.adjustPeriapsis(hyperbolicPe, 'X_FROM_NOW', {
           execute,
           logger,
           callerTool: toolName,
-          xFromNowSeconds: 60,  // 1 minute ahead
+          xFromNowSeconds: 60,
         });
 
-        if (!result.success) {
-          return ctx.errorResponse(toolName, result.error ?? 'Failed to plan periapsis adjustment');
+        if (!peResult.success) {
+          return ctx.errorResponse(toolName, peResult.error ?? 'Failed to plan periapsis adjustment');
         }
 
         if (!execute) {
+          let msg = `Periapsis adjustment planned: ${fmtVel(peResult.deltaV ?? 0)} in T-60s\n` +
+            `Target periapsis: ${fmtDist(hyperbolicPe)}`;
+          if (hasCaptureburn) {
+            msg += `\nNote: Execute to continue with capture burn to Ap=${fmtDist(hyperbolicAp!)}`;
+          }
+          return ctx.successResponse(toolName, msg);
+        }
+
+        let totalDeltaV = peResult.deltaV ?? 0;
+
+        // Second burn: capture into orbit by setting apoapsis at periapsis
+        if (hasCaptureburn) {
+          logger.progress(`[AdjustOrbit] Capture burn: setting Ap to ${fmtDist(hyperbolicAp!)} at periapsis`);
+
+          const apResult = await orchestrator.adjustApoapsis(hyperbolicAp!, 'PERIAPSIS', {
+            execute: true,
+            logger,
+            callerTool: toolName,
+          });
+
+          if (!apResult.success) {
+            return ctx.errorResponse(toolName,
+              `Periapsis adjusted (${fmtVel(totalDeltaV)}), but capture burn failed: ${apResult.error}`);
+          }
+
+          totalDeltaV += apResult.deltaV ?? 0;
+
+          // Get final orbit
+          const finalOrbit = await ctx.getBasicOrbitInfo(conn);
           return ctx.successResponse(toolName,
-            `Periapsis adjustment planned: ${fmtVel(result.deltaV ?? 0)} in T-60s\n` +
-            `Target periapsis: ${fmtDist(targetPe)}`);
+            `Captured into orbit: ${fmtPeAp(finalOrbit?.periapsis ?? hyperbolicPe, finalOrbit?.apoapsis ?? hyperbolicAp!)}\n` +
+            `Total Δv: ${fmtVel(totalDeltaV)} (Pe: ${fmtVel(peResult.deltaV ?? 0)} + Ap: ${fmtVel(apResult.deltaV ?? 0)})`);
         }
 
         return ctx.successResponse(toolName,
-          `Periapsis adjusted: ${fmtVel(result.deltaV ?? 0)}\n` +
-          `Target periapsis: ${fmtDist(targetPe)}`);
+          `Periapsis adjusted: ${fmtVel(totalDeltaV)}\n` +
+          `Target periapsis: ${fmtDist(hyperbolicPe)}`);
       }
 
       // Get current orbit info
@@ -114,7 +146,72 @@ export const adjustOrbitTool: ToolDefinition = {
       const atmHeight = bodyMatch ? Number.parseInt(bodyMatch[1]) : 0;
       const bodyName = bodyMatch ? bodyMatch[2].trim() : 'body';
 
-      // Validate target altitudes
+      // Minimum safe altitude: atmo + 40km, or 40km for airless bodies (matches hohmann.ts)
+      const minSafeAlt = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+
+      // Check for crash trajectory (periapsis below surface or atmosphere)
+      const isCrashTrajectory = currentPe < 0 || (atmHeight > 0 && currentPe < atmHeight);
+
+      if (isCrashTrajectory) {
+        // Emergency recovery: time-based burn to raise periapsis, then optional apoapsis burn
+        const crashPe = Math.max(targetPe, minSafeAlt);  // At least minimum safe
+        const crashAp = Array.isArray(altInput) ? Math.max(altInput[0], altInput[1]) : null;
+        const hasApBurn = crashAp !== null && crashAp !== crashPe;
+
+        logger.progress(`[AdjustOrbit] Crash trajectory (Pe=${fmtDist(currentPe)}), emergency raise to ${fmtDist(crashPe)}`);
+
+        // First burn: raise periapsis immediately (30s from now for urgency)
+        const peResult = await orchestrator.adjustPeriapsis(crashPe, 'X_FROM_NOW', {
+          execute,
+          logger,
+          callerTool: toolName,
+          xFromNowSeconds: 30,
+        });
+
+        if (!peResult.success) {
+          return ctx.errorResponse(toolName, peResult.error ?? 'Failed to plan emergency periapsis raise');
+        }
+
+        if (!execute) {
+          let msg = `Emergency periapsis raise planned: ${fmtVel(peResult.deltaV ?? 0)} in T-30s\n` +
+            `Target periapsis: ${fmtDist(crashPe)}`;
+          if (hasApBurn) {
+            msg += `\nNote: Execute to continue with apoapsis burn to ${fmtDist(crashAp!)}`;
+          }
+          return ctx.successResponse(toolName, msg);
+        }
+
+        let totalDeltaV = peResult.deltaV ?? 0;
+
+        // Second burn: set apoapsis at periapsis (if specified)
+        if (hasApBurn) {
+          logger.progress(`[AdjustOrbit] Setting Ap to ${fmtDist(crashAp!)} at periapsis`);
+
+          const apResult = await orchestrator.adjustApoapsis(crashAp!, 'PERIAPSIS', {
+            execute: true,
+            logger,
+            callerTool: toolName,
+          });
+
+          if (!apResult.success) {
+            return ctx.errorResponse(toolName,
+              `Periapsis raised (${fmtVel(totalDeltaV)}), but apoapsis burn failed: ${apResult.error}`);
+          }
+
+          totalDeltaV += apResult.deltaV ?? 0;
+
+          const finalOrbit = await ctx.getBasicOrbitInfo(conn);
+          return ctx.successResponse(toolName,
+            `Crash avoided, orbit established: ${fmtPeAp(finalOrbit?.periapsis ?? crashPe, finalOrbit?.apoapsis ?? crashAp!)}\n` +
+            `Total Δv: ${fmtVel(totalDeltaV)} (Pe: ${fmtVel(peResult.deltaV ?? 0)} + Ap: ${fmtVel(apResult.deltaV ?? 0)})`);
+        }
+
+        return ctx.successResponse(toolName,
+          `Crash avoided: ${fmtVel(totalDeltaV)}\n` +
+          `Periapsis raised to ${fmtDist(crashPe)}`);
+      }
+
+      // Validate target altitudes (for normal orbits)
       if (targetPe < 0) {
         return ctx.errorResponse(toolName, `Target periapsis ${fmtDist(targetPe)} is below surface.`);
       }

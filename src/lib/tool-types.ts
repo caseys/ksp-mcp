@@ -163,9 +163,14 @@ const DISTANCE_REGEX = new RegExp(String.raw`^([\d.]+)\s*(${unitPattern})?$`, 'i
  * SMART DEFAULT: For orbital measurements, bare numbers < 10000 are assumed to be km.
  * This matches how humans talk about orbits ("raise to 100" means 100km, not 100m).
  */
-export function parseDistance(val: unknown): number | 'auto' {
+export function parseDistance(val: unknown): number | 'auto' | (number | 'auto')[] {
   // Pass through 'auto' sentinel unchanged for dynamic resolution
   if (val === 'auto') return 'auto';
+
+  // Handle arrays by processing each element (for [pe, ap] style inputs)
+  if (Array.isArray(val)) {
+    return val.map(v => parseDistance(v)) as (number | 'auto')[];
+  }
 
   // Handle numbers directly
   if (typeof val === 'number') {
@@ -215,7 +220,7 @@ export function parseDistance(val: unknown): number | 'auto' {
  */
 export const distanceSchema = z.preprocess(
   parseDistance,
-  z.union([z.number(), z.literal('auto')])
+  z.union([z.number(), z.literal('auto'), z.array(z.union([z.number(), z.literal('auto')]))])
 );
 
 /**

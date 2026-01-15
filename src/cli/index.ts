@@ -94,7 +94,7 @@ const POSITIONAL_ARGS: Record<string, string[]> = {
   'launch': ['altitude'],
   'transfer': ['target'],
   'hohmann_transfer': ['target'],
-  'adjust_orbit': ['altitude'],
+  'adjust_orbit': ['altitude', 'altitude'],  // Two values combine into array
   'adjust_apoapsis': ['altitude'],
   'adjust_periapsis': ['altitude'],
   'ellipticize': ['periapsis', 'apoapsis'],
@@ -167,7 +167,15 @@ function parseArgs(args: string[], toolName: string): Record<string, unknown> {
         result[paramName] = value;
         positionalIndex++;
       } else if (positionalIndex < positionalNames.length) {
-        result[positionalNames[positionalIndex]] = parseValue(arg);
+        const paramName = positionalNames[positionalIndex];
+        const value = parseValue(arg);
+        // If same param name used multiple times, combine into array
+        if (result[paramName] !== undefined) {
+          const existing = result[paramName];
+          result[paramName] = Array.isArray(existing) ? [...existing, value] : [existing, value];
+        } else {
+          result[paramName] = value;
+        }
         positionalIndex++;
       }
     }
@@ -183,6 +191,11 @@ function parseValue(value: string): unknown {
   // Boolean
   if (value.toLowerCase() === 'true') return true;
   if (value.toLowerCase() === 'false') return false;
+
+  // Comma-separated array (e.g., "65,75" → [65, 75])
+  if (value.includes(',')) {
+    return value.split(',').map(v => parseValue(v.trim()));
+  }
 
   // Number
   const num = Number(value);
