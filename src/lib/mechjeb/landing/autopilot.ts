@@ -10,7 +10,6 @@ import { clearBroadcastLogger } from '../../../utils/mcp-logger.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
 import { warpToRadioContact } from '../../../utils/radio-contact.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { config as appConfig } from '../../../config/index.js';
 import {
   getLandingStatus,
   setLandingConfig,
@@ -680,12 +679,6 @@ export const landTool: ToolDefinition = {
         : '';
       await setKosOperation(conn, 'landing', 'land', targetStr);
 
-      // Enable MechJeb autowarp before starting landing (if physics warp is configured)
-      if (appConfig.warp.physicsMax > 0) {
-        logger.info('[Landing] Enabling MechJeb autowarp');
-        await conn.execute('SET ADDONS:MJ:LANDING:AUTOWARP TO TRUE.', 3000);
-      }
-
       let landResult: { success: boolean; error?: string };
       if (hasTarget) {
         logger.progress('[Landing] Starting targeted landing...');
@@ -720,15 +713,14 @@ export const landTool: ToolDefinition = {
           let landingDetails = '';
           try {
             const siteInfo = await conn.execute(
-              'PRINT SHIP:BODY:NAME + "|" + SHIP:GEOPOSITION:TERRAINHEIGHT + "|" + SHIP:GEOPOSITION:BIOME.',
+              'PRINT SHIP:BODY:NAME + "|" + SHIP:GEOPOSITION:TERRAINHEIGHT.',
               3000
             );
-            const siteMatch = siteInfo.output.match(/([^|]+)\|([-\d.]+)\|(.+)/);
+            const siteMatch = siteInfo.output.match(/([^|]+)\|([-\d.]+)/);
             if (siteMatch) {
               const bodyName = siteMatch[1].trim();
               const altitude = Number.parseFloat(siteMatch[2]);
-              const biome = siteMatch[3].trim();
-              landingDetails = `\nLocation: ${bodyName}, ${biome} at ${fmtDist(altitude)} elevation`;
+              landingDetails = `\nLocation: ${bodyName} at ${fmtDist(altitude)} elevation`;
             }
           } catch {
             // Ignore errors querying site details
