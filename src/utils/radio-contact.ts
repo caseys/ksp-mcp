@@ -215,7 +215,6 @@ export async function willBeInBlackoutAt(
   // resulting in ~180° angle which falsely triggers blackout detection.
   const bodyCheck = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
   if (bodyCheck.output.includes('Kerbin')) {
-    console.error(`[willBeInBlackoutAt] At Kerbin - always has radio`);
     return false;
   }
 
@@ -233,10 +232,7 @@ PRINT "RADIOCHECK|" + ROUND(ka) + "|" + (CHOOSE "BLACKOUT" IF ka >= 72 ELSE "HAS
   // Parse "RADIOCHECK|angle|status" format
   const match = result.output.match(/RADIOCHECK\|(\d+)\|(\w+)/);
   if (match) {
-    const angle = parseInt(match[1]);
-    const status = match[2];
-    console.error(`[willBeInBlackoutAt] T+${secondsFromNow.toFixed(0)}s: angle=${angle}°, status=${status}`);
-    return status === 'BLACKOUT';
+    return match[2] === 'BLACKOUT';
   }
   // Fallback to old parsing
   return result.output.includes('BLACKOUT');
