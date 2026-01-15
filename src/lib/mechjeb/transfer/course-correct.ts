@@ -6,11 +6,12 @@ import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { queryNodeInfo, queryWrongEncounterDetails, type ManeuverResult } from '../shared.js';
 import { getTargetValidationInfo, type TargetInfo } from '../../kos/target/validate.js';
-import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
+import { validateVesselState, ORBITAL_REQUIREMENTS, getVesselStateInfo } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
 import { executeSchema, distanceSchema, parseTarget } from '../../tool-types.js';
 import { formatTime, fmtVel } from '../../utils/format.js';
+import { determineTransferType, executeSmartTransfer } from '../meta/transfer.js';
 
 // ============================================================================
 // Helper Functions
@@ -68,45 +69,57 @@ async function queryNodeEncounter(conn: KosConnection): Promise<{ hasNode: boole
 /**
  * Query the current periapsis from actual orbit (not a node prediction).
  * Uses MechJeb INFO:TPERI which reliably calculates encounter periapsis.
+ * Retries with delay to handle physics settling after burns.
  */
-async function queryActualPeriapsis(conn: KosConnection): Promise<{ hasEncounter: boolean; periapsis: number }> {
-  // Use MechJeb INFO accessor - TPERI gives periapsis in target SOI
-  const result = await conn.execute(
-    'IF HASTARGET { PRINT "ENC|" + ADDONS:MJ:INFO:TPERI. } ELSE { PRINT "NOTGT". }',
-    3000
-  );
+async function queryActualPeriapsis(conn: KosConnection, retries = 3): Promise<{ hasEncounter: boolean; periapsis: number }> {
+  for (let attempt = 0; attempt < retries; attempt++) {
+    if (attempt > 0) {
+      // Wait for physics to settle before retry
+      await new Promise(r => setTimeout(r, 1000));
+    }
 
-  if (result.output.includes('NOTGT')) {
-    return { hasEncounter: false, periapsis: 0 };
+    // Use MechJeb INFO accessor - TPERI gives periapsis in target SOI
+    const result = await conn.execute(
+      'IF HASTARGET { PRINT "ENC|" + ADDONS:MJ:INFO:TPERI. } ELSE { PRINT "NOTGT". }',
+      3000
+    );
+
+    if (result.output.includes('NOTGT')) {
+      return { hasEncounter: false, periapsis: 0 };
+    }
+
+    // Parse distance with units (e.g., "214.1 km", "50000 m", etc.)
+    const match = result.output.match(/ENC\|([0-9.]+)\s*(m|km|Mm|Gm)?/i);
+    if (!match) {
+      // Couldn't parse - retry
+      continue;
+    }
+
+    let value = parseFloat(match[1]);
+    const unit = (match[2] || 'm').toLowerCase();
+
+    // Convert to meters
+    switch (unit) {
+    case 'km': {
+      value *= 1000;
+      break;
+    }
+    case 'mm': {
+      value *= 1_000_000;
+      break;
+    }
+    case 'gm': {
+      value *= 1_000_000_000;
+      break;
+    }
+    }
+
+    if (value > 0) {
+      return { hasEncounter: true, periapsis: value };
+    }
   }
 
-  // Parse distance with units (e.g., "214.1 km", "50000 m", etc.)
-  const match = result.output.match(/ENC\|([0-9.]+)\s*(m|km|Mm|Gm)?/i);
-  if (!match) {
-    return { hasEncounter: false, periapsis: 0 };
-  }
-
-  let value = parseFloat(match[1]);
-  const unit = (match[2] || 'm').toLowerCase();
-
-  // Convert to meters
-  switch (unit) {
-  case 'km': {
-  value *= 1000;
-  break;
-  }
-  case 'mm': {
-  value *= 1_000_000;
-  break;
-  }
-  case 'gm': {
-  value *= 1_000_000_000;
-  // No default
-  }
-  break;
-  }
-
-  return { hasEncounter: true, periapsis: value };
+  return { hasEncounter: false, periapsis: 0 };
 }
 
 /**
@@ -123,8 +136,7 @@ interface ClosestApproachInfo {
 
 /**
  * Query closest approach to target, even if no formal SOI encounter exists.
- * Uses SHIP:ORBIT:TARGETDISTANCE and TARGETTIME for current patch,
- * and iterates NEXTPATCH to find closest approach in future conics.
+ * Uses MechJeb TGT module first, then kOS orbit suffixes, then geometric check.
  */
 async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproachInfo> {
   const script = `
@@ -135,12 +147,18 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
     LOCAL patchBody IS "".
     LOCAL intermediate IS "".
 
-    IF HASTARGET AND SHIP:ORBIT:TARGETDISTANCE > 0 {
-      SET found TO TRUE.
-      SET dist TO SHIP:ORBIT:TARGETDISTANCE.
-      SET t TO SHIP:ORBIT:TARGETTIME.
+    // First try MechJeb TGT module - works even for non-intersecting orbits
+    IF HASTARGET AND ADDONS:MJ:HASSUFFIX("TGT") {
+      LOCAL mjDist IS ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE.
+      LOCAL mjTime IS ADDONS:MJ:TGT:CLOSESTAPPROACHTIME.
+      IF mjDist > 0 AND mjTime > 0 {
+        SET found TO TRUE.
+        SET dist TO mjDist.
+        SET t TO mjTime.
+      }
     }
 
+    // Check for intermediate body (transfer through wrong moon)
     IF SHIP:ORBIT:HASNEXTPATCH {
       LOCAL nextBody IS SHIP:ORBIT:NEXTPATCH:BODY:NAME.
       IF HASTARGET AND nextBody <> TARGET:NAME {
@@ -148,6 +166,14 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
       }
     }
 
+    // Fallback: kOS orbit suffixes (only works for intersecting orbits)
+    IF NOT found AND HASTARGET AND SHIP:ORBIT:TARGETDISTANCE > 0 {
+      SET found TO TRUE.
+      SET dist TO SHIP:ORBIT:TARGETDISTANCE.
+      SET t TO SHIP:ORBIT:TARGETTIME.
+    }
+
+    // Fallback: check future patches
     IF NOT found {
       LOCAL patch IS SHIP:ORBIT.
       LOCAL count IS 0.
@@ -164,6 +190,18 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
           }
         } ELSE { BREAK. }
         SET count TO count + 1.
+      }
+    }
+
+    // Final fallback: geometric check - does our orbit reach the target's orbital radius?
+    // If apoapsis >= target's semi-major axis * 0.8, we're in a potential transfer orbit
+    IF NOT found AND HASTARGET AND TARGET:TYPENAME = "Body" AND TARGET:HASSUFFIX("ORBIT") {
+      LOCAL tgtSma IS TARGET:ORBIT:SEMIMAJORAXIS.
+      LOCAL shipApo IS APOAPSIS + SHIP:BODY:RADIUS.
+      IF shipApo >= tgtSma * 0.8 {
+        SET found TO TRUE.
+        SET dist TO TARGET:DISTANCE.
+        SET t TO ETA:APOAPSIS.
       }
     }
 
@@ -515,19 +553,44 @@ export const courseCorrectTool: ToolDefinition = {
           callerTool: 'course_correct',
         });
 
-        // If no encounter on first try, do hohmann transfer first
-        if (burn === 0 && !result.success && result.error?.toLowerCase().includes('no encounter')) {
-          logger?.info(`[CourseCorrect] No encounter, attempting Hohmann transfer first`);
-          const hohmannResult = await orchestrator.hohmannTransfer('COMPUTED', false, {
+        // If no encounter on first try, do smart transfer (works for moons, planets, vessels)
+        if (burn === 0 && !result.success && (result.error?.toLowerCase().includes('no encounter') || result.error?.toLowerCase().includes('no trajectory'))) {
+          // Get target and vessel info to determine transfer type
+          const targetInfo = await getTargetValidationInfo(conn);
+          const vesselState = await getVesselStateInfo(conn);
+
+          if (!targetInfo) {
+            return ctx.errorResponse('course_correct', 'No target set');
+          }
+
+          const { transferType, error: transferError } = determineTransferType(
+            targetInfo.class,
+            targetInfo.name,
+            targetInfo.isInShipSOI,
+            vesselState.bodyType,
+            vesselState.bodyName,
+            vesselState.parentBodyName
+          );
+
+          if (transferError) {
+            return ctx.errorResponse('course_correct', transferError);
+          }
+
+          // Execute the appropriate transfer using shared function
+          logger?.info(`[CourseCorrect] No trajectory, using ${transferType} transfer to ${targetInfo.name}`);
+          const transferResult = await executeSmartTransfer(orchestrator, transferType, {
             target,
             execute: shouldExecute,
             logger,
             callerTool: 'course_correct',
           });
-          if (!hohmannResult.success) {
-            return ctx.errorResponse('course_correct', result.error ?? 'No encounter and hohmann failed');
+
+          if (!transferResult.success) {
+            return ctx.errorResponse('course_correct', transferResult.error ?? `${transferType} transfer failed`);
           }
-          // Retry course correction after hohmann (don't increment burn counter)
+
+          logger?.info(`[CourseCorrect] Transfer complete, now fine-tuning approach`);
+          // Continue to retry course correction (don't increment burn counter)
           continue;
         }
 

@@ -143,6 +143,54 @@ export function createPeriapsisQuery(): PropertyQuery {
 }
 
 // ============================================================================
+// Thrust Limiting for Small Burns
+// ============================================================================
+
+const SMALL_BURN_THRESHOLD = 10; // m/s - burns below this get thrust limiting
+const SMALL_BURN_THRUST_LIMIT = 35; // percent - thrust limit for small burns
+
+/**
+ * Limit engine thrust for small burns.
+ * Prevents overshooting by reducing thrust output.
+ */
+async function limitEngineThrust(
+  conn: KosConnection,
+  targetPercent: number,
+  logger?: McpLogger
+): Promise<void> {
+  const script = `
+    LOCAL count IS 0.
+    FOR eng IN SHIP:ENGINES {
+      IF eng:IGNITION AND NOT eng:FLAMEOUT {
+        SET eng:THRUSTLIMIT TO ${targetPercent}.
+        SET count TO count + 1.
+      }
+    }
+    PRINT "THROTTLED|" + count.
+  `.trim().replaceAll('\n', ' ');
+
+  const result = await conn.execute(script, 5000);
+  const match = result.output.match(/THROTTLED\|(\d+)/);
+  const count = match ? parseInt(match[1]) : 0;
+
+  if (count > 0) {
+    logger?.progress(`[Maneuver] Limited ${count} engine(s) to ${targetPercent}% thrust`);
+  }
+}
+
+/**
+ * Restore engine thrust limits to 100%.
+ */
+async function restoreEngineThrust(conn: KosConnection, logger?: McpLogger): Promise<void> {
+  await conn.execute(`
+    FOR eng IN SHIP:ENGINES {
+      SET eng:THRUSTLIMIT TO 100.
+    }
+  `.trim().replaceAll('\n', ' '), 3000);
+  logger?.progress('[Maneuver] Restored engine thrust to 100%');
+}
+
+// ============================================================================
 // RCS Fine-Tune Core Function
 // ============================================================================
 
@@ -431,7 +479,14 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
       LOCK STEERING TO LOOKDIRUP(frozenFwd, targetUp).
     `.trim().replaceAll('\n', ' ');
 
-    await conn.execute(`SAS OFF. WAIT 0.1. ${pass1Script}`, 5000);
+    await conn.execute('SAS OFF. WAIT 0.1.', 2000);
+
+    // Tiny RCS burst to break any drift before alignment (skip for small burns)
+    if (!noRcs) {
+      try { await conn.execute('RCS ON. WAIT 0.05. RCS OFF.'); } catch { /* ignore */ }
+    }
+
+    await conn.execute(pass1Script, 5000);
 
     let pass1LastAngle = 180;
     let _pass1NoProgress = Date.now();
@@ -575,6 +630,11 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
     // Ignore cleanup errors
   }
 
+  // Tiny RCS burst to settle drift after alignment (skip for small burns)
+  if (!noRcs) {
+    try { await conn.execute('RCS ON. WAIT 0.05. RCS OFF.'); } catch { /* ignore */ }
+  }
+
   // Ensure RCS is off at end of alignment
   try {
     await conn.execute('RCS OFF.');
@@ -690,86 +750,17 @@ export async function executeNode(
     log.warn(`${logPrefix} Pre-alignment failed, MechJeb will align during execution`);
   });
 
-  // For very small burns (< 5 m/s), use RCS pulses instead of MechJeb executor
-  // This prevents engine/alignment artifacts from affecting trajectory more than the burn
-  // BUT only if we have an actual encounter - RCS fine-tune needs valid TPERI readings
-  const TINY_BURN_THRESHOLD = 5;
+  // Check for encounter (needed for RCS follow-up refinement)
   const hasEncounter = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000)
     .then(r => r.output.includes('True'))
     .catch(() => false);
 
-  if (dvRequired < TINY_BURN_THRESHOLD && hasEncounter && targetPeriapsis) {
-    // For tiny burns, use RCS pulses to REPLACE the burn entirely
-    // This prevents engine/alignment artifacts from affecting trajectory more than the burn
-
-    // Save node ETA before removing (for warp timing)
-    const savedNodeEta = await queryNumber(conn, 'NEXTNODE:ETA').catch(() => 0);
-
-    // Remove the node - we'll use periapsis monitoring instead
-    await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
-
-    const targetPe = targetPeriapsis ?? 50_000;
-    const periapsisQuery = createPeriapsisQuery();
-
-    // Validate we can read periapsis before proceeding
-    const initialPe = await periapsisQuery(conn);
-    if (initialPe === null || initialPe <= 0) {
-      log.warn(`${logPrefix} Could not read target periapsis, skipping RCS fine-tune`);
-      await clearKosOperation(conn).catch(() => { /* ignore */ });
-      return { success: false, nodesExecuted: 0, error: 'Could not read target periapsis for RCS fine-tuning' };
-    }
-
-    log.progress(`${logPrefix} RCS fine-tune: ${(initialPe / 1000).toFixed(0)}km → ${(targetPe / 1000).toFixed(0)}km target`);
-
-    // Warp to 5 seconds before original node time (using saved ETA since node is removed)
-    if (savedNodeEta > 10 && config.warp.onRails) {
-      log.progress(`${logPrefix} Warping (${formatTime(savedNodeEta)})...`);
-      await stopWarp(conn);
-      const warpTargetTime = savedNodeEta - 5;
-      await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetTime}).`, 5000);
-
-      // Wait for warp to complete by checking TIMEWARP:RATE
-      let warpWait = 0;
-      const maxWarpWait = 600; // 10 minute max warp time
-      while (warpWait < maxWarpWait) {
-        await delay(1000);
-        warpWait++;
-        const warpCheck = await conn.execute('PRINT KUNIVERSE:TIMEWARP:RATE.', 2000);
-        const rate = parseFloat(warpCheck.output.match(/[\d.]+/)?.[0] || '1');
-        if (rate <= 1) break; // Warp complete
-      }
-      await stopWarp(conn);
-      await delay(500);
-    }
-
-    // Align PROGRADE with SAS, then enable RCS for fine-tuning
-    await conn.execute('SAS ON. WAIT 0.2. SET SASMODE TO "PROGRADE". RCS OFF.');
-    await delay(2000);
-    await conn.execute('RCS ON.');
-
-    // Use abstracted RCS fine-tune
-    const fineTuneResult = await rcsFineTune(conn, {
-      queryProperty: periapsisQuery,
-      targetValue: targetPe,
-      controlAxis: 'fore',
-      directionStrategy: 'higher-means-negative',
-      tolerance: { relative: 0.25 },
-      logger: log,
-      logPrefix,
-    });
-
-    // Cleanup
-    await conn.execute('SET SHIP:CONTROL:FORE TO 0. RCS OFF. SAS ON. SET SASMODE TO "PROGRADE".');
-
-    // Clear operation state
-    try { await clearKosOperation(conn); } catch { /* ignore */ }
-
-    return {
-      success: fineTuneResult.success,
-      nodesExecuted: 1,
-      deltaV: { required: dvRequired, available: dvShipTotal, remaining: 0 },
-      attempts: fineTuneResult.pulsesUsed,
-    };
+  // For small burns, limit engine thrust to prevent overshooting
+  let thrustWasLimited = false;
+  if (dvRequired < SMALL_BURN_THRESHOLD) {
+    log.progress(`${logPrefix} Small burn (${fmtVel(dvRequired)}), limiting thrust to ${SMALL_BURN_THRUST_LIMIT}%`);
+    await limitEngineThrust(conn, SMALL_BURN_THRUST_LIMIT, log);
+    thrustWasLimited = true;
   }
 
   // Enable MechJeb executor FIRST, before any warp
@@ -960,11 +951,57 @@ export async function executeNode(
 
       if (state.noNode || state.burnComplete) {
         await stopWarp(conn);
-        if (state.burnComplete && !state.noNode) {
-          log.progress(`${logPrefix} Burn complete! (${fmtVel(state.dvRemaining)} remaining < ${fmtVel(DV_THRESHOLD)} threshold)`);
-          // Clear the residual node to avoid "No maneuver nodes present!" errors
-          await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
+        // Log completion - either burn finished normally or node was consumed
+        if (state.burnComplete) {
+          log.progress(`${logPrefix} Burn complete! (${fmtVel(state.dvRemaining)} remaining)`);
+        } else if (state.noNode) {
+          log.progress(`${logPrefix} Burn complete (node consumed)`);
         }
+        // Clear any residual node to avoid "No maneuver nodes present!" errors
+        await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
+
+        // Restore thrust if it was limited for small burns
+        if (thrustWasLimited) {
+          await restoreEngineThrust(conn, log);
+        }
+
+        // RCS refinement for small burns if outside tolerance
+        if (thrustWasLimited && targetPeriapsis && hasEncounter) {
+          // Wait for physics to settle after burn before checking periapsis
+          await delay(1500);
+          const actualPe = await queryPeriapsis(conn);
+          if (actualPe !== null && actualPe > 0) {
+            const peError = Math.abs(actualPe - targetPeriapsis) / targetPeriapsis;
+            if (peError > 0.25) {
+              log.progress(`${logPrefix} Pe ${(actualPe / 1000).toFixed(0)}km vs target ${(targetPeriapsis / 1000).toFixed(0)}km (${(peError * 100).toFixed(0)}% error), refining with RCS...`);
+
+              // Point RETROGRADE for correction (usually overshot, need to slow down)
+              await conn.execute('SAS ON. WAIT 0.3. SET SASMODE TO "RETROGRADE". RCS ON.');
+              await delay(2000);
+
+              // RCS fine-tune with INVERTED direction logic
+              // When pointing retrograde, +fore thrust slows us down, lowering periapsis
+              // So if Pe > target, we pulse positive (slow down more)
+              const fineTuneResult = await rcsFineTune(conn, {
+                queryProperty: createPeriapsisQuery(),
+                targetValue: targetPeriapsis,
+                controlAxis: 'fore',
+                directionStrategy: 'higher-means-positive', // INVERTED for retrograde
+                tolerance: { relative: 0.25 },
+                limits: { maxPulses: 15, maxReversals: 2 },
+                logger: log,
+                logPrefix: `${logPrefix} RCS`,
+              });
+
+              await conn.execute('RCS OFF. SAS ON. SET SASMODE TO "PROGRADE".');
+
+              if (fineTuneResult.success) {
+                log.progress(`${logPrefix} RCS refined to ${(fineTuneResult.finalValue / 1000).toFixed(0)}km`);
+              }
+            }
+          }
+        }
+
         // Enable SAS prograde to maintain heading and avoid RCS drift affecting trajectory
         try {
           await conn.execute('SAS ON. WAIT 0.1. SET SASMODE TO "PROGRADE".');
@@ -987,6 +1024,10 @@ export async function executeNode(
           await delay(2000);
           continue; // Continue to next retry attempt
         } else {
+          // Restore thrust before returning failure
+          if (thrustWasLimited) {
+            try { await restoreEngineThrust(conn, log); } catch { /* ignore */ }
+          }
           await unlockControls(conn);
           try { await clearKosOperation(conn); } catch { /* ignore */ }
           return {
@@ -1005,6 +1046,10 @@ export async function executeNode(
       if (attempt === MAX_RETRIES) {
         // Disable executor on final timeout
         await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
+        // Restore thrust before returning failure
+        if (thrustWasLimited) {
+          try { await restoreEngineThrust(conn, log); } catch { /* ignore */ }
+        }
         await unlockControls(conn);
         try { await clearKosOperation(conn); } catch { /* ignore */ }
 
@@ -1023,6 +1068,10 @@ export async function executeNode(
   }
 
   // Should not reach here, but just in case
+  // Restore thrust before returning failure
+  if (thrustWasLimited) {
+    try { await restoreEngineThrust(conn, log); } catch { /* ignore */ }
+  }
   await unlockControls(conn);
   try { await clearKosOperation(conn); } catch { /* ignore */ }
   return {

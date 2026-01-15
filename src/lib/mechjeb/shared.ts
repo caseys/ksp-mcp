@@ -401,14 +401,22 @@ export async function queryTargetEncounterInfo(
   const targetType = targetMatch[2].toLowerCase();
 
   if (targetType === 'body') {
-    // Query body-specific encounter info
-    // Note: TCA = time to closest approach, TPERI = periapsis in target SOI, TCAPDV = capture delta-V
+    // Query body-specific encounter info using kOS orbit patches (more reliable than MechJeb INFO)
+    // Check both current orbit patches and node-predicted patches
     const bodyInfo = await conn.execute(
-      'PRINT "BODY|" + ADDONS:MJ:INFO:TPERI + "|" + ADDONS:MJ:INFO:TCA + "|" + ADDONS:MJ:INFO:TCAPDV + "|" + TARGET:ATM:HEIGHT.',
-      3000
+      'LOCAL encPe IS -999. LOCAL encEta IS -1. ' +
+      'IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { ' +
+        'SET encPe TO ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). ' +
+        'SET encEta TO ROUND(NEXTNODE:ETA + NEXTNODE:ORBIT:NEXTPATCH:ETA:PERIAPSIS). ' +
+      '} ELSE IF ORBIT:HASNEXTPATCH { ' +
+        'SET encPe TO ROUND(ORBIT:NEXTPATCH:PERIAPSIS). ' +
+        'SET encEta TO ROUND(ORBIT:NEXTPATCH:ETA:PERIAPSIS). ' +
+      '} ' +
+      'PRINT "BODY|" + encPe + "|" + encEta + "|" + TARGET:ATM:HEIGHT.',
+      5000
     );
 
-    const bodyMatch = bodyInfo.output.match(/BODY\|([^|]+)\|([^|]+)\|([^|]+)\|(.+)/);
+    const bodyMatch = bodyInfo.output.match(/BODY\|(-?[\d.]+)\|(-?[\d.]+)\|(.+)/);
     if (!bodyMatch) {
       // Fallback: return basic info
       return {
@@ -417,13 +425,15 @@ export async function queryTargetEncounterInfo(
       };
     }
 
+    const encPe = parseNumber(bodyMatch[1]);
+    const encEta = parseNumber(bodyMatch[2]);
+
     return {
       targetType: 'body',
       targetName,
-      periapsisInTargetSOI: parseDistanceString(bodyMatch[1]),
-      timeToClosestApproach: parseTimeString(bodyMatch[2]),
-      captureDeltaV: parseVelocityString(bodyMatch[3]),
-      atmosphereHeight: parseNumber(bodyMatch[4]),
+      periapsisInTargetSOI: encPe != null && encPe > -999 ? encPe : undefined,
+      timeToClosestApproach: encEta != null && encEta > 0 ? encEta : undefined,
+      atmosphereHeight: parseNumber(bodyMatch[3]),
     };
   } else {
     // Query vessel-specific encounter info

@@ -53,8 +53,9 @@ export async function clearKosOperation(conn: KosConnection): Promise<void> {
 export async function getKosOperation(conn: KosConnection): Promise<KosOperationState | null> {
   try {
     // Query operation state and current time for duration calc
+    // Use CHOOSE to handle undefined variable (daemon may not have run yet)
     const result = await conn.execute(
-      'PRINT "MCPOP:" + _MCP_OP + "|" + TIME:SECONDS.',
+      'PRINT "MCPOP:" + (CHOOSE _MCP_OP IF DEFINED _MCP_OP ELSE "") + "|" + TIME:SECONDS.',
       3000
     );
 

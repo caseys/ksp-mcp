@@ -106,32 +106,13 @@ export const transferTool: ToolDefinition = {
       }
 
       // Execute the appropriate transfer
-      let result;
-      if (transferType === 'hohmann') {
-        logger.progress(`[Transfer] Using hohmann_transfer for ${targetInfo.class}: ${targetInfo.name}`);
-        result = await orchestrator.hohmannTransfer('COMPUTED', false, {
-          // target already set above
-          execute: args.execute as boolean,
-          logger,
-          callerTool: 'transfer',
-          rendezvous: true,  // default to rendezvous mode
-        });
-      } else if (transferType === 'return_from_moon') {
-        logger.progress(`[Transfer] Using return_from_moon to return to ${targetInfo.name}`);
-        result = await orchestrator.returnFromMoon(40_000, {  // default 40km periapsis
-          execute: args.execute as boolean,
-          logger,
-          callerTool: 'transfer',
-        });
-      } else {
-        logger.progress(`[Transfer] Using interplanetary_transfer for planet: ${targetInfo.name}`);
-        result = await orchestrator.interplanetaryTransfer(true, {
-          // target already set above
-          execute: args.execute as boolean,
-          logger,
-          callerTool: 'transfer',
-        });
-      }
+      logger.progress(`[Transfer] Using ${transferType} for ${targetInfo.class}: ${targetInfo.name}`);
+      const result = await executeSmartTransfer(orchestrator, transferType, {
+        // target already set above via orchestrator.setTarget()
+        execute: args.execute as boolean,
+        logger,
+        callerTool: 'transfer',
+      });
 
       if (result.success) {
         const nodeCount = result.nodesCreated ?? 1;
@@ -156,22 +137,50 @@ export const transferTool: ToolDefinition = {
             text += `\nReturn trajectory: ${match[1]} periapsis ${match[2]}km`;
             text += `\nNext: warp to ${match[1]} SOI, then circularize`;
           }
-        } else {
+        } else if (result.executed) {
+          // Wait for physics to settle after burn before querying encounter
+          await new Promise(r => setTimeout(r, 1500));
+
           // Query encounter info for hohmann/interplanetary transfers
           const { queryTargetEncounterInfo } = await import('../shared.js');
           const encounterInfo = await queryTargetEncounterInfo(conn);
 
-          if (encounterInfo && encounterInfo.targetType === 'body') {
-            const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
-            const encPeKm = (peAlt / 1000).toFixed(0);
-            text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km`;
+          if (encounterInfo) {
+            if (encounterInfo.targetType === 'body') {
+              const peAlt = encounterInfo.periapsisInTargetSOI;
 
-            if (peAlt < 10_000) {
-              text += ` - UNSAFE trajectory!`;
-              text += `\nREQUIRED: Use course_correct to fix trajectory before doing anything else.`;
+              if (peAlt != null && peAlt > 0) {
+                const encPeKm = (peAlt / 1000).toFixed(0);
+                text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km`;
+
+                if (peAlt < 10_000) {
+                  text += ` - UNSAFE trajectory!`;
+                  text += `\nREQUIRED: Use course_correct to fix trajectory before doing anything else.`;
+                } else if (peAlt < 30_000) {
+                  text += ` (close)`;
+                  text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+                } else if (peAlt > 500_000) {
+                  text += ` (far)`;
+                  text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize or use course_correct to tighten`;
+                } else {
+                  text += ` (safe)`;
+                  text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+                }
+              } else {
+                // Couldn't determine periapsis
+                text += `\nEncounter: ${encounterInfo.targetName} (periapsis unknown)`;
+                text += `\nNext: Use course_correct to verify/adjust approach`;
+              }
             } else {
-              text += ` (safe)`;
-              text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+              // Vessel target
+              const caDistKm = encounterInfo.closestApproachDistance != null
+                ? (encounterInfo.closestApproachDistance / 1000).toFixed(1)
+                : '?';
+              const caRelVel = encounterInfo.closestApproachRelVel != null
+                ? fmtVel(encounterInfo.closestApproachRelVel)
+                : '?';
+              text += `\nClosest approach: ${caDistKm}km at ${caRelVel} relative`;
+              text += `\nNext: warp to closest approach, then match_velocities`;
             }
           }
         }
@@ -190,15 +199,63 @@ export const transferTool: ToolDefinition = {
 // Transfer Type Determination
 // ============================================================================
 
-interface TransferTypeResult {
-  transferType: 'hohmann' | 'interplanetary' | 'return_from_moon';
+export type TransferType = 'hohmann' | 'interplanetary' | 'return_from_moon';
+
+// ============================================================================
+// Shared Transfer Execution
+// ============================================================================
+
+export interface ExecuteTransferOptions {
+  target?: string;
+  execute: boolean;
+  logger?: import('../../tool-types.js').McpLogger;
+  callerTool: string;
+}
+
+/**
+ * Execute the appropriate transfer based on transfer type.
+ * Shared between transfer tool and course_correct fallback.
+ */
+export async function executeSmartTransfer(
+  orchestrator: ManeuverOrchestrator,
+  transferType: TransferType,
+  options: ExecuteTransferOptions
+): Promise<import('../orchestrator.js').OrchestratedResult> {
+  const { target, execute, logger, callerTool } = options;
+
+  if (transferType === 'hohmann') {
+    return orchestrator.hohmannTransfer('COMPUTED', false, {
+      target,
+      execute,
+      logger,
+      callerTool,
+      rendezvous: true,
+    });
+  } else if (transferType === 'return_from_moon') {
+    return orchestrator.returnFromMoon(40_000, {
+      execute,
+      logger,
+      callerTool,
+    });
+  } else {
+    return orchestrator.interplanetaryTransfer(true, {
+      target,
+      execute,
+      logger,
+      callerTool,
+    });
+  }
+}
+
+export interface TransferTypeResult {
+  transferType: TransferType;
   error?: string;
 }
 
 /**
  * Determine which transfer type to use based on target class and vessel location.
  */
-function determineTransferType(
+export function determineTransferType(
   targetClass: TargetClass,
   targetName: string,
   isInShipSOI: boolean,
