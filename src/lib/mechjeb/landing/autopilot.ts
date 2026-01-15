@@ -8,6 +8,7 @@ import { nullLogger, parseTarget } from '../../tool-types.js';
 import { setKosOperation, clearKosOperation } from '../../../utils/kos-operation-state.js';
 import { clearBroadcastLogger } from '../../../utils/mcp-logger.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
+import { warpToRadioContact } from '../../../utils/radio-contact.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { config as appConfig } from '../../../config/index.js';
 import {
@@ -803,6 +804,13 @@ export const landTool: ToolDefinition = {
       // If wait=true, monitor until completion
       if (wait) {
         const monitorResult = await monitorLanding(conn, { logger });
+
+        // Warp to radio contact if we landed in blackout
+        // (e.g., on far side of a moon)
+        const radioResult = await warpToRadioContact(conn, { logger, context: 'Landing' });
+        if (!radioResult.success && radioResult.error) {
+          logger.warn(`[Landing] ${radioResult.error}`);
+        }
 
         if (monitorResult.success) {
           // Query landing site details for informative response

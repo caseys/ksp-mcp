@@ -199,7 +199,13 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
           }
         }
 
-        return tool.handler(args as Record<string, unknown>, context, extra);
+        // Execute tool handler
+        const result = await tool.handler(args as Record<string, unknown>, context, extra);
+
+        // Auto-restart daemon after tool execution (keeps daemon running for blackout recovery)
+        await context.restartDaemon();
+
+        return result;
       }
     );
   }

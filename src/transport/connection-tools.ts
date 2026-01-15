@@ -1,6 +1,13 @@
 import { z } from 'zod';
 import { KosConnection, ConnectionState, CommandResult } from '../transport/kos-connection.js';
 import { config } from '../config/index.js';
+import {
+  checkDaemonStatus,
+  deployDaemon,
+  ensureBootFile,
+  runDaemon,
+  MCP_DAEMON_VERSION,
+} from '../utils/boot-deploy.js';
 
 // Shared connection instance
 let connection: KosConnection | null = null;
@@ -20,57 +27,67 @@ interface CpuPreference {
 let cpuPreference: CpuPreference | null = null;
 
 // =============================================================================
-// Connection Safety Monitor
+// MCP-Daemon Boot Script
 // =============================================================================
 
 /**
- * Safety monitor script - injected on connection to release controls on signal loss.
- * Idempotent: only initializes once per kOS session.
+ * Ensure the mcp-daemon boot script is installed and running on the vessel.
  *
- * Features:
- * - Releases controls on CommNet signal loss (unless MechJeb autopilot is active)
- * - Auto-warps to signal when landed in blackout
- * - Tracks operation state via _MCP_OP variable
- * - Auto-clears _MCP_OP when operation completes
+ * The daemon is a single boot file (0:/boot/mcp_daemon.ks) that:
+ * - Sets up WHEN triggers for autonomous blackout recovery
+ * - Stays alive with WAIT UNTIL FALSE so triggers persist
+ * - Auto-warps to radio contact when idle in blackout
  */
-const SAFETY_MONITOR_SCRIPT = `
-IF NOT (DEFINED KSP_MCP_SAFETY_INIT) {
-  GLOBAL KSP_MCP_SAFETY_INIT IS TRUE.
-  GLOBAL KSP_MCP_SIGNAL_LOST IS FALSE.
-  GLOBAL KSP_MCP_WARP_PENDING IS FALSE.
-  GLOBAL _MCP_OP IS "".
-  GLOBAL KSP_MCP_HEARTBEAT IS TIME:SECONDS.
-  FUNCTION KSP_MCP_MJ_ACTIVE { RETURN ADDONS:MJ:ASCENT:ENABLED OR ADDONS:MJ:LANDING:ENABLED OR ADDONS:MJ:NODE:ENABLED. }
-  FUNCTION KSP_MCP_RELEASE { IF _MCP_OP <> "" AND KSP_MCP_MJ_ACTIVE() { PRINT "[ksp-mcp] Signal lost but MechJeb active - not releasing.". RETURN. } UNLOCK STEERING. UNLOCK THROTTLE. SET SHIP:CONTROL:NEUTRALIZE TO TRUE. IF NOT SAS { SAS ON. } }
-  FUNCTION KSP_MCP_FIND_RADIO { LOCAL sb IS SHIP:BODY. LOCAL is_tidal IS ABS(sb:ROTATIONPERIOD - sb:ORBIT:PERIOD) / sb:ORBIT:PERIOD < 1e-5. IF is_tidal AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") { LOCAL uv IS (SHIP:POSITION - sb:POSITION):NORMALIZED. LOCAL ka IS VANG(uv, BODY("Kerbin"):POSITION - SHIP:POSITION). IF ka > 90 { RETURN -2. } } LOCAL max_dt IS CHOOSE SHIP:ORBIT:PERIOD IF SHIP:STATUS = "ORBITING" ELSE sb:ROTATIONPERIOD. LOCAL step IS MAX(30, max_dt / 60). LOCAL dt IS step. UNTIL dt > max_dt { LOCAL ut IS TIME:SECONDS + dt. LOCAL fp IS POSITIONAT(SHIP, ut). LOCAL uv IS (fp - sb:POSITION):NORMALIZED. LOCAL kp IS POSITIONAT(BODY("Kerbin"), ut). LOCAL ka IS VANG(uv, kp - fp). IF ka < 72 { RETURN dt. } SET dt TO dt + step. } RETURN -1. }
-  WHEN NOT HOMECONNECTION:ISCONNECTED THEN { IF NOT KSP_MCP_SIGNAL_LOST { KSP_MCP_RELEASE(). SET KSP_MCP_SIGNAL_LOST TO TRUE. PRINT "[ksp-mcp] Signal lost - controls released.". } PRESERVE. }
-  WHEN HOMECONNECTION:ISCONNECTED THEN { IF KSP_MCP_SIGNAL_LOST { SET KSP_MCP_SIGNAL_LOST TO FALSE. SET KSP_MCP_WARP_PENDING TO FALSE. PRINT "[ksp-mcp] Signal restored.". } PRESERVE. }
-  WHEN (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") AND NOT HOMECONNECTION:ISCONNECTED AND NOT KSP_MCP_WARP_PENDING THEN { SET KSP_MCP_WARP_PENDING TO TRUE. LOCAL wt IS KSP_MCP_FIND_RADIO(). IF wt > 0 { PRINT "[ksp-mcp] Landed in blackout - radio in " + ROUND(wt/60) + "m, warping...". KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + wt). WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED. WAIT 2. IF HOMECONNECTION:ISCONNECTED { PRINT "[ksp-mcp] Signal restored after warp.". } ELSE { PRINT "[ksp-mcp] Warp complete but still no signal.". } } ELSE IF wt = -2 { PRINT "[ksp-mcp] Permanent blackout - landed on dark side of tidally locked body.". } ELSE { PRINT "[ksp-mcp] No radio window found.". } SET KSP_MCP_WARP_PENDING TO FALSE. PRESERVE. }
-  WHEN _MCP_OP <> "" THEN { LOCAL parts IS _MCP_OP:SPLIT("|"). LOCAL op IS parts[0]. LOCAL done IS FALSE. IF op = "ascent" AND PERIAPSIS > 0 AND SHIP:STATUS = "ORBITING" { SET done TO TRUE. } IF op = "landing" AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") { SET done TO TRUE. } IF op = "node" AND NOT HASNODE { PRINT "[ksp-mcp] Node removed, triggering completion.". SET done TO TRUE. } IF done { PRINT "[ksp-mcp] Operation complete: " + op + ", radio=" + HOMECONNECTION:ISCONNECTED. IF NOT HOMECONNECTION:ISCONNECTED AND NOT KSP_MCP_WARP_PENDING { SET KSP_MCP_WARP_PENDING TO TRUE. LOCAL wt IS KSP_MCP_FIND_RADIO(). PRINT "[ksp-mcp] Find radio returned: " + wt. IF wt > 0 { PRINT "[ksp-mcp] No radio - warping " + ROUND(wt/60) + "m to contact...". KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + wt). WAIT UNTIL KUNIVERSE:TIMEWARP:ISSETTLED. WAIT 2. IF HOMECONNECTION:ISCONNECTED { PRINT "[ksp-mcp] Signal restored.". } ELSE { PRINT "[ksp-mcp] Warp done but no signal.". } } ELSE IF wt = -2 { PRINT "[ksp-mcp] Permanent blackout - results may not return.". } ELSE { PRINT "[ksp-mcp] No radio window - results may not return.". } SET KSP_MCP_WARP_PENDING TO FALSE. } SET _MCP_OP TO "". } PRESERVE. }
-  WHEN TIME:SECONDS > KSP_MCP_HEARTBEAT + 30 THEN { SET KSP_MCP_HEARTBEAT TO TIME:SECONDS. PRINT "[ksp-mcp] Heartbeat: op=" + _MCP_OP + ", hasNode=" + HASNODE + ", radio=" + HOMECONNECTION:ISCONNECTED. PRESERVE. }
-  PRINT "[ksp-mcp] Safety monitor active.".
-}`.trim();
-
-/**
- * Inject the safety monitor script.
- * Called after successful connection.
- *
- * NOTE: Remote terminal commands are queued but NOT executed during radio blackout.
- * WHEN triggers registered via remote terminal are part of the terminal's program
- * context and are suspended during blackout. For true persistence, the safety
- * monitor would need to be in a boot file on the vessel.
- *
- * Despite this limitation, the safety monitor is still useful for:
- * - Releasing controls on signal loss (fires immediately when signal drops)
- * - Auto-warp when LANDED in blackout (fires when signal is restored)
- * - Operation tracking and cleanup when signal is available
- */
-async function injectSafetyMonitor(conn: KosConnection): Promise<void> {
+async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
   try {
-    await conn.execute(SAFETY_MONITOR_SCRIPT, 5000);
+    // Check daemon status (includes boot file check)
+    const status = await checkDaemonStatus(conn);
+
+    // Always ensure boot file is set (even if daemon is running)
+    if (!status.bootFileSet) {
+      console.log('[ksp-mcp] Setting boot file...');
+      await ensureBootFile(conn);
+    }
+
+    // If running and current, nothing more to do
+    if (status.running && !status.needsUpdate) {
+      console.log(`[ksp-mcp] mcp-daemon v${status.version} active.`);
+      return;
+    }
+
+    // Deploy if needed (handles both install and update)
+    if (!status.running || status.needsUpdate) {
+      if (!status.running) {
+        console.log(`[ksp-mcp] Installing mcp-daemon v${MCP_DAEMON_VERSION}...`);
+      } else {
+        console.log(`[ksp-mcp] Updating mcp-daemon v${status.version} -> v${MCP_DAEMON_VERSION}...`);
+      }
+
+      const deployResult = await deployDaemon(conn);
+      if (!deployResult.success) {
+        console.warn('[ksp-mcp] mcp-daemon deployment failed:', deployResult.error);
+        return;
+      }
+      console.log(`[ksp-mcp] Deployed via ${deployResult.method}.`);
+    }
+
+    // Run daemon if not already running
+    // Note: We don't verify after starting because verification would Ctrl+C the daemon.
+    // The tool's command will Ctrl+C the daemon anyway, then restartDaemon brings it back.
+    if (!status.running) {
+      try {
+        await runDaemon(conn);
+        // Brief pause to let it initialize before tool Ctrl+C's it
+        await new Promise(resolve => setTimeout(resolve, 200));
+        console.log(`[ksp-mcp] mcp-daemon v${MCP_DAEMON_VERSION} started.`);
+      } catch (error) {
+        console.warn('[ksp-mcp] Failed to run mcp-daemon:', error);
+      }
+    } else if (status.needsUpdate) {
+      console.log('[ksp-mcp] Update deployed - will apply on ship reload.');
+    }
   } catch (error) {
-    // Non-fatal - log but don't fail connection
-    console.warn('[ksp-mcp] Failed to inject safety monitor:', error);
+    console.warn('[ksp-mcp] mcp-daemon setup failed:', error);
   }
 }
 
@@ -175,32 +192,38 @@ interface HealthCheckResult {
  */
 async function checkConnectionHealth(conn: KosConnection): Promise<HealthCheckResult> {
   try {
-    // Use unique marker to distinguish result from echo
-    // Use clear=false to avoid Ctrl+C interfering with output parsing
-    const marker = 'HEALTH_OK';
-    const result = await conn.execute(`PRINT "${marker}".`, HEALTH_CHECK_TIMEOUT_MS, { clear: false });
+    // Check daemon heartbeat - Ctrl+C (clear=true) breaks daemon first
+    // Then we read the heartbeat timestamp the daemon was updating
+    // Note: ensureMcpDaemon() called after this will handle daemon restart
+    const result = await conn.execute(
+      'PRINT "HB:" + (CHOOSE _MCP_HEARTBEAT IF DEFINED _MCP_HEARTBEAT ELSE -1) + " R:" + (CHOOSE _MCP_RADIO IF DEFINED _MCP_RADIO ELSE HOMECONNECTION:ISCONNECTED).',
+      HEALTH_CHECK_TIMEOUT_MS,
+      { clear: true }
+    );
 
-    // Check for radio blackout - signal lost message (only on first command after loss)
+    // Check for radio blackout - signal lost message
     if (result.output.includes('Signal lost')) {
       return { healthy: false, reason: 'signal_lost', output: result.output };
     }
 
-    // Check if we got the actual result (not just the command echo)
-    // The echo would be: PRINT "HEALTH_OK".
-    // The result would be: HEALTH_OK (on its own, without PRINT)
-    // Use regex to find HEALTH_OK not preceded by PRINT
-    const hasResult = result.output.match(/(?<!PRINT\s+")HEALTH_OK(?!")/);
-    if (result.success && hasResult) {
+    // Parse heartbeat response: "HB:12345.67 R:True" or "HB:-1 R:True"
+    const hbMatch = result.output.match(/HB:([-\d.]+)\s+R:(True|False)/i);
+    if (hbMatch) {
+      const hasRadio = hbMatch[2].toLowerCase() === 'true';
+
+      if (!hasRadio) {
+        return { healthy: false, reason: 'signal_lost', output: result.output };
+      }
+
+      // Heartbeat valid (daemon was running) or -1 (daemon not yet started, but radio OK)
       return { healthy: true };
     }
 
-    // Commands echoed but no output = likely signal loss (after first command)
-    // This happens when buffer had stale commands that consumed the "Signal lost" message
-    if (result.output.includes(`PRINT "${marker}"`)) {
-      return { healthy: false, reason: 'signal_lost', output: result.output };
+    // Fallback: check for any valid response
+    if (result.success && result.output.length > 0) {
+      return { healthy: true };
     }
 
-    // No valid response
     return { healthy: false, reason: 'no_response', output: result.output };
   } catch {
     return { healthy: false, reason: 'error' };
@@ -346,8 +369,9 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
       };
     }
 
-    // Inject safety monitor (idempotent - only initializes once per kOS session)
-    await injectSafetyMonitor(getConnection());
+    // Install and run mcp-daemon if not present (provides blackout recovery)
+    // Note: First deployment to a new vessel may take a few seconds
+    await ensureMcpDaemon(getConnection());
 
     return getConnection();
   } catch (error) {
@@ -484,6 +508,7 @@ export const commandTool: ToolDefinition = {
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();
+      // Tool wrapper auto-restarts daemon after execution
       const result = await conn.execute(args.command as string, args.timeout as number);
 
       if (result.success) {

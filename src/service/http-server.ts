@@ -6,6 +6,7 @@ import {
   getConnection,
   ensureConnected,
 } from '../transport/connection-tools.js';
+import { runDaemon } from '../utils/boot-deploy.js';
 import { config } from '../config/index.js';
 import { isClaudeClient, type ClientInfo } from '../lib/tool-types.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
@@ -152,6 +153,16 @@ export function createServer(): McpServer {
       // 4. Fallback - assume notification support
       if (DEBUG) console.error(`[supportsNotifications] fallback -> true`);
       return true;
+    },
+    restartDaemon: async () => {
+      try {
+        const conn = getConnection();
+        if (conn.isConnected()) {
+          await runDaemon(conn);
+        }
+      } catch {
+        // Best effort - don't fail the tool if daemon restart fails
+      }
     },
   };
 

@@ -21,6 +21,7 @@ import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { config } from '../../config/index.js';
 import { ManeuverOrchestrator } from './orchestrator.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
+import { warpToRadioContact } from '../../utils/radio-contact.js';
 
 // Imports for smart launch parameter resolution
 import { hasTarget } from '../kos/target/shared.js';
@@ -1155,6 +1156,13 @@ export const launchAscentTool: ToolDefinition = {
         // Wait for completion (blocking call that monitors ascent)
         try {
           const result = await handle.waitForCompletion();
+
+          // Warp to radio contact if we completed in blackout
+          // (e.g., orbiting on far side of body)
+          const radioResult = await warpToRadioContact(conn, { logger, context: 'Ascent' });
+          if (!radioResult.success && radioResult.error) {
+            logger.warn(`[Ascent] ${radioResult.error}`);
+          }
 
           if (result.success) {
             const orbit = result.finalOrbit;

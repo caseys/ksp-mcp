@@ -51,9 +51,15 @@ export interface ExecuteOptions {
   fireAndForget?: boolean;
   /**
    * If false, skip prepending Ctrl+C to clear stray input. Default is true.
-   * Set to false for health checks that need pristine command parsing.
+   * The Ctrl+C also breaks any running daemon loop, allowing the command to execute.
    */
   clear?: boolean;
+  /**
+   * If true, restart the MCP daemon after command execution.
+   * The daemon provides blackout auto-warp when vessel is idle.
+   * Since Ctrl+C breaks the daemon, this restores it after the command.
+   */
+  restartDaemon?: boolean;
 }
 
 /**
@@ -382,7 +388,16 @@ export class KosConnection {
       // Check for errors in output
       const error = this.detectError(cleanOutput);
       if (error) {
+        // Still restart daemon even on error if requested
+        if (options?.restartDaemon) {
+          await this.restartDaemon();
+        }
         return { success: false, output: cleanOutput, error };
+      }
+
+      // Restart daemon if requested (Ctrl+C killed it, bring it back)
+      if (options?.restartDaemon) {
+        await this.restartDaemon();
       }
 
       return { success: true, output: cleanOutput };
@@ -409,6 +424,28 @@ export class KosConnection {
           this.commandLock = Promise.resolve();
         }
       }
+    }
+  }
+
+  /**
+   * Restart the MCP daemon after a command killed it (via Ctrl+C).
+   * The daemon provides auto-warp to radio contact during idle blackout.
+   * Fire-and-forget: we don't wait for daemon output to avoid blocking.
+   */
+  private async restartDaemon(): Promise<void> {
+    if (!this.transport) return;
+
+    try {
+      // Clear the running flag first - the old daemon loop is dead (we Ctrl+C'd it)
+      // Without this, boot file sees "Already running" and doesn't start a new loop
+      await this.transport.send('SET MCP_DAEMON_RUNNING TO FALSE.', false);
+      await new Promise(resolve => setTimeout(resolve, 50));
+      // Now run the boot file - it will start a fresh daemon loop
+      await this.transport.send('RUNPATH("0:/boot/mcp_daemon.ks").', false);
+      // Brief pause to let daemon start before next command
+      await new Promise(resolve => setTimeout(resolve, 100));
+    } catch {
+      // Daemon restart is best-effort, don't fail the command
     }
   }
 

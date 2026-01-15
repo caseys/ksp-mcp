@@ -92,9 +92,21 @@ export class SocketTransport extends BaseTransport {
       throw new Error('Transport not initialized');
     }
 
+    // If clear requested, send Ctrl+C first and wait for daemon to stop
+    if (clear) {
+      await new Promise<void>((resolve, reject) => {
+        this.trace.logSend('\u0003');
+        this.socket!.write('\u0003', 'utf-8', (err) => {
+          if (err) reject(new Error(`Send Ctrl+C error: ${err.message}`));
+          else resolve();
+        });
+      });
+      // Wait for daemon to process Ctrl+C and exit
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+
     return new Promise((resolve, reject) => {
-      // Optionally prepend Ctrl+C to clear any stray input, then send command with newline
-      const payload = (clear ? '\u0003' : '') + data + '\r\n';
+      const payload = data + '\r\n';
       this.trace.logSend(payload);
       this.socket!.write(payload, 'utf-8', (err) => {
         if (err) {
