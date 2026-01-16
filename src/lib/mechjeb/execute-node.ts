@@ -1216,10 +1216,18 @@ export const executeNodeTool: ToolDefinition = {
         const encounterInfo = await queryTargetEncounterInfo(conn);
         if (encounterInfo && encounterInfo.targetType === 'body') {
           const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
-          if (peAlt < 10_000 && peAlt > 0) {
+          const atmHeight = encounterInfo.atmosphereHeight ?? 0;
+          const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+          const optimalMaxPe = minSafePe + 50_000;
+
+          if (peAlt < minSafePe && peAlt > 0) {
             text += `\nNext: course_correct to fix low periapsis`;
-          } else if (peAlt >= 10_000) {
+          } else if (peAlt <= optimalMaxPe) {
             text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+          } else if (peAlt <= 500_000) {
+            text += `\nNext: course_correct to tighten approach, or warp to SOI`;
+          } else {
+            text += `\nNext: course_correct to reduce periapsis before warping`;
           }
         } else if (!encounterInfo) {
           // No encounter - generic hint

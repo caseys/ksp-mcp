@@ -499,20 +499,37 @@ export const courseCorrectTool: ToolDefinition = {
         target = autoTarget ?? undefined;  // Never pass 'auto' to kOS
       }
 
-      // Check if already at target body - no course correction needed
+      // Validate target context before course correction
       if (target) {
-        const bodyCheck = await conn.execute(
-          `PRINT SHIP:BODY:NAME.`,
-          2000
-        );
-        const currentBody = bodyCheck.output.trim().split('\n').pop()?.trim() ?? '';
-        if (currentBody.toLowerCase() === target.toLowerCase()) {
-          // Already at target - get orbit info
-          const orbitInfo = await ctx.getBasicOrbitInfo(conn);
-          return ctx.successResponse('course_correct',
-            `Already at ${target}! No course correction needed.\n` +
-            `Orbit: Pe=${Math.round((orbitInfo?.periapsis ?? 0) / 1000)}km, Ap=${Math.round((orbitInfo?.apoapsis ?? 0) / 1000)}km`);
+        // Set target first to get proper info
+        const targetResult = await orchestrator.setTarget(target);
+        if (!targetResult.success) {
+          return ctx.errorResponse('course_correct', targetResult.error ?? `Failed to set target "${target}"`);
         }
+
+        const targetInfo = await getTargetValidationInfo(conn);
+        if (!targetInfo) {
+          return ctx.errorResponse('course_correct', `Target "${target}" not found`);
+        }
+
+        const bodyResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+        const currentBody = bodyResult.output.trim().split('\n').pop()?.trim() ?? '';
+
+        // Body targets: must NOT be in current SOI (we're transferring TO it)
+        if ((targetInfo.class === 'planet' || targetInfo.class === 'moon') && currentBody.toLowerCase() === target.toLowerCase()) {
+            const orbitInfo = await ctx.getBasicOrbitInfo(conn);
+            return ctx.successResponse('course_correct',
+              `Already at ${target}! No course correction needed.\n` +
+              `Orbit: Pe=${Math.round((orbitInfo?.periapsis ?? 0) / 1000)}km, Ap=${Math.round((orbitInfo?.apoapsis ?? 0) / 1000)}km`);
+          }
+
+        // Vessel targets: must be IN current SOI
+        if (targetInfo.class === 'vessel' && !targetInfo.isInShipSOI) {
+            return ctx.errorResponse('course_correct',
+              `Vessel "${target}" is not in your current SOI (${currentBody}).\n` +
+              `Course correction only works for vessels in the same sphere of influence.\n` +
+              `Use transfer or interplanetary_transfer to reach the target's SOI first.`);
+          }
       }
 
       let targetDistance = args.targetDistance as number;
@@ -596,6 +613,34 @@ export const courseCorrectTool: ToolDefinition = {
 
         if (!result.success) {
           return ctx.errorResponse('course_correct', result.error ?? 'Failed');
+        }
+
+        // Post-creation validation: reject invalid nodes
+        if (result.deltaV != null && result.deltaV < 0.1) {
+          // Node is essentially 0 m/s - no correction needed or invalid
+          await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+          return ctx.errorResponse('course_correct',
+            `Course correction node is 0 m/s - no adjustment needed or trajectory already optimal.\n` +
+            `Current trajectory may already be at target periapsis.`);
+        }
+
+        // Check if node is in current SOI (before any SOI transition)
+        if (result.timeToNode != null) {
+          const soiCheck = await conn.execute(
+            'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "SOI|" + ROUND(SHIP:ORBIT:NEXTPATCHETA). } ELSE { PRINT "NOSOI". }',
+            2000
+          );
+          const soiMatch = soiCheck.output.match(/SOI\|(\d+)/);
+          if (soiMatch) {
+            const timeToSOI = parseInt(soiMatch[1]);
+            if (result.timeToNode > timeToSOI) {
+              // Node is after SOI transition - invalid
+              await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+              return ctx.errorResponse('course_correct',
+                `Course correction node is scheduled after SOI transition (T-${formatTime(result.timeToNode)} vs SOI in ${formatTime(timeToSOI)}).\n` +
+                `Execute the transfer first, warp to SOI, then course correct.`);
+            }
+          }
         }
 
         if (!shouldExecute) {

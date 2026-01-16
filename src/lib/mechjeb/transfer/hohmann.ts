@@ -463,18 +463,29 @@ export const hohmannTransferTool: ToolDefinition = {
 
           text += `\nEncounter: ${finalEncounterInfo.targetName} at ${encPeKm}km`;
 
-          // CLEAR directive based on trajectory safety (must be above atmosphere + 40km, or 40km for airless)
+          // Guidance based on trajectory quality (must be above atmosphere + 40km, or 40km for airless)
+          // Optimal range: minSafe to minSafe+50km for efficient orbit insertion
+          const optimalMaxPe = finalMinSafePe + 50_000;
+
           if (peAlt < finalMinSafePe) {
-            // Unsafe trajectory - MUST fix before warping
+            // Unsafe trajectory - MUST fix before anything else
             const reason = finalAtmoHeight > 0
               ? `below safe altitude (atmo: ${(finalAtmoHeight / 1000).toFixed(0)}km)`
               : 'too low';
             text += ` - UNSAFE (${reason})!`;
-            text += `\nREQUIRED: Use course_correct to fix trajectory before doing anything else.`;
+            text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+          } else if (peAlt <= optimalMaxPe) {
+            // Optimal trajectory - good to go
+            text += ` (optimal)`;
+            text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+          } else if (peAlt <= 500_000) {
+            // Acceptable but could be tightened for efficiency
+            text += ` (acceptable)`;
+            text += `\nNext: Use course_correct to tighten approach to ~${(finalMinSafePe / 1000).toFixed(0)}km for efficient capture.`;
           } else {
-            // Safe trajectory - can proceed
-            text += ` (safe)`;
-            text += `\nNext: warp to ${finalEncounterInfo.targetName} SOI, then circularize`;
+            // Far approach - strongly recommend course_correct
+            text += ` (far)`;
+            text += `\nNext: Use course_correct to reduce periapsis to ~${(finalMinSafePe / 1000).toFixed(0)}km before proceeding.`;
           }
         } else if (result.closeApproach) {
           // Close approach without SOI encounter (common for low-gravity bodies like Minmus)

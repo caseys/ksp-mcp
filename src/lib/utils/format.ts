@@ -29,7 +29,8 @@ export function formatTime(seconds: number): string {
     // Scale the 30-second range [10,40] to [0,25]
     // Formula: (s - 10) * 25/30
     const adjusted = Math.ceil((s - 10) * (25 / 30));
-    if (adjusted < 1) {
+    if (adjusted <= 4) {
+      // Very small adjusted values look odd (e.g., "-1sec"), show countdown instead
       return '5... 4... 3...';
     }
     return `${sign}${adjusted}sec`;

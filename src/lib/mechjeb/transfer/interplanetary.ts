@@ -129,12 +129,26 @@ export const interplanetaryTransferTool: ToolDefinition = {
           const encPeKm = (peAlt / 1000).toFixed(0);
           text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km`;
 
-          if (peAlt < 10_000) {
-            text += ` - UNSAFE trajectory!`;
-            text += `\nREQUIRED: Use course_correct to fix trajectory before doing anything else.`;
+          // Use atmosphere-aware thresholds
+          const atmHeight = encounterInfo.atmosphereHeight ?? 0;
+          const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+          const optimalMaxPe = minSafePe + 50_000;
+
+          if (peAlt < minSafePe) {
+            const reason = atmHeight > 0
+              ? `below safe altitude (atmo: ${(atmHeight / 1000).toFixed(0)}km)`
+              : 'too low';
+            text += ` - UNSAFE (${reason})!`;
+            text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+          } else if (peAlt <= optimalMaxPe) {
+            text += ` (optimal)`;
+            text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+          } else if (peAlt <= 500_000) {
+            text += ` (acceptable)`;
+            text += `\nNext: Use course_correct to tighten approach to ~${(minSafePe / 1000).toFixed(0)}km for efficient capture.`;
           } else {
-            text += ` (safe)`;
-            text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+            text += ` (far)`;
+            text += `\nNext: Use course_correct to reduce periapsis to ~${(minSafePe / 1000).toFixed(0)}km before proceeding.`;
           }
         }
 
