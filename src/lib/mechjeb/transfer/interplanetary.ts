@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, queryTargetEncounterInfo, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
@@ -51,6 +51,42 @@ export async function interplanetaryTransfer(
   }
 
   const targetName = validation.targetInfo?.name ?? '';
+
+  // Check if we already have a transfer trajectory to the target
+  const encounterInfo = await queryTargetEncounterInfo(conn);
+  const hasExistingTransfer = validation.targetInfo?.hasEncounter &&
+      validation.targetInfo?.encounterBody?.toLowerCase() === targetName.toLowerCase();
+
+  if (hasExistingTransfer && encounterInfo?.targetType === 'body') {
+    const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+    const encPeKm = (peAlt / 1000).toFixed(0);
+    const atmHeight = encounterInfo.atmosphereHeight ?? 0;
+    const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+    const optimalMaxPe = minSafePe + 50_000;
+
+    // Build response with trajectory quality assessment
+    let text = `WARNING: Transfer to ${targetName} already in progress, no changes made.`;
+    text += `\nEncounter: ${targetName} at ${encPeKm}km`;
+
+    if (peAlt < minSafePe) {
+      const reason = atmHeight > 0
+        ? `below safe altitude (atmo: ${(atmHeight / 1000).toFixed(0)}km)`
+        : 'too low';
+      text += ` - UNSAFE (${reason})!`;
+      text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+    } else if (peAlt <= optimalMaxPe) {
+      text += ` (optimal)`;
+      text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+    } else if (peAlt <= 500_000) {
+      text += ` (acceptable)`;
+      text += `\nNext: Use course_correct to tighten approach to ~${(minSafePe / 1000).toFixed(0)}km for efficient capture.`;
+    } else {
+      text += ` (far)`;
+      text += `\nNext: Use course_correct to reduce periapsis to ~${(minSafePe / 1000).toFixed(0)}km before proceeding.`;
+    }
+
+    return { success: true, warning: text };
+  }
 
   if (waitForPhaseAngle) {
     log.progress(`[Transfer] Planning interplanetary transfer to ${targetName} (waiting for optimal phase angle)...`);

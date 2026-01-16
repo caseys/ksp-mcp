@@ -165,31 +165,73 @@ export async function hohmannTransfer(
 
   const targetName = validation.targetInfo?.name ?? '';
 
-  // Check if we already have an encounter with the target
-  if (validation.targetInfo?.hasEncounter &&
-      validation.targetInfo?.encounterBody?.toLowerCase() === targetName.toLowerCase()) {
+  // Check if target is current SOI body (can't transfer to where you already are)
+  const soiResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+  const currentSOI = soiResult.output.trim().split('\n').pop()?.trim() ?? '';
+  if (targetName.toLowerCase() === currentSOI.toLowerCase()) {
+    return {
+      success: false,
+      error: `Already orbiting ${targetName}! Cannot transfer to current SOI body.\n` +
+             `Use adjust_orbit or circularize to modify your current orbit.`
+    };
+  }
 
-    // Reuse existing helper to get encounter details
-    const encounterInfo = await queryTargetEncounterInfo(conn);
-    if (encounterInfo?.targetType === 'body') {
-      const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
-      const encPeKm = (peAlt / 1000).toFixed(0);
+  // Check if we already have a transfer trajectory to the target
+  const encounterInfo = await queryTargetEncounterInfo(conn);
+  const hasExistingTransfer = validation.targetInfo?.hasEncounter &&
+      validation.targetInfo?.encounterBody?.toLowerCase() === targetName.toLowerCase();
 
-      // Same advice pattern as post-transfer logic
-      if (peAlt < 10_000) {
-        return {
-          success: false,
-          error: `Already have encounter with ${targetName} at ${encPeKm}km - UNSAFE trajectory!\n` +
-                 `REQUIRED: Use course_correct to fix trajectory before doing anything else.`
-        };
-      } else {
-        return {
-          success: false,
-          error: `Already have encounter with ${targetName} at ${encPeKm}km (safe).\n` +
-                 `Next: warp to ${targetName} SOI, then circularize\n` +
-                 `Use course_correct if you need to adjust approach.`
-        };
-      }
+  if (hasExistingTransfer && encounterInfo?.targetType === 'body') {
+    const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
+    const encPeKm = (peAlt / 1000).toFixed(0);
+    const atmHeight = encounterInfo.atmosphereHeight ?? 0;
+    const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+    const optimalMaxPe = minSafePe + 50_000;
+
+    // Build response with trajectory quality assessment
+    let text = `WARNING: Transfer to ${targetName} already in progress, no changes made.`;
+    text += `\nEncounter: ${targetName} at ${encPeKm}km`;
+
+    if (peAlt < minSafePe) {
+      const reason = atmHeight > 0
+        ? `below safe altitude (atmo: ${(atmHeight / 1000).toFixed(0)}km)`
+        : 'too low';
+      text += ` - UNSAFE (${reason})!`;
+      text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+    } else if (peAlt <= optimalMaxPe) {
+      text += ` (optimal)`;
+      text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+    } else if (peAlt <= 500_000) {
+      text += ` (acceptable)`;
+      text += `\nNext: Use course_correct to tighten approach to ~${(minSafePe / 1000).toFixed(0)}km for efficient capture.`;
+    } else {
+      text += ` (far)`;
+      text += `\nNext: Use course_correct to reduce periapsis to ~${(minSafePe / 1000).toFixed(0)}km before proceeding.`;
+    }
+
+    return { success: true, warning: text };
+  }
+
+  // Check for close approach without SOI encounter (elliptical orbit reaching target plane)
+  if (!hasExistingTransfer && validation.targetInfo?.class === 'moon') {
+    const caCheck = await conn.execute(
+      'IF HASTARGET AND TARGET:TYPENAME = "Body" { ' +
+      'LOCAL tgtSma IS TARGET:ORBIT:SEMIMAJORAXIS. ' +
+      'LOCAL shipApo IS SHIP:APOAPSIS + SHIP:BODY:RADIUS. ' +
+      'IF shipApo >= tgtSma * 0.8 { PRINT "REACH|" + ROUND(shipApo) + "|" + ROUND(tgtSma). } ' +
+      'ELSE { PRINT "NOREACH". } } ELSE { PRINT "NOTGT". }',
+      3000
+    );
+    const reachMatch = caCheck.output.match(/REACH\|(\d+)\|(\d+)/);
+    if (reachMatch) {
+      const shipApo = parseInt(reachMatch[1]);
+      const tgtSma = parseInt(reachMatch[2]);
+      // Ship's apoapsis reaches target's orbital radius - likely already on transfer
+      return {
+        success: true,
+        warning: `WARNING: Current orbit (Ap: ${(shipApo / 1000).toFixed(0)}km) already reaches ${targetName} orbital plane (${(tgtSma / 1000).toFixed(0)}km), no changes made.\n` +
+                 `This may be a transfer orbit. Check trajectory and use course_correct if needed.`
+      };
     }
   }
 
