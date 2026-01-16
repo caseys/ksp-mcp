@@ -11,6 +11,7 @@ import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import { hasTarget } from '../../kos/target/index.js';
+import { clearNodes } from '../../kos/nodes.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
 import { formatTime,  fmtVel } from '../../utils/format.js';
@@ -43,6 +44,9 @@ export const inclinationTool: ToolDefinition = {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
       const logger = ctx.createLogger(extra);
+
+      // Clear any leftover nodes from failed operations
+      await clearNodes(conn);
 
       const targetArg = args.target as string | undefined;
       const angleArg = args.angle as number | 'auto' | undefined;

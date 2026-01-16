@@ -6,6 +6,7 @@ import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, formatResultingOrbit, type ManeuverResult } from '../shared.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
+import { clearNodes } from '../../kos/nodes.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
@@ -166,6 +167,9 @@ export const circularizeTool: ToolDefinition = {
     try {
       const conn = await ctx.ensureConnected();
       const logger = ctx.createLogger(extra);
+
+      // Clear any leftover nodes from failed operations
+      await clearNodes(conn);
 
       // Check if already circular - return early to prevent loop
       // Use both eccentricity AND altitude ratio to determine if circular
