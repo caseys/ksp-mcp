@@ -3,15 +3,43 @@
  */
 
 /**
- * Format seconds into human-readable time
- * Examples: "45 seconds", "2 minutes 30 seconds", "1 hours 15 minutes", "2 days 4 hours"
+ * Format seconds into human-readable time, adjusted for system latency.
+ *
+ * The system has ~10-15 seconds of latency in notifications, so we adjust
+ * displayed times to be more meaningful to consumers:
+ * - Times < 10s: Show "progress..." (already happening)
+ * - Times 10-40s: Scaled subtraction (10s→0, 40s→25s)
+ * - Times > 40s: Pass through unchanged
+ *
+ * Examples:
+ *   5 → "progress..."
+ *   15 → "5sec"
+ *   40 → "25sec"
+ *   120 → "2min 0sec" (unchanged)
  */
 export function formatTime(seconds: number): string {
   const s = Math.abs(seconds);
-  if (s < 60) return `${s.toFixed(0)}sec`;
-  if (s < 3600) return `${Math.floor(s / 60)}min ${Math.floor(s % 60)}sec`;
-  if (s < 86_400) return `${Math.floor(s / 3600)}hrs ${Math.floor((s % 3600) / 60)}min`;
-  return `${Math.floor(s / 86_400)}days ${Math.floor((s % 86_400) / 3600)}hrs`;
+  const sign = seconds < 0 ? '-' : '';
+
+  // Apply latency adjustment for short times only
+  if (s < 10) {
+    // Imminent - already in progress
+    return 'progress...';
+  } else if (s <= 40) {
+    // Scale the 30-second range [10,40] to [0,25]
+    // Formula: (s - 10) * 25/30
+    const adjusted = Math.ceil((s - 10) * (25 / 30));
+    if (adjusted < 1) {
+      return '5... 4... 3...';
+    }
+    return `${sign}${adjusted}sec`;
+  }
+
+  // Times > 40s: pass through unchanged (original formatting)
+  if (s < 60) return `${sign}${s.toFixed(0)}sec`;
+  if (s < 3600) return `${sign}${Math.floor(s / 60)}min ${Math.floor(s % 60)}sec`;
+  if (s < 86_400) return `${sign}${Math.floor(s / 3600)}hrs ${Math.floor((s % 3600) / 60)}min`;
+  return `${sign}${Math.floor(s / 86_400)}days ${Math.floor((s % 86_400) / 3600)}hrs`;
 }
 
 /**
