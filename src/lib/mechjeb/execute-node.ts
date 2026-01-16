@@ -381,20 +381,6 @@ const SKIP_ROLL_THRESHOLD = 110; // degrees - skip roll alignment if angle > thi
 const STEERING_RESET_TRIGGER_TIME = 5000; // ms - unlock and re-lock steering if still stuck
 
 /**
- * Format executor state for display.
- * MechJeb states: WARPALIGN, LEAD, BURN, IDLE
- */
-function formatExecutorState(state: string): string {
-  switch (state.toUpperCase()) {
-    case 'WARPALIGN': return 'Checking heading';
-    case 'LEAD': return 'Coasting to burn';
-    case 'BURN': return 'Burning';
-    case 'IDLE': return 'Idle';
-    default: return state;
-  }
-}
-
-/**
  * Align ship to maneuver node using two-pass steering for faster, cleaner alignment.
  *
  * Two-pass approach:
@@ -420,9 +406,8 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
     return false;
   }
 
-  // Check initial angle
+  // Check initial angle (determines if we do roll alignment first)
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-  log.progress(`${logPrefix} Align: initial angle ${fmtNum(initialAngle)}°`);
 
   // If noRcs mode, ensure RCS is off to prevent trajectory changes during alignment
   if (noRcs) {
@@ -468,7 +453,6 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   // Skip roll alignment if we need to turn > 110° - just point at target directly
   if (initialAngle <= SKIP_ROLL_THRESHOLD) {
     // Rotate around forward axis to set target roll, without changing pitch/yaw
-    log.progress(`${logPrefix} Pass 1: Aligning roll...`);
 
     // IMPORTANT: Capture forward vector ONCE to prevent drift during roll adjustment
     const pass1Script = `
@@ -512,7 +496,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
       context: 'AlignRoll',
       connection: conn,
       onPoll: async (s) => {
-        log.progress(`${logPrefix} Roll: ${fmtNum(s.angle)}°`);
+        // Silent roll alignment - just track progress
         if (s.angle < pass1LastAngle - 0.5) {
           _pass1NoProgress = Date.now();
           pass1LastAngle = s.angle;
@@ -524,13 +508,27 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
       },
     });
   } else {
-    log.progress(`${logPrefix} Skipping roll alignment (${fmtNum(initialAngle)}° > ${SKIP_ROLL_THRESHOLD}°)`);
+    // Large angle - skip roll alignment, just point directly at target
     await conn.execute('SAS OFF.', 2000);
   }
 
   // ========== PASS 2: PITCH/YAW ALIGNMENT ==========
   // Point to burn vector while maintaining current topvector (preserves roll)
-  log.progress(`${logPrefix} Pass 2: Aligning pitch/yaw...`);
+  log.progress(`${logPrefix} Aligning to burn vector...`);
+
+  // Query actual angle at start of pass 2 (may differ from initialAngle after roll alignment)
+  const pass2StartAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+
+  // Enable physics warp BEFORE locking steering - only for large angles (>60°)
+  // This speeds up alignment without constant warp adjustments interfering with steering
+  const WARP_THRESHOLD = 60;
+  const usePhysicsWarp = pass2StartAngle > WARP_THRESHOLD;
+  if (usePhysicsWarp) {
+    try {
+      await conn.execute('SET WARPMODE TO "PHYSICS". SET WARP TO 2.');
+      log.info(`${logPrefix} Physics warp enabled for large angle (${fmtNum(pass2StartAngle)}°)`);
+    } catch { /* ignore warp errors */ }
+  }
 
   // Use LOCK STEERING with roll preservation as primary method
   // IMPORTANT: Capture topvector ONCE to avoid instability from continuously reading a moving value
@@ -561,11 +559,21 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
     context: 'AlignPitchYaw',
     connection: conn,
     onPoll: async (s) => {
-      log.progress(`${logPrefix} Pitch/Yaw: ${fmtNum(s.angle)}°`);
+      // Stop physics warp when getting close to aligned (< 30°)
+      if (usePhysicsWarp && s.angle < 30) {
+        try { await conn.execute('SET WARP TO 0.'); } catch { /* ignore */ }
+      }
 
       if (s.aligned) {
-        log.progress(`${logPrefix} Aligned! (${fmtNum(s.angle)}°)`);
+        log.progress(`${logPrefix} Aligned (${fmtNum(s.angle)}°)`);
         return;
+      }
+
+      // Log progress only for significant angle changes (every ~20°) or every 5 seconds
+      const angleChanged = pass2LastAngle - s.angle >= 20;
+      const timeElapsed = Date.now() - pass2NoProgress >= 5000;
+      if (angleChanged || timeElapsed) {
+        log.progress(`${logPrefix} Aligning: ${fmtNum(s.angle)}° to go`);
       }
 
       // Warn if alignment is taking a long time (but don't fail)
@@ -619,7 +627,10 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
     },
   });
 
-  // Always unlock steering and disable SAS when done (MechJeb will take over)
+  // Always unlock steering, disable SAS, and stop warp when done (MechJeb will take over)
+  try {
+    await conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".');
+  } catch { /* ignore warp errors */ }
   try {
     if (usingSasMode) {
       await conn.execute('SAS OFF.');
@@ -642,10 +653,9 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
     // Ignore errors during cleanup
   }
 
-  // Final verification
+  // Final verification (silent - already logged "Aligned" in onPoll)
   try {
     const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-    log.progress(`${logPrefix} Align complete: ${fmtNum(finalAngle)}°, aligned: ${pass2Result.success}`);
     return finalAngle < ALIGN_THRESHOLD;
   } catch {
     // If we can't verify, trust the poll result
@@ -727,10 +737,8 @@ export async function executeNode(
   // Determine if staging will be needed during burn
   const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
   if (needsStaging) {
-    log.progress(`${logPrefix} Current stage: ${fmtVel(dvCurrentStage)}, (staging will be automated)`);
+    log.progress(`${logPrefix} Multi-stage burn (staging automated)`);
     await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
-  } else {
-    log.progress(`${logPrefix} staging not required`);
   }
 
   // Get estimated burn duration from MechJeb INFO wrapper
@@ -740,9 +748,6 @@ export async function executeNode(
   // For small burns (< 10 m/s), skip RCS during alignment as it would affect trajectory more than the burn
   const skipRcsForSmallBurn = dvRequired < 10;
   const useNoRcs = noRcsAlign || skipRcsForSmallBurn;
-  if (skipRcsForSmallBurn) {
-    log.progress(`${logPrefix} Small burn (${fmtVel(dvRequired)}), skipping RCS during alignment`);
-  }
 
   // Best-effort alignment before warp - MechJeb will handle final alignment
   // We don't fail on alignment issues since MechJeb's executor has its own alignment phase
@@ -758,7 +763,6 @@ export async function executeNode(
   // For small burns, limit engine thrust to prevent overshooting
   let thrustWasLimited = false;
   if (dvRequired < SMALL_BURN_THRESHOLD) {
-    log.progress(`${logPrefix} Small burn (${fmtVel(dvRequired)}), limiting thrust to ${SMALL_BURN_THRUST_LIMIT}%`);
     await limitEngineThrust(conn, SMALL_BURN_THRUST_LIMIT, log);
     thrustWasLimited = true;
   }
@@ -768,7 +772,6 @@ export async function executeNode(
   // MechJeb runs on the vessel autonomously once enabled
   await stopWarp(conn);
   await conn.execute('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
-  log.progress(`${logPrefix} MechJeb executor enabled`);
 
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
@@ -825,17 +828,17 @@ export async function executeNode(
 
   for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     lastAttempt = attempt;
-    log.progress(`${logPrefix} Attempt ${attempt} of ${MAX_RETRIES}`);
 
-    // For retries (attempt > 1), re-enable MechJeb
+    // For retries (attempt > 1), re-enable MechJeb and log retry
     // First attempt already enabled it before warp
     if (attempt > 1) {
+      log.progress(`${logPrefix} Retry attempt ${attempt}/${MAX_RETRIES}`);
       try {
         await stopWarp(conn);
         await conn.execute('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
       } catch {
         // May be in blackout - MechJeb will continue executing autonomously
-        log.progress(`${logPrefix} No signal - MechJeb executing autonomously`);
+        log.progress(`${logPrefix} No signal - executing autonomously`);
       }
     }
 
@@ -915,25 +918,39 @@ export async function executeNode(
       onPoll: async (state) => {
         if (state.noNode) return;
 
-        // Log status changes using MechJeb's state (like ascent.ts pattern)
         const now = Date.now();
-        const status = formatExecutorState(state.executorState);
+        const execState = state.executorState.toUpperCase();
 
-        // Format status message based on state
-        // LEAD (coasting): show time until burn
-        // BURN: show dV remaining
-        const isCoasting = state.executorState.toUpperCase() === 'LEAD';
-        const statusDetail = isCoasting
-          ? `in ${formatTime(state.nodeEta)}`
-          : `with ${fmtVel(state.dvRemaining)} remaining`;
+        // Space-themed status messages based on MechJeb executor state
+        let statusMsg: string;
+        switch (execState) {
+        case 'LEAD': {
+          statusMsg = `T-${formatTime(state.nodeEta)} to ignition`;
+        
+        break;
+        }
+        case 'BURN': {
+          statusMsg = `Burn: ${fmtVel(state.dvRemaining)} to go`;
+        
+        break;
+        }
+        case 'WARPALIGN': {
+          statusMsg = 'Final alignment check';
+        
+        break;
+        }
+        default: {
+          statusMsg = execState.toLowerCase();
+        }
+        }
 
-        if (status !== lastStatus) {
-          log.progress(`${logPrefix} ${status}, ${statusDetail}`);
-          lastStatus = status;
+        if (execState !== lastStatus) {
+          log.progress(`${logPrefix} ${statusMsg}`);
+          lastStatus = execState;
           lastLogTime = now;
         } else if (now - lastLogTime >= 20_000) {
           // Log progress every 20 seconds at least
-          log.progress(`${logPrefix} ${status}, ${statusDetail}`);
+          log.progress(`${logPrefix} ${statusMsg}`);
           lastLogTime = now;
         }
 
@@ -951,11 +968,11 @@ export async function executeNode(
 
       if (state.noNode || state.burnComplete) {
         await stopWarp(conn);
-        // Log completion - either burn finished normally or node was consumed
-        if (state.burnComplete) {
-          log.progress(`${logPrefix} Burn complete! (${fmtVel(state.dvRemaining)} remaining)`);
-        } else if (state.noNode) {
-          log.progress(`${logPrefix} Burn complete (node consumed)`);
+        // Log completion - show residual dV only if significant (> 0.5 m/s)
+        if (state.dvRemaining > 0.5) {
+          log.progress(`${logPrefix} Burn complete (${fmtVel(state.dvRemaining)} residual)`);
+        } else {
+          log.progress(`${logPrefix} Burn complete`);
         }
         // Clear any residual node to avoid "No maneuver nodes present!" errors
         await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);

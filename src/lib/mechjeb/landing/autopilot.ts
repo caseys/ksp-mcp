@@ -331,7 +331,21 @@ async function monitorLanding(
 
   const log = logger ?? nullLogger;
   let lastStatusText = '';
+  let lastLoggedSpeed = 0;
+  let lastLoggedAlt = 0;
+  let descentLogCount = 0;
   let consecutiveDisabledCount = 0;
+
+  // Check atmosphere once at start - physics warp only on vacuum bodies
+  let hasAtmosphere = false;
+  try {
+    const atmCheck = await conn.execute('PRINT SHIP:BODY:ATM:EXISTS.', 2000);
+    hasAtmosphere = atmCheck.output.includes('True');
+  } catch { /* assume no atmosphere */ }
+
+  // Track braking progress for progressive warp
+  let initialBrakingSpeed = 0;
+  let currentWarpLevel = 0;
 
   const result = await pollWithBlackoutResilience<LandingPollState>({
     poll: async () => {
@@ -373,24 +387,117 @@ async function monitorLanding(
     context: 'Landing',
     connection: conn,
 
-    onPoll: (state) => {
-      // Log progress if status changed
-      if (state.status.status !== lastStatusText) {
-        lastStatusText = state.status.status;
-        let statusText;
-        if (/Coasting toward deceleration/.test(state.status.status)) {
-           //conn.execute(`SET WARP TO +1.`);
-          statusText = 'Coasting toward deceleration burn';
-        } else if (/Warping to start of braking burn/.test(state.status.status)) {
-          //conn.execute(`SET WARP TO +1.`);          
-        } else if (state.status.status === 'Off') {
-          statusText = 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.';
-        } else {
-            statusText = state.status.status;
+    onPoll: async (state) => {
+      const rawStatus = state.status.status;
+
+      // Parse braking speed from status like "Braking: target speed = 155 m/s"
+      const brakingMatch = rawStatus.match(/Braking.*?(\d+)/);
+      if (brakingMatch) {
+        const speed = parseInt(brakingMatch[1]);
+
+        // Track initial braking speed for progress calculation
+        if (initialBrakingSpeed === 0 && speed > 0) {
+          initialBrakingSpeed = speed;
         }
-        log.progress(`[Landing] ${statusText}`);
+
+        // Only log every 30 m/s change to reduce verbosity
+        if (lastLoggedSpeed === 0 || lastLoggedSpeed - speed >= 30) {
+          log.progress(`[Landing] Braking: ${speed}_m/sec`);
+          lastLoggedSpeed = speed;
+        }
+
+        // Progressive physics warp - only on bodies WITHOUT atmosphere
+        if (!hasAtmosphere && initialBrakingSpeed > 0) {
+          // Calculate progress: 0 = just started, 1 = done
+          const progress = 1 - (speed / initialBrakingSpeed);
+          let targetWarp: number;
+          if (progress < 0.5) {
+            // First half: ramp up (0->0.5 maps to warp 0->3)
+            targetWarp = Math.min(3, Math.floor(progress * 6));
+          } else {
+            // Second half: ramp down (0.5->1.0 maps to warp 3->0)
+            targetWarp = Math.max(0, Math.floor((1 - progress) * 6));
+          }
+          if (targetWarp !== currentWarpLevel) {
+            try {
+              await conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO ${targetWarp}.`);
+              currentWarpLevel = targetWarp;
+            } catch { /* ignore */ }
+          }
+        }
+        return;
       }
-      //conn.execute(`SET WARP TO +1.`);
+
+      // Parse final descent altitude from status like "Final descent: 200m above terrain"
+      const descentMatch = rawStatus.match(/Final descent.*?(\d+)/);
+      if (descentMatch) {
+        const alt = parseInt(descentMatch[1]);
+        // Reduce warp when getting close, only log at key altitudes
+        if (alt < 100 && currentWarpLevel > 0) {
+          try {
+            await conn.execute('SET WARP TO 0.');
+            currentWarpLevel = 0;
+          } catch { /* ignore */ }
+        }
+        // Only log every 50m change or at key altitudes
+        if (lastLoggedAlt === 0 || lastLoggedAlt - alt >= 50 || alt <= 20) {
+          descentLogCount++;
+          // Every other log, include descent rate
+          if (descentLogCount % 2 === 0) {
+            try {
+              const vsResult = await conn.execute('PRINT ROUND(-SHIP:VERTICALSPEED, 1).', 2000);
+              const vs = parseFloat(vsResult.output.match(/([\d.]+)/)?.[1] ?? '0');
+              log.progress(`[Landing] Final descent: ${alt}m, down at ${Math.round(vs)}_m/sec`);
+            } catch {
+              log.progress(`[Landing] Final descent: ${alt}m`);
+            }
+          } else {
+            log.progress(`[Landing] Final descent: ${alt}m`);
+          }
+          lastLoggedAlt = alt;
+        }
+        return;
+      }
+
+      // Stop warp when status changes to something other than braking/descent
+      if (lastLoggedSpeed > 0 || lastLoggedAlt > 0) {
+        // Ensure warp is fully stopped before switching back to RAILS
+        try {
+          await conn.execute('SET WARP TO 0.');
+          await conn.execute('SET WARPMODE TO "RAILS".');
+          currentWarpLevel = 0;
+        } catch { /* ignore */ }
+        lastLoggedSpeed = 0;
+        lastLoggedAlt = 0;
+        initialBrakingSpeed = 0; // Reset for next braking phase
+      }
+
+      // Log other status changes (not braking/descent)
+      if (rawStatus !== lastStatusText) {
+        lastStatusText = rawStatus;
+
+        // Map raw status to cleaner messages
+        let statusText: string | undefined;
+        if (/Coasting toward deceleration/.test(rawStatus)) {
+          statusText = 'Coasting toward deceleration burn';
+        } else if (/Warping to start of braking burn/.test(rawStatus)) {
+          // Silent - warp in progress
+        } else if (rawStatus === 'Off') {
+          statusText = 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.';
+        } else if (/course correction/i.test(rawStatus)) {
+          // Filter out "0 m/s" corrections
+          const dvMatch = rawStatus.match(/(\d+)/);
+          if (dvMatch && parseInt(dvMatch[1]) > 0) {
+            statusText = rawStatus;
+          }
+        } else {
+          statusText = rawStatus;
+        }
+
+        if (statusText) {
+          log.progress(`[Landing] ${statusText}`);
+        }
+      }
 
       // Log touchdown
       if (state.isLanded) {
@@ -558,8 +665,7 @@ export const landTool: ToolDefinition = {
         logger.progress(`[Landing] Landing without circularization - this is risky!`);
         // Continue with landing
       } else {
-        // Stable orbit - normal landing
-        logger.progress(`[Landing] Stable orbit confirmed`);
+        // Stable orbit - normal landing (message deferred until after orbit adjustments)
       }
 
       // Step 0.7: Lower orbit if too high for efficient landing
@@ -604,14 +710,15 @@ export const landTool: ToolDefinition = {
           if (!apResult.success) {
             // Non-fatal - we can land from elliptical orbit
             logger.info(`[Landing] Could not circularize, proceeding with elliptical orbit`);
-          } else {
-            logger.progress(`[Landing] Now at landing orbit, proceeding...`);
           }
 
           // Cleanup after orbit lowering: stop warp and unlock controls
           // MechJeb node executor may have left warp or steering engaged
           await conn.execute('SET WARP TO 0. UNLOCK STEERING. UNLOCK THROTTLE. WAIT 0.5.', 5000);
         }
+
+        // Now in stable landing orbit
+        logger.progress('[Landing] Stable orbit confirmed');
       }
 
       // Step 0.8: Ensure radio contact before jettison and TWR calibration
@@ -622,7 +729,6 @@ export const landTool: ToolDefinition = {
       }
 
       // Step 0.8b: Scan vessel structure for landing legs and jettison transfer stage
-      logger.progress('[Landing] Scanning vessel structure...');
       const vesselScan = await scanVesselForLanding(conn);
 
       if (vesselScan.error) {
@@ -635,16 +741,14 @@ export const landTool: ToolDefinition = {
           'Vessel must have parts with ModuleLandingLeg, ModuleWheelDeployment, or ModuleWheelBase.');
       }
 
-      logger.progress('[Landing] Landing legs detected');
-
-      // Jettison stages below landing legs if decoupler found
+      // Jettison transfer stage below landing legs if decoupler found
       if (vesselScan.jettisonStage !== null) {
-        logger.progress(`[Landing] Jettisoning stage ${vesselScan.jettisonStage} (below landing legs)`);
+        logger.progress('[Landing] Separating lander from transfer stage...');
         const jettisonResult = await jettisonStage(conn, vesselScan.jettisonStage, logger);
         if (!jettisonResult.success) {
-          logger.warn(`[Landing] Jettison failed: ${jettisonResult.error}, continuing anyway`);
+          logger.warn(`[Landing] Separation failed: ${jettisonResult.error}, continuing anyway`);
         } else {
-          logger.progress('[Landing] Stage jettisoned successfully');
+          logger.progress('[Landing] Lander separated');
         }
       }
 
@@ -753,7 +857,8 @@ export const landTool: ToolDefinition = {
             targetLng = siteResult.longitude;
             const targetResult = await setLandingPositionTarget(conn, targetLat, targetLng);
             if (targetResult.success) {
-              logger.progress(`[Landing] Auto-selected: ${targetLat.toFixed(2)}°, ${targetLng.toFixed(2)}°`);
+              const elevStr = siteResult.altitude !== undefined ? fmtDist(siteResult.altitude) : '?';
+              logger.progress(`[Landing] Site selected: ${elevStr} elevation at ${targetLat.toFixed(2)}° by ${targetLng.toFixed(2)}°`);
               if (siteResult.relaxedRequirements) {
                 logger.info(`[Landing] Note: ${siteResult.relaxedRequirements}`);
               }

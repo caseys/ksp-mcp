@@ -367,7 +367,7 @@ async function warpToNode(
     };
   }
 
-  log.progress(`[Warp] Warping to node T-${formatTime(leadTime)} (ETA: ${formatTime(initialEta)})`);
+  log.progress(`[Warp] Helm, set course for maneuver node. T-${formatTime(initialEta)}... Engage!`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -383,11 +383,11 @@ async function warpToNode(
     logger: log,
     context: 'Warp',
     connection: conn,
-    onPoll: (eta) => log.progress(`[Warp] Node ETA: ${formatTime(eta)}`),
+    onPoll: (eta) => log.progress(`[Warp] ETA to maneuver: ${formatTime(eta)}`),
   });
 
   if (result.success) {
-    log.progress('[Warp] Node warp complete');
+    log.progress('[Warp] Dropping out of warp. Ready for maneuver, Captain.');
     return await getBasicStatus(conn);
   }
 
@@ -432,7 +432,9 @@ async function warpToSOI(
   const currentBody = await queryValue(conn, 'SHIP:BODY:NAME');
   const soiEta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
 
-  log.progress(`[Warp] Current body: ${currentBody}, SOI transition in ${formatTime(soiEta)}`);
+  // Get destination body name for the message
+  const destBody = await queryValue(conn, 'SHIP:ORBIT:NEXTPATCH:BODY:NAME');
+  log.progress(`[Warp] Leaving ${currentBody} orbit. Destination: ${destBody}. Warp in ${formatTime(soiEta)}... Engage!`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -442,18 +444,28 @@ async function warpToSOI(
   interface SOIPollState {
     body: string;
     eta: number | null;
+    nextBody: string | null;  // Body after next patch (for flyby detection)
   }
 
   const result = await pollWithBlackoutResilience<SOIPollState>({
     poll: async () => {
       const body = await queryValue(conn, 'SHIP:BODY:NAME');
       let eta: number | null = null;
+      let nextBody: string | null = null;
       try {
-        eta = Number.parseFloat(await queryValue(conn, 'SHIP:ORBIT:NEXTPATCHETA'));
+        const patchInfo = await conn.execute(
+          'IF SHIP:ORBIT:HASNEXTPATCH { PRINT ROUND(SHIP:ORBIT:NEXTPATCHETA) + "|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NONE". }',
+          3000
+        );
+        const match = patchInfo.output.match(/(\d+)\|(.+)/);
+        if (match) {
+          eta = Number.parseInt(match[1]);
+          nextBody = match[2].trim();
+        }
       } catch {
         // May not have ETA if already crossed or during blackout
       }
-      return { body, eta };
+      return { body, eta, nextBody };
     },
     isDone: (state) => state.body.toLowerCase() !== currentBody.toLowerCase(),
     isSuccess: (state) => state.body.toLowerCase() !== currentBody.toLowerCase(),
@@ -463,19 +475,24 @@ async function warpToSOI(
     context: 'Warp',
     connection: conn,
     onPoll: (state) => {
-      if (state.eta !== null && state.eta < 100_000) {
-        log.progress(`[Warp] S.O.I. ETA: ${formatTime(state.eta)}`);
+      // Check if we've crossed into the new SOI
+      const crossed = state.body.toLowerCase() !== currentBody.toLowerCase();
+
+      if (!crossed) {
+        // Still approaching destination
+        if (state.eta !== null && state.eta < 100_000) {
+          log.progress(`[Warp] Approaching destination... ETA ${formatTime(state.eta)}`);
+        }
+      } else if (state.eta !== null && state.nextBody) {
+        // Crossed into new SOI - eta now refers to exit trajectory
+        log.progress(`[Warp] Flyby trajectory - returns to ${state.nextBody} in ${formatTime(state.eta)}`);
       }
-      // Disabled: using env var control instead of kickstart pulses
-      // if (state.eta !== null && state.eta > 15_000) {
-      //   kickstartWarp(conn, log)
-      // }
     },
   });
 
   if (result.success && result.result) {
     const newBody = result.result.body;
-    log.progress(`[Warp] Crossed into ${newBody} S.O.I. Ciculrize to establish a safe orbit.`);
+    log.progress(`[Warp] Entering ${newBody} space. All stop. Circularize to establish standard orbit.`);
 
     // Stop warp and wait for KSP to settle
     await stopWarp(conn);
@@ -543,7 +560,8 @@ async function warpToOrbitalPoint(
     };
   }
 
-  log.progress(`[Warp] Warping to ${point.toLowerCase()} T-${formatTime(leadTime)} (ETA: ${formatTime(initialEta)})`);
+  const pointName = point === 'PERIAPSIS' ? 'periapsis' : 'apoapsis';
+  log.progress(`[Warp] Helm, lay in a course to ${pointName}. T-${formatTime(initialEta)}... Engage!`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -559,11 +577,11 @@ async function warpToOrbitalPoint(
     logger: log,
     context: 'Warp',
     connection: conn,
-    onPoll: (eta) => log.progress(`[Warp] ${point} ETA: ${formatTime(eta)}`),
+    onPoll: (eta) => log.progress(`[Warp] On approach... ${formatTime(eta)} to ${pointName}`),
   });
 
   if (result.success) {
-    log.progress(`[Warp] ${point.toLowerCase()} warp complete`);
+    log.progress(`[Warp] Arriving at ${pointName}. All stop.`);
     return await getBasicStatus(conn);
   }
 
@@ -590,12 +608,12 @@ async function getSOIStatus(conn: KosConnection, body: string, logger?: McpLogge
   const log = logger ?? nullLogger;
 
   const soiInfo = await conn.execute(
-    'PRINT "SOI:" + SHIP:BODY:NAME + "|" + ROUND(ALTITUDE) + "|" + ROUND(PERIAPSIS) + "|" + ROUND(SHIP:BODY:RADIUS).',
+    'PRINT "SOI:" + SHIP:BODY:NAME + "|" + ROUND(ALTITUDE) + "|" + ROUND(PERIAPSIS) + "|" + ROUND(SHIP:BODY:RADIUS) + "|" + ROUND(SHIP:ORBIT:ECCENTRICITY, 3).',
     5000
   );
 
   // Parse structured output
-  const soiMatch = soiInfo.output.match(/SOI:([^|]+)\|(-?\d+)\|(-?\d+)\|(\d+)/);
+  const soiMatch = soiInfo.output.match(/SOI:([^|]+)\|(-?\d+)\|(-?\d+)\|(\d+)\|([\d.]+)/);
   if (!soiMatch) {
     log.warn(`[Warp] SOI info parse failed: ${soiInfo.output}`);
     return { success: true, body, altitude: 0 };
@@ -605,8 +623,16 @@ async function getSOIStatus(conn: KosConnection, body: string, logger?: McpLogge
   const altitude = Number.parseInt(soiMatch[2]);
   const periapsis = Number.parseInt(soiMatch[3]);
   const bodyRadius = Number.parseInt(soiMatch[4]);
+  const eccentricity = Number.parseFloat(soiMatch[5]);
 
-  log.info(`[Warp] In ${newBody} SOI: alt=${fmtDist(altitude)}, pe=${fmtDist(periapsis)}`);
+  // Describe trajectory type accurately
+  if (periapsis < 0) {
+    log.info(`[Warp] ${newBody} encounter - IMPACT TRAJECTORY! Periapsis ${fmtDist(periapsis)}`);
+  } else if (eccentricity >= 1) {
+    log.info(`[Warp] ${newBody} flyby - hyperbolic trajectory. Periapsis ${fmtDist(periapsis)}`);
+  } else {
+    log.info(`[Warp] Captured by ${newBody}. Periapsis ${fmtDist(periapsis)}`);
+  }
 
   // Warn about crash trajectory (periapsis below surface) but don't auto-trigger avoidance
   // User can call crash_avoidance tool manually if needed
@@ -617,8 +643,16 @@ async function getSOIStatus(conn: KosConnection, body: string, logger?: McpLogge
       altitude,
       periapsis,
       bodyRadius,
-      warning: `⚠️ CRASH TRAJECTORY: Periapsis ${(periapsis / 1000).toFixed(1)}km below surface! Use crash_avoidance tool to escape.`,
+      warning: `⚠️ CRASH TRAJECTORY: Periapsis ${(periapsis / 1000).toFixed(1)}km below surface!\nNext: use crash_avoidance to escape.`,
     };
+  }
+
+  // Add Next guidance based on trajectory type
+  let warning: string | undefined;
+  if (eccentricity >= 1) {
+    warning = `Hyperbolic trajectory (ecc=${eccentricity.toFixed(2)})\nNext: circularize to capture into orbit`;
+  } else {
+    warning = `Next: circularize to establish stable orbit`;
   }
 
   return {
@@ -627,6 +661,7 @@ async function getSOIStatus(conn: KosConnection, body: string, logger?: McpLogge
     altitude,
     periapsis,
     bodyRadius,
+    warning,
   };
 }
 
@@ -663,7 +698,7 @@ export async function warpForward(
     };
   }
 
-  log.progress(`[Warp] Warping forward ${formatTime(seconds)}...`);
+  log.progress(`[Warp] Time warp engaged. Jumping ahead ${formatTime(seconds)}...`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -683,11 +718,11 @@ export async function warpForward(
     logger: log,
     context: 'Warp',
     connection: conn,
-    onPoll: (warpLevel) => log.progress(`[Warp] Warp level: ${warpLevel}`),
+    onPoll: (warpLevel) => log.progress(`[Warp] Warp factor ${warpLevel}...`),
   });
 
   if (result.success) {
-    log.progress('[Warp] Forward warp complete');
+    log.progress('[Warp] Time jump complete. Resuming normal space.');
     return await getBasicStatus(conn);
   }
 
@@ -739,10 +774,10 @@ export const warpTool: ToolDefinition = {
         // Check for maneuver node first
         if (trajInfo.hasNode) {
           target = 'node';
-          logger.info('[Warp] Auto-detected: warping to maneuver node');
+          logger.info('[Warp] Computer recommends: course to maneuver node');
         } else if (trajInfo.hasSOIChange) {
           target = 'soi';
-          logger.info('[Warp] Auto-detected: warping to SOI change');
+          logger.info('[Warp] Computer recommends: course to planetary encounter');
         } else {
           return ctx.errorResponse('warp', 'No maneuver node or SOI change found. Specify target: "periapsis", "apoapsis", or seconds to warp forward.');
         }

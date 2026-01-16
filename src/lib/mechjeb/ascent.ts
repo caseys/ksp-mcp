@@ -223,7 +223,7 @@ async function resolveSmartLaunchParams(
       inclination: targetOrbit.inclination,
       launchMode: 'plane',
       target: targetInfo.name,
-      strategyMessage: `Matching planes with ${targetInfo.name} at ${targetOrbit.inclination.toFixed(1)}°`
+      strategyMessage: `Warping to match planes with ${targetInfo.name} at ${targetOrbit.inclination.toFixed(0)}deg`
     };
   }
 
@@ -478,18 +478,30 @@ export class AscentHandle {
       connection: this.conn,
 
       onPoll: async (state) => {
-        // Log status changes (skip 'Off' - completion is logged after potential auto-fix)
         const now = Date.now();
-        //this.conn.execute(`SET WARP TO +1.`);
-        if (!state?.status) {
-          this.logger.progress(`[Ascent] no status`);
-        } else if (state.status === 'Off') {
-          //this.logger.progress(`[Ascent] primary ascent burn complete.`);
+        const statusChanged = state?.status !== lastStatus;
+        if (now - lastLogTime < 15_000 && !statusChanged) {
+          return;
+        }
+        lastLogTime = now;
+        lastStatus = state?.status;
+        let newStatus;
+
+        if (state.status === 'Off') {
+          return;
         } else if ((state.status).includes('Awaiting liftoff')) {
-          this.logger.progress(`[Ascent] LAUNCH! LAUNCH!`);
-        } else if ((state.status).includes('Vertical ascent')) {
-          this.logger.progress(`[Ascent] Roll program: ${this.turnRoll} degrees`);
+          newStatus = "[Ascent] We have liftoff. Pad cleared"
+        } else if ((state.status).includes('Vertical ascent') && statusChanged) {
+          if (this.turnRoll !== 0) {
+            newStatus=`[Ascent] Roll program: ${this.turnRoll}deg`;
+          }
+        } else if ((state.status).includes('Gravity turn') && statusChanged) {
+          newStatus=`[Ascent] Pitching over at ${formatOrbit(state.apoapsis, state.periapsis)}`;
+        } else if ((state.status).includes('Coast to edge') && statusChanged) {
+          // MECO before coast - stop physics warp, switch to rails
+          newStatus=`[Ascent] MECO at ${formatOrbit(state.apoapsis, state.periapsis)}`;
         } else if ((state.status).includes('Coasting to circularization burn')) {
+          try { await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".'); } catch { /* ignore */ }
           // Warp to circularization burn (only once)
           if (!hasWarpedToCirc && config.warp.onRails) {
             hasWarpedToCirc = true;
@@ -499,28 +511,27 @@ export class AscentHandle {
               const nodeEta = Number.parseFloat(etaResult.output.match(/([\d.]+)/)?.[1] ?? '0');
               if (nodeEta > 30) {
                 const warpTarget = nodeEta - 15;
-                this.logger.progress(`[Ascent] Warping to circularization burn (T-${Math.round(nodeEta)}s)`);
+                newStatus=`[Ascent] Circularizing in T-${formatTime(nodeEta)}`;
                 await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
                 await delay(500);
                 await this.conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
+                newStatus=`[Ascent] Warping to burn (T-${formatTime(warpTarget)})`;
               } else {
-                this.logger.progress(`[Ascent] Coasting to circularization burn`);
+                // Short time to burn - ensure we're in rails mode
+                await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
+                newStatus=`[Ascent] Circularizing in T-${formatTime(nodeEta)}`;
               }
             } catch {
-              this.logger.progress(`[Ascent] Coasting to circularization burn`);
+              newStatus=`[Ascent] Coasting to circularization`;
             }
+          } else  {
+            newStatus=`[Ascent] Circularizing at ${formatOrbit(state.apoapsis, state.periapsis)}`;
           }
-        } else if (state?.status && state.status !== lastStatus) {
-          this.logger.progress(`[Ascent] ${formatMeasurements(state.status)} at ${formatOrbit(state.apoapsis, state.periapsis)}`);
+        } else {
+          newStatus = `[Ascent] ${formatMeasurements(state.status)} at ${formatOrbit(state.apoapsis, state.periapsis)}`;
         }
-        lastStatus = state?.status;
-        lastLogTime = now;
 
-        // Log progress every 20 seconds at least
-        if (now - lastLogTime >= 20_000) {
-          this.logger.progress(`[Ascent] at ${formatOrbit(state.apoapsis, state.periapsis)}`);
-          lastLogTime = now;
-        }
+        if (newStatus) this.logger.progress(newStatus);
       },
     });
 
@@ -546,7 +557,7 @@ export class AscentHandle {
           const fixResult = await orchestrator.changeEccentricity(0, 'X_FROM_NOW', {
             execute: true,
             logger: this.logger,
-            callerTool: 'fine_tuninng_orbit',
+            callerTool: 'fine_tune_orbit',
             xFromNowSeconds: 15,  // Create node 15 seconds from now
           });
 
@@ -849,7 +860,10 @@ export class AscentProgram {
 
     // Verify roll settings were applied
     const rollCheck = await this.conn.execute('PRINT "ROLL|" + ADDONS:MJ:ASCENT:FORCEROLL + "|" + ADDONS:MJ:ASCENT:TURNROLL.');
-    this.logger.progress(`[Ascent] Configuring ascent alignment: ${rollCheck.output.trim()}`);
+    const rollMatch = rollCheck.output.match(/ROLL\|(\w+)\|(\d+)/);
+    if (rollMatch && rollMatch[1] === 'True') {
+      this.logger.info(`[Ascent] Roll guidance: ${rollMatch[2]}deg`);
+    }
 
     // Let MechJeb process the configuration
     await delay(500);
@@ -858,18 +872,16 @@ export class AscentProgram {
     // For normal orbit mode, use our staged launch
     if (launchMode === 'plane' || launchMode === 'rendezvous') {
       // Enable autopilot and start countdown - MechJeb will warp to launch window
-      this.logger.progress(`[Ascent] Enabling ascent autopilot for ${launchMode} mode...`);
-      const enableResult = await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE. PRINT ADDONS:MJ:ASCENT:ENABLED.');
-      this.logger.info(`[Ascent] Enable result: ${enableResult.output}`);
+      await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
       await delay(500);
 
-      const countdownResult = await this.conn.execute('PRINT ADDONS:MJ:ASCENT:STARTCOUNTDOWN(TIME:SECONDS + 999999).');
-      this.logger.info(`[Ascent] Countdown result: ${countdownResult.output}`);
+      await this.conn.execute('PRINT ADDONS:MJ:ASCENT:STARTCOUNTDOWN(TIME:SECONDS + 999999).');
       await delay(1000);
 
       // Wait for MechJeb to warp to window and launch
       let launched = false;
       let wasWarping = false;
+      let countdownLogged = false;
       for (let i = 0; i < 600; i++) {
         const statusResult = await this.conn.execute('PRINT SHIP:STATUS + "|" + WARP.');
         const parts = statusResult.output.split('|');
@@ -881,14 +893,19 @@ export class AscentProgram {
           break;
         }
 
-        // Track warp state and stage when warp completes (if MechJeb doesn't)
+        // Track warp state
         if (warpLevel > 0 && !wasWarping) {
-          this.logger.progress('[Ascent] Warping to launch window...');
           wasWarping = true;
         } else if (warpLevel === 0 && wasWarping) {
+          // Warp ended - log countdown and stage if needed
           wasWarping = false;
-          // Give MechJeb a few seconds to launch on its own
-          await delay(3000);
+          if (!countdownLogged) {
+            this.logger.progress('[Ascent] 5... 4... 3...');
+            await delay(3000);
+            countdownLogged = true;
+          }
+          // Give MechJeb a moment to launch on its own
+          await delay(1000);
           const checkStatus = await this.conn.execute('PRINT SHIP:STATUS.');
           if (checkStatus.output.toLowerCase().includes('prelaunch')) {
             // Still on pad - stage manually
@@ -914,7 +931,6 @@ export class AscentProgram {
           const verifyResult = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
           if (verifyResult.output.toLowerCase().includes('true')) {
             autopilotEngaged = true;
-            this.logger.progress('[Ascent] Autopilot engaged');
             break;
           }
           if (verifyResult.output.toLowerCase().includes('false')) {
@@ -924,7 +940,7 @@ export class AscentProgram {
         }
 
         if (autopilotEngaged) break;
-        this.logger.progress(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
+        this.logger.info(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
         await delay(300);
       }
 
@@ -943,11 +959,11 @@ export class AscentProgram {
       const shipStatus = statusResult.output.toLowerCase();
 
       if (shipStatus.includes('prelaunch')) {
+        // Launch countdown
+        this.logger.progress('[Ascent] 5... 4... 3...');
+        await delay(3000);
         await this.conn.execute('STAGE.');
         await delay(500);
-        this.logger.progress('[Ascent] STAGED TO LAUNCH');
-      } else {
-        this.logger.progress('[Ascent] LAUNCH');
       }
     }
   

@@ -3,6 +3,12 @@
  *
  * Shared helper for executing maneuvers with optional target setting and node execution.
  * Used by MCP server, CLI scripts, and tests to get consistent behavior.
+ *
+ * ARCHITECTURE NOTE: Keep this file thin!
+ * - This file is for shared execution patterns (target setting, node execution, validation)
+ * - Tool-specific logic and messages belong in the tool handler files (src/lib/mechjeb/transfer/*, etc.)
+ * - Error messages here should be minimal; tool handlers add "Next:" guidance
+ * - If you're adding tool-specific behavior, put it in the tool file instead
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
@@ -402,7 +408,7 @@ export class ManeuverOrchestrator {
       return {
         ...result,
         warning: `⚠️ Post-burn encounter is with ${trajectoryCheck.encounterBody}, not ${targetName}.\n` +
-                 'Burn execution may have been imprecise. Consider course correction.',
+                 'Next: use course_correct to refine trajectory',
       };
     }
 
@@ -410,10 +416,8 @@ export class ManeuverOrchestrator {
     if (trajectoryCheck.isCloseApproach) {
       return {
         ...result,
-        warning: `⚠️ Close approach created (no SOI encounter after burn).\n` +
-                 `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
-                 `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
-                 `A course_correct burn is recommended.`,
+        warning: `Close approach: ${(trajectoryCheck.separation / 1000).toFixed(0)}km (no SOI encounter yet)\n` +
+                 'Next: use course_correct to refine trajectory and achieve encounter',
       };
     }
 
@@ -421,9 +425,9 @@ export class ManeuverOrchestrator {
     return {
       ...result,
       success: false,
-      error: `❌ Burn executed but trajectory does not reach target!\n` +
-             `Predicted separation: ${trajectoryCheck.separation > 0 ? (trajectoryCheck.separation / 1000).toFixed(0) + ' km' : 'unknown'}\n` +
-             'Burn may have been severely off-target. Manual intervention required.',
+      error: `Burn executed but trajectory does not reach target.\n` +
+             `Separation: ${trajectoryCheck.separation > 0 ? (trajectoryCheck.separation / 1000).toFixed(0) + 'km' : 'unknown'}\n` +
+             'Next: use course_correct to refine trajectory',
     };
   }
 
@@ -659,8 +663,8 @@ export class ManeuverOrchestrator {
       }
       return {
         ...result,
-        error: `⚠️ Post-burn encounter is with ${trajectoryCheck.encounterBody}, not ${targetName}.\n` +
-               'Burn execution may have been imprecise. Consider course correction.',
+        warning: `⚠️ Post-burn encounter is with ${trajectoryCheck.encounterBody}, not ${targetName}.\n` +
+                 'Next: use course_correct to refine trajectory',
       };
     }
 
@@ -668,10 +672,8 @@ export class ManeuverOrchestrator {
     if (trajectoryCheck.isCloseApproach) {
       return {
         ...result,
-        warning: `⚠️ Close approach created (no SOI encounter after burn).\n` +
-                 `Predicted separation: ${(trajectoryCheck.separation / 1000).toFixed(0)} km\n` +
-                 `Target orbit: ${(trajectoryCheck.targetOrbitRadius / 1000).toFixed(0)} km avg radius\n` +
-                 `A course_correct burn is recommended.`,
+        warning: `Close approach: ${(trajectoryCheck.separation / 1000).toFixed(0)}km (no SOI encounter yet)\n` +
+                 'Next: use course_correct to refine trajectory and achieve encounter',
       };
     }
 
@@ -679,9 +681,9 @@ export class ManeuverOrchestrator {
     return {
       ...result,
       success: false,
-      error: `❌ Burn executed but trajectory does not reach target!\n` +
-             `Predicted separation: ${trajectoryCheck.separation > 0 ? (trajectoryCheck.separation / 1000).toFixed(0) + ' km' : 'unknown'}\n` +
-             'Burn may have been severely off-target. Manual intervention required.',
+      error: `Burn executed but trajectory does not reach target.\n` +
+             `Separation: ${trajectoryCheck.separation > 0 ? (trajectoryCheck.separation / 1000).toFixed(0) + 'km' : 'unknown'}\n` +
+             'Next: use course_correct to refine trajectory',
     };
   }
 
