@@ -304,6 +304,27 @@ async function handleDetourScenario(
 // periapsis changes at distant targets due to orbital geometry. Instead,
 // use iterative MechJeb course correction nodes.
 
+/**
+ * Query diagnostic info for error messages (TWR, body, gravitational parameter).
+ * Returns formatted string to append to error messages.
+ */
+async function getDiagnostics(conn: KosConnection): Promise<string> {
+  try {
+    const result = await conn.execute(
+      'PRINT ROUND(ADDONS:MJ:INFO:LOCALTWR, 2) + "|" + BODY:NAME + "|" + BODY:MU.',
+      3000
+    );
+    const parts = result.output.split('|');
+    if (parts.length >= 3) {
+      const twr = parts[0].trim();
+      const body = parts[1].trim();
+      const mu = parseFloat(parts[2].trim());
+      return `\n[Debug: TWR=${twr}, Body=${body}, MU=${mu.toExponential(3)}]`;
+    }
+  } catch { /* ignore diagnostics errors */ }
+  return '';
+}
+
 // Extended result type with iteration info
 export interface IterativeCourseResult extends ManeuverResult {
   attempts: number;
@@ -612,16 +633,18 @@ export const courseCorrectTool: ToolDefinition = {
         }
 
         if (!result.success) {
-          return ctx.errorResponse('course_correct', result.error ?? 'Failed');
+          const diag = await getDiagnostics(conn);
+          return ctx.errorResponse('course_correct', `${result.error ?? 'Failed'}${diag}`);
         }
 
         // Post-creation validation: reject invalid nodes
         if (result.deltaV != null && result.deltaV < 0.1) {
           // Node is essentially 0 m/s - no correction needed or invalid
           await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+          const diag = await getDiagnostics(conn);
           return ctx.errorResponse('course_correct',
             `Course correction node is 0 m/s - no adjustment needed or trajectory already optimal.\n` +
-            `Current trajectory may already be at target periapsis.`);
+            `Current trajectory may already be at target periapsis.${diag}`);
         }
 
         // Check if node is in current SOI (before any SOI transition)
@@ -654,7 +677,8 @@ export const courseCorrectTool: ToolDefinition = {
         // Check actual post-burn periapsis
         const postBurn = await queryActualPeriapsis(conn);
         if (!postBurn.hasEncounter) {
-          return ctx.errorResponse('course_correct', 'Lost encounter after burn');
+          const diag = await getDiagnostics(conn);
+          return ctx.errorResponse('course_correct', `Lost encounter after burn${diag}`);
         }
 
         actualPe = postBurn.periapsis;
@@ -670,8 +694,8 @@ export const courseCorrectTool: ToolDefinition = {
           let text = `Course corrected (${totalBurns} burn${totalBurns !== 1 ? 's' : ''})`;
           text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(actualPe / 1000).toFixed(0)}km`;
           if (encounterInfo && encounterInfo.targetType === 'body') {
-            text += `\nEncounter: ${encounterInfo.targetName} at ${(actualPe / 1000).toFixed(0)}km`;
-            text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+            text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
+            text += `\nNext: warp to SOI, then circularize`;
           }
           return ctx.successResponse('course_correct', text);
         }
@@ -699,13 +723,14 @@ export const courseCorrectTool: ToolDefinition = {
       text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(actualPe / 1000).toFixed(0)}km`;
 
       if (encounterInfo && encounterInfo.targetType === 'body') {
-        text += `\nEncounter: ${encounterInfo.targetName} at ${(actualPe / 1000).toFixed(0)}km`;
         if (finalError <= TOLERANCE) {
-          text += `\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+          text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
+          text += `\nNext: warp to SOI, then circularize`;
         } else if (actualPe >= 10_000) {
-          text += ` (acceptable)\nNext: warp to ${encounterInfo.targetName} SOI, then circularize`;
+          text += `\nEncounter: ${encounterInfo.targetName} (acceptable)`;
+          text += `\nNext: warp to SOI, then circularize`;
         } else {
-          text += ` (may need additional correction)`;
+          text += `\nEncounter: ${encounterInfo.targetName} (needs correction)`;
         }
       }
 

@@ -183,30 +183,27 @@ export async function hohmannTransfer(
 
   if (hasExistingTransfer && encounterInfo?.targetType === 'body') {
     const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
-    const encPeKm = (peAlt / 1000).toFixed(0);
     const atmHeight = encounterInfo.atmosphereHeight ?? 0;
     const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
     const optimalMaxPe = minSafePe + 50_000;
+    const targetPeKm = Math.round(minSafePe / 1000);
 
-    // Build response with trajectory quality assessment
+    // Build response with labels (not raw numbers - LLMs misuse them)
     let text = `WARNING: Transfer to ${targetName} already in progress, no changes made.`;
-    text += `\nEncounter: ${targetName} at ${encPeKm}km`;
 
     if (peAlt < minSafePe) {
-      const reason = atmHeight > 0
-        ? `below safe altitude (atmo: ${(atmHeight / 1000).toFixed(0)}km)`
-        : 'too low';
-      text += ` - UNSAFE (${reason})!`;
-      text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+      text += `\nEncounter: ${targetName} (UNSAFE - `;
+      text += atmHeight > 0 ? `below atmosphere)` : `too low)`;
+      text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
     } else if (peAlt <= optimalMaxPe) {
-      text += ` (optimal)`;
-      text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+      text += `\nEncounter: ${targetName} (optimal)`;
+      text += `\nNext: warp to SOI, then circularize`;
     } else if (peAlt <= 500_000) {
-      text += ` (acceptable)`;
-      text += `\nNext: Use course_correct to tighten approach to ~${(minSafePe / 1000).toFixed(0)}km for efficient capture.`;
+      text += `\nEncounter: ${targetName} (acceptable)`;
+      text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
     } else {
-      text += ` (far)`;
-      text += `\nNext: Use course_correct to reduce periapsis to ~${(minSafePe / 1000).toFixed(0)}km before proceeding.`;
+      text += `\nEncounter: ${targetName} (far encounter)`;
+      text += `\nNext: course_correct to ${targetPeKm}km`;
     }
 
     return { success: true, warning: text };
@@ -499,42 +496,31 @@ export const hohmannTransferTool: ToolDefinition = {
 
         if (finalEncounterInfo && finalEncounterInfo.targetType === 'body') {
           const peAlt = finalEncounterInfo.periapsisInTargetSOI ?? 0;
-          const encPeKm = (peAlt / 1000).toFixed(0);
           const finalAtmoHeight = finalEncounterInfo.atmosphereHeight ?? 0;
           const finalMinSafePe = finalAtmoHeight > 0 ? finalAtmoHeight + 40_000 : 40_000;
-
-          text += `\nEncounter: ${finalEncounterInfo.targetName} at ${encPeKm}km`;
-
-          // Guidance based on trajectory quality (must be above atmosphere + 40km, or 40km for airless)
-          // Optimal range: minSafe to minSafe+50km for efficient orbit insertion
           const optimalMaxPe = finalMinSafePe + 50_000;
+          const targetPeKm = Math.round(finalMinSafePe / 1000);
 
+          // Use labels, not raw numbers - LLMs pick up numbers and reuse them incorrectly
           if (peAlt < finalMinSafePe) {
-            // Unsafe trajectory - MUST fix before anything else
-            const reason = finalAtmoHeight > 0
-              ? `below safe altitude (atmo: ${(finalAtmoHeight / 1000).toFixed(0)}km)`
-              : 'too low';
-            text += ` - UNSAFE (${reason})!`;
-            text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+            text += `\nEncounter: ${finalEncounterInfo.targetName} (UNSAFE - `;
+            text += finalAtmoHeight > 0 ? `below atmosphere)` : `too low)`;
+            text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
           } else if (peAlt <= optimalMaxPe) {
-            // Optimal trajectory - good to go
-            text += ` (optimal)`;
-            text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+            text += `\nEncounter: ${finalEncounterInfo.targetName} (optimal)`;
+            text += `\nNext: warp to SOI, then circularize`;
           } else if (peAlt <= 500_000) {
-            // Acceptable but could be tightened for efficiency
-            text += ` (acceptable)`;
-            text += `\nNext: Use course_correct to tighten approach to ~${(finalMinSafePe / 1000).toFixed(0)}km for efficient capture.`;
+            text += `\nEncounter: ${finalEncounterInfo.targetName} (acceptable)`;
+            text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
           } else {
-            // Far approach - strongly recommend course_correct
-            text += ` (far)`;
-            text += `\nNext: Use course_correct to reduce periapsis to ~${(finalMinSafePe / 1000).toFixed(0)}km before proceeding.`;
+            text += `\nEncounter: ${finalEncounterInfo.targetName} (far encounter)`;
+            text += `\nNext: course_correct to ${targetPeKm}km`;
           }
         } else if (result.closeApproach) {
           // Close approach without SOI encounter (common for low-gravity bodies like Minmus)
-          const caDistKm = (result.closeApproach.distance / 1000).toFixed(0);
           const caTime = formatTime(result.closeApproach.time);
-          text += `\nClose approach: ${caDistKm}km in ${caTime} (no SOI encounter yet)`;
-          text += `\nNext: use course_correct to refine trajectory and achieve encounter`;
+          text += `\nClose approach in ${caTime} (no SOI encounter yet)`;
+          text += `\nNext: course_correct to achieve encounter`;
         }
 
         // Add warning if present (e.g., detour due to wrong encounter)

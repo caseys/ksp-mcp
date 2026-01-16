@@ -59,30 +59,27 @@ export async function interplanetaryTransfer(
 
   if (hasExistingTransfer && encounterInfo?.targetType === 'body') {
     const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
-    const encPeKm = (peAlt / 1000).toFixed(0);
     const atmHeight = encounterInfo.atmosphereHeight ?? 0;
     const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
     const optimalMaxPe = minSafePe + 50_000;
+    const targetPeKm = Math.round(minSafePe / 1000);
 
-    // Build response with trajectory quality assessment
+    // Build response with labels (not raw numbers - LLMs misuse them)
     let text = `WARNING: Transfer to ${targetName} already in progress, no changes made.`;
-    text += `\nEncounter: ${targetName} at ${encPeKm}km`;
 
     if (peAlt < minSafePe) {
-      const reason = atmHeight > 0
-        ? `below safe altitude (atmo: ${(atmHeight / 1000).toFixed(0)}km)`
-        : 'too low';
-      text += ` - UNSAFE (${reason})!`;
-      text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+      text += `\nEncounter: ${targetName} (UNSAFE - `;
+      text += atmHeight > 0 ? `below atmosphere)` : `too low)`;
+      text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
     } else if (peAlt <= optimalMaxPe) {
-      text += ` (optimal)`;
-      text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+      text += `\nEncounter: ${targetName} (optimal)`;
+      text += `\nNext: warp to SOI, then circularize`;
     } else if (peAlt <= 500_000) {
-      text += ` (acceptable)`;
-      text += `\nNext: Use course_correct to tighten approach to ~${(minSafePe / 1000).toFixed(0)}km for efficient capture.`;
+      text += `\nEncounter: ${targetName} (acceptable)`;
+      text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
     } else {
-      text += ` (far)`;
-      text += `\nNext: Use course_correct to reduce periapsis to ~${(minSafePe / 1000).toFixed(0)}km before proceeding.`;
+      text += `\nEncounter: ${targetName} (far encounter)`;
+      text += `\nNext: course_correct to ${targetPeKm}km`;
     }
 
     return { success: true, warning: text };
@@ -162,29 +159,25 @@ export const interplanetaryTransferTool: ToolDefinition = {
 
         if (encounterInfo && encounterInfo.targetType === 'body') {
           const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
-          const encPeKm = (peAlt / 1000).toFixed(0);
-          text += `\nEncounter: ${encounterInfo.targetName} at ${encPeKm}km`;
-
-          // Use atmosphere-aware thresholds
           const atmHeight = encounterInfo.atmosphereHeight ?? 0;
           const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
           const optimalMaxPe = minSafePe + 50_000;
+          const targetPeKm = Math.round(minSafePe / 1000);
 
+          // Use labels, not raw numbers - LLMs pick up numbers and reuse them incorrectly
           if (peAlt < minSafePe) {
-            const reason = atmHeight > 0
-              ? `below safe altitude (atmo: ${(atmHeight / 1000).toFixed(0)}km)`
-              : 'too low';
-            text += ` - UNSAFE (${reason})!`;
-            text += `\nREQUIRED: Use course_correct to raise periapsis before proceeding.`;
+            text += `\nEncounter: ${encounterInfo.targetName} (UNSAFE - `;
+            text += atmHeight > 0 ? `below atmosphere)` : `too low)`;
+            text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
           } else if (peAlt <= optimalMaxPe) {
-            text += ` (optimal)`;
-            text += `\nNext: Execute transfer, warp to SOI, then circularize.`;
+            text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
+            text += `\nNext: warp to SOI, then circularize`;
           } else if (peAlt <= 500_000) {
-            text += ` (acceptable)`;
-            text += `\nNext: Use course_correct to tighten approach to ~${(minSafePe / 1000).toFixed(0)}km for efficient capture.`;
+            text += `\nEncounter: ${encounterInfo.targetName} (acceptable)`;
+            text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
           } else {
-            text += ` (far)`;
-            text += `\nNext: Use course_correct to reduce periapsis to ~${(minSafePe / 1000).toFixed(0)}km before proceeding.`;
+            text += `\nEncounter: ${encounterInfo.targetName} (far encounter)`;
+            text += `\nNext: course_correct to ${targetPeKm}km`;
           }
         }
 

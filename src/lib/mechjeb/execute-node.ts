@@ -147,7 +147,7 @@ export function createPeriapsisQuery(): PropertyQuery {
 // ============================================================================
 
 const SMALL_BURN_THRESHOLD = 10; // m/s - burns below this get thrust limiting
-const SMALL_BURN_THRUST_LIMIT = 35; // percent - thrust limit for small burns
+const SMALL_BURN_THRUST_LIMIT = 12; // percent - conservative limit for precision
 
 /**
  * Limit engine thrust for small burns.
@@ -687,7 +687,7 @@ export async function executeNode(
     logger,
     callerTool,
     noRcsAlign = false,
-    targetPeriapsis,
+    targetPeriapsis: _targetPeriapsis, // Unused until RCS refinement re-enabled
   } = options;
 
   const log = logger ?? nullLogger;
@@ -750,8 +750,8 @@ export async function executeNode(
     log.warn(`${logPrefix} Pre-alignment failed, MechJeb will align during execution`);
   });
 
-  // Check for encounter (needed for RCS follow-up refinement)
-  const hasEncounter = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000)
+  // Check for encounter (kept for future RCS refinement re-enablement)
+  const _hasEncounter = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000)
     .then(r => r.output.includes('True'))
     .catch(() => false);
 
@@ -965,42 +965,11 @@ export async function executeNode(
           await restoreEngineThrust(conn, log);
         }
 
-        // RCS refinement for small burns if outside tolerance
-        if (thrustWasLimited && targetPeriapsis && hasEncounter) {
-          // Wait for physics to settle after burn before checking periapsis
-          await delay(1500);
-          const actualPe = await queryPeriapsis(conn);
-          if (actualPe !== null && actualPe > 0) {
-            const peError = Math.abs(actualPe - targetPeriapsis) / targetPeriapsis;
-            if (peError > 0.25) {
-              log.progress(`${logPrefix} Pe ${(actualPe / 1000).toFixed(0)}km vs target ${(targetPeriapsis / 1000).toFixed(0)}km (${(peError * 100).toFixed(0)}% error), refining with RCS...`);
-
-              // Point RETROGRADE for correction (usually overshot, need to slow down)
-              await conn.execute('SAS ON. WAIT 0.3. SET SASMODE TO "RETROGRADE". RCS ON.');
-              await delay(2000);
-
-              // RCS fine-tune with INVERTED direction logic
-              // When pointing retrograde, +fore thrust slows us down, lowering periapsis
-              // So if Pe > target, we pulse positive (slow down more)
-              const fineTuneResult = await rcsFineTune(conn, {
-                queryProperty: createPeriapsisQuery(),
-                targetValue: targetPeriapsis,
-                controlAxis: 'fore',
-                directionStrategy: 'higher-means-positive', // INVERTED for retrograde
-                tolerance: { relative: 0.25 },
-                limits: { maxPulses: 15, maxReversals: 2 },
-                logger: log,
-                logPrefix: `${logPrefix} RCS`,
-              });
-
-              await conn.execute('RCS OFF. SAS ON. SET SASMODE TO "PROGRADE".');
-
-              if (fineTuneResult.success) {
-                log.progress(`${logPrefix} RCS refined to ${(fineTuneResult.finalValue / 1000).toFixed(0)}km`);
-              }
-            }
-          }
-        }
+        // RCS refinement for small burns - DISABLED
+        // Causes oscillation issues with distant target corrections.
+        // The prograde/retrograde direction strategy doesn't map cleanly to
+        // periapsis changes due to orbital geometry at distant intercepts.
+        // TODO: Re-enable after reworking direction strategy for course corrections
 
         // Enable SAS prograde to maintain heading and avoid RCS drift affecting trajectory
         try {
