@@ -17,6 +17,13 @@ import { formatTime, formatOrbit, fmtNum, fmtDist, fmtVel } from '../utils/forma
 // Delay between query batches - set to 0 since all telemetry queries are read-only
 const TELEMETRY_DELAY_MS = 0;
 
+// TypeScript-side telemetry cache
+// - Avoids kOS limitations (CONFIG: only for built-in settings, GLOBAL clears on Ctrl+C)
+// - Benefits MCP server (long-lived process) with rapid repeated status calls
+// - CLI runs are separate processes, so they don't benefit from this cache
+let telemetryCache: { result: ShipTelemetry; timestamp: number } | null = null;
+const TELEMETRY_CACHE_TTL_MS = 5000; // 5 seconds
+
 /**
  * Query multiple values in a batch (comma-separated)
  * Returns array of numbers in order
@@ -283,22 +290,39 @@ export async function getShipTelemetry(
   await conn.flushStaleData(10);
 
   // ============================================================================
-  // SINGLE STATUS QUERY: kOS builds JSON and prints to terminal
+  // TypeScript-side caching - return cached telemetry if fresh
+  // ============================================================================
+  const now = Date.now();
+  if (telemetryCache && (now - telemetryCache.timestamp) < TELEMETRY_CACHE_TTL_MS) {
+    return telemetryCache.result;
+  }
+
+  // ============================================================================
+  // SINGLE STATUS QUERY: kOS writes JSON to file, copies to archive if connected
   // ============================================================================
   // Run status script from local volume (extensionless - kOS prefers .ksm, falls back to .ks)
   // Retry up to 3 times due to intermittent kOS string handling bug
-  let jsonMatch: RegExpMatchArray | null = null;
+  let data: StatusData | null = null;
   let lastError = '';
+
   for (let attempt = 1; attempt <= 3; attempt++) {
+    // Run status script - kOS builds status data and prints as JSON
     const statusResult = await conn.execute(
       'RUNPATH("1:/boot/mcp_status").',
       timeoutMs
     );
 
-    // Parse JSON from terminal output (prefixed with STATUS_JSON:)
-    jsonMatch = statusResult.output.match(/STATUS_JSON:(\{[\s\S]*\})/);
-    if (jsonMatch) {
-      break; // Success
+    // Parse STATUS_COMPACT from terminal output (standard JSON built from lexicon)
+    const compactMatch = statusResult.output.match(/STATUS_COMPACT:(\{[^}]+\})/);
+    if (compactMatch) {
+      try {
+        // kOS uses True/False, JSON requires true/false
+        const jsonStr = compactMatch[1].replaceAll(/:True([,}])/g, ':true$1').replaceAll(/:False([,}])/g, ':false$1');
+        data = JSON.parse(jsonStr) as StatusData;
+        break; // Success
+      } catch (e) {
+        lastError = `Compact JSON parse error: ${e instanceof Error ? e.message : String(e)}`;
+      }
     }
 
     // Check if kOS threw the known string index error
@@ -308,23 +332,13 @@ export async function getShipTelemetry(
       continue;
     }
 
-    lastError = 'no JSON in output';
+    if (!compactMatch) {
+      lastError = 'no STATUS_COMPACT in output';
+    }
   }
 
-  if (!jsonMatch) {
-    throw new Error(`Telemetry error: status script did not return JSON (${lastError})`);
-  }
-
-  // Parse standard JSON (kOS booleans are True/False, need to handle)
-  let data: StatusData;
-  try {
-    // Convert kOS True/False to JSON true/false
-    const jsonStr = jsonMatch[1]
-      .replaceAll(/:True([,}])/g, ':true$1')
-      .replaceAll(/:False([,}])/g, ':false$1');
-    data = JSON.parse(jsonStr) as StatusData;
-  } catch (e) {
-    throw new Error(`Telemetry error: invalid JSON - ${e instanceof Error ? e.message : String(e)}`);
+  if (!data) {
+    throw new Error(`Telemetry error: status script failed (${lastError})`);
   }
 
   // Map JSON fields to local variables for existing code compatibility
@@ -577,7 +591,7 @@ export async function getShipTelemetry(
     // Silently skip if listTargets fails
   }
 
-  return {
+  const result: ShipTelemetry = {
     connected: true,
     vessel,
     orbit,
@@ -587,6 +601,11 @@ export async function getShipTelemetry(
     availableTargets,
     formatted: lines.join('\n'),
   };
+
+  // Cache the result for rapid repeated calls
+  telemetryCache = { result, timestamp: Date.now() };
+
+  return result;
 }
 
 /**

@@ -62,7 +62,8 @@ export class SocketTransport extends BaseTransport {
 
       this.socket.on('data', (data: Buffer) => {
         // kOS sends UTF-8 text
-        this.outputBuffer += data.toString('utf-8');
+        const str = data.toString('utf-8');
+        this.outputBuffer += str;
         this.trace.logReceive(data);
       });
 

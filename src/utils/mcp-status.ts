@@ -1,13 +1,13 @@
 /**
  * MCP Status Script Generator
  *
- * Generates the kOS script that handles status queries.
- * Uses JSON serialization for clean data transfer.
+ * Generates the kOS script that builds status data.
+ * Called by mcp_status() function defined in daemon.
  *
  * Deployed to: 0:/boot/mcp_status.ks
  *
  * Usage:
- *   RUNPATH("0:/boot/mcp_status.ks").  // Returns JSON with all status data
+ *   mcp_status().  // Function checks cache, calls RUNPATH if needed
  */
 
 import { createHash } from 'node:crypto';
@@ -16,74 +16,76 @@ import { createHash } from 'node:crypto';
 
 /**
  * Generate the status script content.
- * Builds a lexicon with all status data, serializes to JSON, prints it.
+ * Builds status data as a lexicon, serializes to JSON, and prints to terminal.
+ * Caching is handled TypeScript-side in telemetry.ts (kOS GLOBAL vars don't persist across Ctrl+C).
  */
 function generateStatusContent(version: string): string {
-  // Build JSON manually and print to terminal (avoids disk I/O overhead)
-  // Use cached target info from _MCP_TARGET* globals
   return `@LAZYGLOBAL OFF.
 IF NOT (DEFINED _MCP_ENV_READY) { RUNPATH("1:/boot/mcp_env", "boot"). }
-LOCAL QC IS CHAR(34).
-LOCAL j IS "{".
-SET j TO j + QC+"v"+QC+":"+QC+"${version}"+QC+",".
-SET j TO j + QC+"soi"+QC+":"+QC+SHIP:BODY:NAME+QC+",".
-SET j TO j + QC+"soiParent"+QC+":"+QC+(CHOOSE "Sun" IF SHIP:BODY:NAME = "Sun" ELSE _MCP_BODIES[SHIP:BODY:NAME]["parent"])+QC+",".
-SET j TO j + QC+"apo"+QC+":"+(CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS))+",".
-SET j TO j + QC+"per"+QC+":"+ROUND(PERIAPSIS)+",".
-SET j TO j + QC+"period"+QC+":"+(CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD))+",".
-SET j TO j + QC+"inc"+QC+":"+ROUND(ORBIT:INCLINATION,2)+",".
-SET j TO j + QC+"ecc"+QC+":"+ROUND(ORBIT:ECCENTRICITY,4)+",".
-SET j TO j + QC+"lan"+QC+":"+ROUND(ORBIT:LAN,2)+",".
-SET j TO j + QC+"shipName"+QC+":"+QC+_MCP_SHIPNAME+QC+",".
-SET j TO j + QC+"shipType"+QC+":"+QC+_MCP_SHIPTYPE+QC+",".
-SET j TO j + QC+"status"+QC+":"+QC+SHIP:STATUS+QC+",".
-SET j TO j + QC+"alt"+QC+":"+ROUND(ALTITUDE)+",".
-SET j TO j + QC+"lat"+QC+":"+ROUND(SHIP:LATITUDE,4)+",".
-SET j TO j + QC+"lng"+QC+":"+ROUND(SHIP:LONGITUDE,4)+",".
-SET j TO j + QC+"deltaV"+QC+":"+ROUND(SHIP:DELTAV:CURRENT)+",".
-SET j TO j + QC+"speed"+QC+":"+ROUND(SHIP:VELOCITY:ORBIT:MAG)+",".
-SET j TO j + QC+"hasNode"+QC+":"+HASNODE+",".
+LOCAL s IS LEXICON().
+SET s["v"] TO "${version}".
+SET s["soi"] TO SHIP:BODY:NAME.
+SET s["soiParent"] TO CHOOSE "Sun" IF SHIP:BODY:NAME = "Sun" ELSE _MCP_BODIES[SHIP:BODY:NAME]["parent"].
+SET s["apo"] TO CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS).
+SET s["per"] TO ROUND(PERIAPSIS).
+SET s["period"] TO CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD).
+SET s["inc"] TO ROUND(ORBIT:INCLINATION,2).
+SET s["ecc"] TO ROUND(ORBIT:ECCENTRICITY,4).
+SET s["lan"] TO ROUND(ORBIT:LAN,2).
+SET s["shipName"] TO _MCP_SHIPNAME.
+SET s["shipType"] TO _MCP_SHIPTYPE.
+SET s["status"] TO SHIP:STATUS.
+SET s["alt"] TO ROUND(ALTITUDE).
+SET s["lat"] TO ROUND(SHIP:LATITUDE,4).
+SET s["lng"] TO ROUND(SHIP:LONGITUDE,4).
+SET s["deltaV"] TO ROUND(SHIP:DELTAV:CURRENT).
+SET s["speed"] TO ROUND(SHIP:VELOCITY:ORBIT:MAG).
+SET s["hasNode"] TO HASNODE.
 LOCAL _ndv IS 0. LOCAL _neta IS 0. LOCAL _nenc IS ORBIT:HASNEXTPATCH.
 IF HASNODE { SET _ndv TO ROUND(NEXTNODE:DELTAV:MAG,1). SET _neta TO ROUND(NEXTNODE:ETA). SET _nenc TO NEXTNODE:ORBIT:HASNEXTPATCH. }
-SET j TO j + QC+"nodeDv"+QC+":"+_ndv+",".
-SET j TO j + QC+"nodeEta"+QC+":"+_neta+",".
-SET j TO j + QC+"nodeHasEnc"+QC+":"+_nenc+",".
-SET j TO j + QC+"hasNextPatch"+QC+":"+ORBIT:HASNEXTPATCH+",".
-SET j TO j + QC+"etaApo"+QC+":"+ROUND(ETA:APOAPSIS)+",".
-SET j TO j + QC+"etaPer"+QC+":"+ROUND(ETA:PERIAPSIS)+",".
-SET j TO j + QC+"etaTrans"+QC+":"+ROUND(ETA:TRANSITION)+",".
-SET j TO j + QC+"atmHeight"+QC+":"+ROUND(_MCP_BODIES[SHIP:BODY:NAME]["atm"])+",".
-SET j TO j + QC+"hasAtm"+QC+":"+SHIP:BODY:ATM:EXISTS+",".
+SET s["nodeDv"] TO _ndv.
+SET s["nodeEta"] TO _neta.
+SET s["nodeHasEnc"] TO _nenc.
+SET s["hasNextPatch"] TO ORBIT:HASNEXTPATCH.
+SET s["etaApo"] TO ROUND(ETA:APOAPSIS).
+SET s["etaPer"] TO ROUND(ETA:PERIAPSIS).
+SET s["etaTrans"] TO ROUND(ETA:TRANSITION).
+SET s["atmHeight"] TO ROUND(_MCP_BODIES[SHIP:BODY:NAME]["atm"]).
+SET s["hasAtm"] TO SHIP:BODY:ATM:EXISTS.
 LOCAL _tti IS ADDONS:MJ:INFO:TIMETOIMPACT.
-SET j TO j + QC+"tti"+QC+":"+(CHOOSE ROUND(_tti) IF _tti:TYPENAME = "Scalar" ELSE -1)+",".
+SET s["tti"] TO CHOOSE ROUND(_tti) IF _tti:TYPENAME = "Scalar" ELSE -1.
 LOCAL _slope IS 0.
 IF SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" OR SHIP:STATUS = "PRELAUNCH" { SET _slope TO ROUND(ABS(90 - VANG(SHIP:UP:VECTOR, SHIP:FACING:TOPVECTOR)),1). }
-SET j TO j + QC+"slope"+QC+":"+_slope+",".
-SET j TO j + QC+"hasTarget"+QC+":"+HASTARGET+",".
+SET s["slope"] TO _slope.
+SET s["hasTarget"] TO HASTARGET.
 LOCAL _encB IS "". LOCAL _encPe IS 0.
 IF ORBIT:HASNEXTPATCH {
 IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { SET _encB TO NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. SET _encPe TO ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). }
 ELSE { SET _encB TO ORBIT:NEXTPATCH:BODY:NAME. SET _encPe TO ROUND(ORBIT:NEXTPATCH:PERIAPSIS). }
 }
-SET j TO j + QC+"encBody"+QC+":"+QC+_encB+QC+",".
-SET j TO j + QC+"encPe"+QC+":"+_encPe+",".
-SET j TO j + QC+"tgtName"+QC+":"+QC+_MCP_TARGET+QC+",".
-SET j TO j + QC+"tgtType"+QC+":"+QC+_MCP_TARGETTYPE+QC+",".
-SET j TO j + QC+"tgtDist"+QC+":"+(CHOOSE ROUND(TARGET:DISTANCE) IF HASTARGET ELSE 0)+",".
-SET j TO j + QC+"tgtParent"+QC+":"+QC+_MCP_TARGETPARENT+QC.
+SET s["encBody"] TO _encB.
+SET s["encPe"] TO _encPe.
+SET s["tgtName"] TO _MCP_TARGET.
+SET s["tgtType"] TO _MCP_TARGETTYPE.
+SET s["tgtDist"] TO CHOOSE ROUND(TARGET:DISTANCE) IF HASTARGET ELSE 0.
+SET s["tgtParent"] TO _MCP_TARGETPARENT.
 IF HASTARGET AND ADDONS:MJ:HASSUFFIX("TGT") {
-SET j TO j + ","+QC+"caTime"+QC+":"+ADDONS:MJ:TGT:CLOSESTAPPROACHTIME.
-SET j TO j + ","+QC+"caDist"+QC+":"+ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE.
-SET j TO j + ","+QC+"anTime"+QC+":"+ADDONS:MJ:TGT:TIMETOAN.
-SET j TO j + ","+QC+"dnTime"+QC+":"+ADDONS:MJ:TGT:TIMETODN.
-SET j TO j + ","+QC+"anEx"+QC+":"+ADDONS:MJ:TGT:ANEXISTS.
-SET j TO j + ","+QC+"dnEx"+QC+":"+ADDONS:MJ:TGT:DNEXISTS.
-SET j TO j + ","+QC+"relInc"+QC+":"+ADDONS:MJ:TGT:RELATIVEINCLINATION.
+SET s["caTime"] TO ADDONS:MJ:TGT:CLOSESTAPPROACHTIME.
+SET s["caDist"] TO ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE.
+SET s["anTime"] TO ADDONS:MJ:TGT:TIMETOAN.
+SET s["dnTime"] TO ADDONS:MJ:TGT:TIMETODN.
+SET s["anEx"] TO ADDONS:MJ:TGT:ANEXISTS.
+SET s["dnEx"] TO ADDONS:MJ:TGT:DNEXISTS.
+SET s["relInc"] TO ADDONS:MJ:TGT:RELATIVEINCLINATION.
 }
-SET j TO j + "}".
-PRINT "STATUS_JSON:" + j.
-SET j TO "".
-WAIT 0.`;
+LOCAL QC IS CHAR(34).
+LOCAL j IS "{".
+FOR k IN s:KEYS {
+IF s[k]:TYPENAME = "String" { SET j TO j+QC+k+QC+":"+QC+s[k]+QC+",". }
+ELSE { SET j TO j+QC+k+QC+":"+s[k]+",". }
+}
+SET j TO j:SUBSTRING(0,j:LENGTH-1)+"}".
+PRINT "STATUS_COMPACT:"+j.`;
 }
 
 // Compute version hash from canonical content

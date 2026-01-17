@@ -72,8 +72,8 @@ async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
       await ensureBootFile(conn);
     }
 
-    // If running and current, nothing more to do
-    if (status.running && !status.needsUpdate) {
+    // If running, current, AND locally installed, nothing more to do
+    if (status.running && !status.needsUpdate && status.locallyInstalled) {
       return;
     }
 
@@ -95,10 +95,9 @@ async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
       console.log(`[ksp-mcp] Deployed via ${deployResult.method}.`);
     }
 
-    // Run daemon if not already running
-    // Note: We don't verify after starting because verification would Ctrl+C the daemon.
-    // The tool's command will Ctrl+C the daemon anyway, then restartDaemon brings it back.
-    if (!status.running) {
+    // Run daemon if not running, local scripts missing, OR needs update
+    // This copies from archive to local, compiles, and reboots
+    if (!status.running || !status.locallyInstalled || status.needsUpdate) {
       try {
         await runDaemon(conn);
         // Brief pause to let it initialize before tool Ctrl+C's it
@@ -114,8 +113,6 @@ async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
         console.warn('[ksp-mcp] Failed to run mcp-daemon:', error);
         lastDaemonCheck = null;
       }
-    } else if (status.needsUpdate) {
-      console.log('[ksp-mcp] Update deployed - will apply on ship reload.');
     }
   } catch (error) {
     console.warn('[ksp-mcp] mcp-daemon setup failed:', error);
