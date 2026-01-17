@@ -102,8 +102,8 @@ export class SocketTransport extends BaseTransport {
           else resolve();
         });
       });
-      // Wait for daemon to process Ctrl+C and exit
-      await new Promise(resolve => setTimeout(resolve, 100));
+      // Brief wait for Ctrl+C to process
+      await new Promise(resolve => setTimeout(resolve, 50));
     }
 
     return new Promise((resolve, reject) => {

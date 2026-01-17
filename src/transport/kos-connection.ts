@@ -434,16 +434,16 @@ export class KosConnection {
    * The daemon provides auto-warp to radio contact during idle blackout.
    * Fire-and-forget: we don't wait for daemon output to avoid blocking.
    */
-  private async restartDaemon(): Promise<void> {
+  async restartDaemon(): Promise<void> {
     if (!this.transport) return;
 
     try {
       // Clear the running flag first - the old daemon loop is dead (we Ctrl+C'd it)
       // Without this, boot file sees "Already running" and doesn't start a new loop
       await this.transport.send('SET MCP_DAEMON_RUNNING TO FALSE.', false);
-      await new Promise(resolve => setTimeout(resolve, 50));
-      // Now run the boot file - it will start a fresh daemon loop
-      await this.transport.send('RUNPATH("0:/boot/mcp_daemon.ks").', false);
+      await new Promise(resolve => setTimeout(resolve, 100));
+      // Now run from local volume (faster, works during blackout)
+      await this.transport.send('RUNPATH("1:/boot/mcp_daemon").', false);
       // Brief pause to let daemon start before next command
       await new Promise(resolve => setTimeout(resolve, 100));
     } catch {

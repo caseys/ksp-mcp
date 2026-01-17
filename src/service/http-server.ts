@@ -164,16 +164,11 @@ export function createServer(): McpServer {
       return true;
     },
     restartDaemon: async () => {
-      try {
-        const conn = getConnection();
-        if (conn.isConnected()) {
-          // Just restart the daemon loop - don't call runDaemon() which does REBOOT
-          // The daemon script checks if already running and preserves globals
-          await conn.execute('IF DEFINED MCP_DAEMON_RUNNING { SET MCP_DAEMON_RUNNING TO FALSE. }', 1000, { fireAndForget: true });
-          await conn.execute('RUNPATH("1:/boot/mcp_daemon").', 1000, { fireAndForget: true });
-        }
-      } catch {
-        // Best effort - don't fail the tool if daemon restart fails
+      // Restart daemon after command completes so it can continue idle-time features
+      // (auto-warp during blackout, etc.)
+      const conn = getConnection();
+      if (conn.isConnected()) {
+        await conn.restartDaemon();
       }
     },
   };

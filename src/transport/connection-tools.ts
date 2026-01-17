@@ -72,14 +72,16 @@ async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
       await ensureBootFile(conn);
     }
 
-    // If running, current, AND locally installed, nothing more to do
-    if (status.running && !status.needsUpdate && status.locallyInstalled) {
+    // If locally installed and current version, nothing more to do
+    // Note: We don't check status.running here - daemon will be restarted
+    // by restartDaemon() AFTER the command completes, not before
+    if (status.locallyInstalled && !status.needsUpdate) {
       return;
     }
 
-    // Deploy if needed (handles both install and update)
-    if (!status.running || status.needsUpdate) {
-      if (!status.running) {
+    // Deploy to archive if not locally installed or needs update
+    if (!status.locallyInstalled || status.needsUpdate) {
+      if (!status.locallyInstalled) {
         console.log(`[ksp-mcp] Installing mcp-daemon v${MCP_COMBINED_VERSION}...`);
       } else {
         console.log(`[ksp-mcp] Updating mcp-daemon v${status.version} -> v${MCP_COMBINED_VERSION}...`);
@@ -95,15 +97,16 @@ async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
       console.log(`[ksp-mcp] Deployed via ${deployResult.method}.`);
     }
 
-    // Run daemon if not running, local scripts missing, OR needs update
-    // This copies from archive to local, compiles, and reboots
-    if (!status.running || !status.locallyInstalled || status.needsUpdate) {
+    // Copy, compile, reboot ONLY if local scripts missing or need update
+    // Do NOT reboot just because daemon isn't running - that's handled by
+    // restartDaemon() after command completes
+    if (!status.locallyInstalled || status.needsUpdate) {
       try {
         await runDaemon(conn);
-        // Brief pause to let it initialize before tool Ctrl+C's it
+        // Brief pause to let it initialize
         await new Promise(resolve => setTimeout(resolve, 200));
-        console.log(`[ksp-mcp] mcp-daemon v${MCP_COMBINED_VERSION} started.`);
-        // Update cache after successful start
+        console.log(`[ksp-mcp] mcp-daemon v${MCP_COMBINED_VERSION} installed and started.`);
+        // Update cache after successful install
         lastDaemonCheck = {
           timestamp: Date.now(),
           running: true,
@@ -221,11 +224,10 @@ interface HealthCheckResult {
  */
 async function checkConnectionHealth(conn: KosConnection): Promise<HealthCheckResult> {
   try {
-    // Check daemon heartbeat - Ctrl+C (clear=true) breaks daemon first
-    // Then we read the heartbeat timestamp the daemon was updating
-    // Note: ensureMcpDaemon() called after this will handle daemon restart
+    // Ctrl+C (clear=true) kills daemon, then we clear MCP_DAEMON_RUNNING so ensureMcpDaemon knows to restart
+    // Also check heartbeat and radio status for health verification
     const result = await conn.execute(
-      'PRINT "HB:" + (CHOOSE _MCP_HEARTBEAT IF DEFINED _MCP_HEARTBEAT ELSE -1) + " R:" + (CHOOSE _MCP_RADIO IF DEFINED _MCP_RADIO ELSE HOMECONNECTION:ISCONNECTED).',
+      'IF DEFINED MCP_DAEMON_RUNNING { SET MCP_DAEMON_RUNNING TO FALSE. } PRINT "HB:" + (CHOOSE _MCP_HEARTBEAT IF DEFINED _MCP_HEARTBEAT ELSE -1) + " R:" + (CHOOSE _MCP_RADIO IF DEFINED _MCP_RADIO ELSE HOMECONNECTION:ISCONNECTED).',
       HEALTH_CHECK_TIMEOUT_MS,
       { clear: true }
     );

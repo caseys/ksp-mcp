@@ -54,25 +54,26 @@ export interface DeployResult {
 /**
  * Check if daemon is installed and running.
  *
- * Queries MCP_DAEMON_VERSION global variable which is set when daemon runs.
- * Also checks if boot file is correctly configured and if locally installed.
+ * Checks MCP_DAEMON_RUNNING flag (set True when daemon loop starts, stays True until cleared).
+ * Also checks version, boot file, and local installation.
  */
 export async function checkDaemonStatus(conn: KosConnection): Promise<DaemonStatus & { bootFileSet: boolean }> {
   try {
-    // Check daemon version, boot file, and local installation in one call
+    // Check daemon running flag, version, boot file, and local installation in one call
     const result = await conn.execute(
-      `PRINT "DAEMON|" + (CHOOSE MCP_DAEMON_VERSION IF DEFINED MCP_DAEMON_VERSION ELSE "") + "|" + CORE:BOOTFILENAME + "|" + EXISTS("${LOCAL_DAEMON_PATH}").`,
+      `PRINT "DAEMON|" + (CHOOSE MCP_DAEMON_RUNNING IF DEFINED MCP_DAEMON_RUNNING ELSE False) + "|" + (CHOOSE MCP_DAEMON_VERSION IF DEFINED MCP_DAEMON_VERSION ELSE "") + "|" + CORE:BOOTFILENAME + "|" + EXISTS("${LOCAL_DAEMON_PATH}").`,
       3000
     );
-    const match = result.output.match(/DAEMON\|([a-f0-9]*)\|([^|]+)\|(True|False)/i);
-    const version = match && match[1].length > 0 ? match[1] : null;
-    const bootFile = match ? match[2].trim() : '';
+    const match = result.output.match(/DAEMON\|(True|False)\|([a-f0-9]*)\|([^|]+)\|(True|False)/i);
+    const isRunning = match ? match[1] === 'True' : false;
+    const version = match && match[2].length > 0 ? match[2] : null;
+    const bootFile = match ? match[3].trim() : '';
     const bootFileSet = bootFile.toLowerCase().includes('mcp_daemon');
-    const locallyInstalled = match ? match[3] === 'True' : false;
+    const locallyInstalled = match ? match[4] === 'True' : false;
 
     return {
       installed: true, // We'll check file existence separately if needed
-      running: version !== null && version.length > 0,
+      running: isRunning,
       version,
       needsUpdate: version !== MCP_COMBINED_VERSION,
       bootFileSet,
