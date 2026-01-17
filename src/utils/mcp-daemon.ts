@@ -30,29 +30,42 @@ import { createHash } from 'node:crypto';
  * - Heartbeat: Updates _MCP_HEARTBEAT every tick for health checks
  * - Blackout auto-warp: When idle in blackout, warps to radio contact
  * - Status tracking: _MCP_RADIO indicates current radio status
+ * - Landing monitor: Loads mcp_landing.ks when _MCP_OP starts with "landing"
  */
 function generateDaemonContent(version: string): string {
   return `@LAZYGLOBAL OFF.
 WAIT UNTIL SHIP:UNPACKED.
-LOCAL lp IS "1:/boot/mcp_daemon.ks".
+LOCAL lp IS "1:/boot/mcp_daemon.ksm".
 LOCAL ap IS "0:/boot/mcp_daemon.ks".
 LOCAL needsInstall IS FALSE.
 IF NOT EXISTS(lp) {
 SET needsInstall TO TRUE.
-PRINT "[mcp-daemon] Installing locally...".
+PRINT "[mcp-daemon] Compiling locally...".
+} ELSE IF NOT EXISTS("1:/boot/mcp_env.ksm") OR NOT EXISTS("1:/boot/mcp_status.ksm") OR NOT EXISTS("1:/boot/mcp_landing.ksm") {
+SET needsInstall TO TRUE.
+PRINT "[mcp-daemon] Helper scripts missing, reinstalling...".
 } ELSE IF DEFINED MCP_DAEMON_VERSION AND MCP_DAEMON_VERSION <> "${version}" {
 SET needsInstall TO TRUE.
-PRINT "[mcp-daemon] Updating mcp_daemon: " + MCP_DAEMON_VERSION + " -> ${version}...".
-} ELSE IF NOT (DEFINED MCP_DAEMON_VERSION) {
-SET needsInstall TO TRUE.
-PRINT "[mcp-daemon] Version unknown, reinstalling...".
+PRINT "[mcp-daemon] Updating: " + MCP_DAEMON_VERSION + " -> ${version}".
 }
-IF needsInstall {
+IF needsInstall AND HOMECONNECTION:ISCONNECTED {
 IF NOT EXISTS("1:/boot") { CREATEDIR("1:/boot"). }
-COPYPATH(ap, lp).
-PRINT "[mcp-daemon] Rebooting...".
+PRINT "[mcp-daemon] Installing scripts...".
+COPYPATH("0:/boot/mcp_daemon.ks", "1:/boot/mcp_daemon.ks").
+COPYPATH("0:/boot/mcp_env.ks", "1:/boot/mcp_env.ks").
+COPYPATH("0:/boot/mcp_status.ks", "1:/boot/mcp_status.ks").
+COPYPATH("0:/boot/mcp_landing.ks", "1:/boot/mcp_landing.ks").
+PRINT "[mcp-daemon] Compiling scripts...".
+COMPILE "1:/boot/mcp_daemon.ks" TO lp.
+COMPILE "1:/boot/mcp_env.ks" TO "1:/boot/mcp_env.ksm".
+COMPILE "1:/boot/mcp_status.ks" TO "1:/boot/mcp_status.ksm".
+COMPILE "1:/boot/mcp_landing.ks" TO "1:/boot/mcp_landing.ksm".
+SET CORE:BOOTFILENAME TO "boot/mcp_daemon".
+PRINT "[mcp-daemon] Rebooting to local...".
 WAIT 1.
 REBOOT.
+} ELSE IF needsInstall {
+PRINT "[mcp-daemon] No radio - using existing local scripts.".
 }
 IF DEFINED MCP_DAEMON_RUNNING AND MCP_DAEMON_RUNNING {
 PRINT "[mcp-daemon] Already running.".
@@ -62,59 +75,36 @@ GLOBAL MCP_DAEMON_VERSION IS "${version}".
 IF NOT (DEFINED _MCP_OP) { GLOBAL _MCP_OP IS "". }
 GLOBAL _MCP_HEARTBEAT IS TIME:SECONDS.
 GLOBAL _MCP_RADIO IS HOMECONNECTION:ISCONNECTED.
+IF NOT (DEFINED _MCP_ENV_READY) { RUNPATH("1:/boot/mcp_env", "boot"). }
+LOCAL _prevSOI IS SHIP:BODY:NAME.
+LOCAL _prevShipName IS SHIP:NAME.
+WHEN SHIP:BODY:NAME <> _prevSOI THEN {
+SET _prevSOI TO SHIP:BODY:NAME.
+RUNPATH("1:/boot/mcp_env", "soi_change").
+PRESERVE.
+}
+WHEN SHIP:NAME <> _prevShipName THEN {
+SET _prevShipName TO SHIP:NAME.
+RUNPATH("1:/boot/mcp_env", "ship").
+PRESERVE.
+}
+LOCAL _prevTarget IS CHOOSE TARGET:NAME IF HASTARGET ELSE "".
+WHEN (CHOOSE TARGET:NAME IF HASTARGET ELSE "") <> _prevTarget THEN {
+SET _prevTarget TO CHOOSE TARGET:NAME IF HASTARGET ELSE "".
+RUNPATH("1:/boot/mcp_env", "target").
+PRESERVE.
+}
 LOCAL lastCheck IS 0.
-LOCAL lastHdg IS V(0,0,0).
-LOCAL stallCooldown IS 0.
-LOCAL wasLanding IS FALSE.
-PRINT "[mcp-daemon] v" + MCP_DAEMON_VERSION + " active.".
+LOCAL landingActive IS FALSE.
+PRINT "[mcp-daemon] v" + MCP_DAEMON_VERSION + " online.".
 UNTIL FALSE {
 SET _MCP_HEARTBEAT TO TIME:SECONDS.
 SET _MCP_RADIO TO HOMECONNECTION:ISCONNECTED.
-IF _MCP_OP:STARTSWITH("landing") {
-SET wasLanding TO TRUE.
-}
-IF wasLanding AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") {
-PRINT "[mcp-daemon] Touchdown - stabilizing...".
-SAS ON.
-WAIT 0.3.
-SET SASMODE TO "RADIALOUT".
-SET wasLanding TO FALSE.
-SET _MCP_OP TO "".
-}
-IF _MCP_OP:STARTSWITH("landing") AND SHIP:STATUS <> "LANDED" AND SHIP:STATUS <> "SPLASHED" {
-LOCAL rAlt IS ALT:RADAR.
-LOCAL vel IS SHIP:VERTICALSPEED.
-LOCAL hdg IS SHIP:FACING:FOREVECTOR.
-LOCAL hdgChg IS VANG(hdg, lastHdg).
-SET lastHdg TO hdg.
-IF rAlt < 250 AND vel > -0.5 AND hdgChg > 8 AND TIME:SECONDS > stallCooldown {
-PRINT "[mcp-daemon] Landing stall detected (alt=" + ROUND(rAlt) + "m, vel=" + ROUND(vel,1) + ", spin=" + ROUND(hdgChg) + "deg)".
-SET stallCooldown TO TIME:SECONDS + 10.
-SET LAND TO ADDONS:MJ:LANDING.
-SET LAND:ENABLED TO FALSE.
-SAS ON.
-WAIT 0.5.
-SET SASMODE TO "STABILITYASSIST".
-PRINT "[mcp-daemon] Stabilizing, waiting for 7m/s descent...".
-LOCAL waitStart IS TIME:SECONDS.
-UNTIL SHIP:VERTICALSPEED < -7 OR SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" OR TIME:SECONDS > waitStart + 15 {
-WAIT 0.2.
-}
-IF SHIP:STATUS <> "LANDED" AND SHIP:STATUS <> "SPLASHED" {
-PRINT "[mcp-daemon] Re-enabling landing (vel=" + ROUND(SHIP:VERTICALSPEED,1) + ")".
-SAS OFF.
-LAND:LANDUNTARGETED().
-WAIT 0.5.
-IF NOT LAND:ENABLED {
-PRINT "[mcp-daemon] MechJeb rejected, holding radial out...".
-SAS ON.
-RCS ON.
-WAIT 0.3.
-SET SASMODE TO "RADIALOUT".
-}
-}
-}
-}
+IF NOT landingActive AND _MCP_OP:LENGTH > 6 { IF _MCP_OP:STARTSWITH("landing") {
+SET landingActive TO TRUE.
+RUNPATH("1:/boot/mcp_landing").
+SET landingActive TO FALSE.
+} }
 IF TIME:SECONDS - lastCheck > 10 {
 SET lastCheck TO TIME:SECONDS.
 IF NOT _MCP_RADIO AND _MCP_OP = "" {
@@ -143,7 +133,7 @@ IF HOMECONNECTION:ISCONNECTED { PRINT "[mcp-daemon] Signal restored.". }
 }
 }
 }
-WAIT 0.
+WAIT 5.
 }
 }`;
 }
@@ -159,7 +149,11 @@ export const MCP_DAEMON_VERSION = createHash('md5')
 /**
  * Generate the daemon boot script content.
  * Deploy to: 0:/boot/mcp_daemon.ks
+ *
+ * @param combinedVersion - Optional combined version that includes all scripts.
+ *                          If provided, daemon uses this for version checking.
+ *                          This ensures reinstall when ANY script changes.
  */
-export function generateMcpDaemon(): string {
-  return generateDaemonContent(MCP_DAEMON_VERSION);
+export function generateMcpDaemon(combinedVersion?: string): string {
+  return generateDaemonContent(combinedVersion ?? MCP_DAEMON_VERSION);
 }

@@ -15,9 +15,11 @@ import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { KosConnection } from '../transport/kos-connection.js';
 
-// Cached KSP root path (discovered once per session)
+// Cached paths (discovered once per session)
 let cachedKspRoot: string | null = null;
 let kspRootChecked = false;
+let cachedArchivePath: string | null = null;
+let archivePathChecked = false;
 
 /**
  * Get the KSP installation root path.
@@ -50,19 +52,28 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
 /**
  * Get the kOS archive directory path.
  * Returns null if KSP root is unavailable.
+ * Result is cached after first successful lookup.
  */
 export async function getArchivePath(conn: KosConnection): Promise<string | null> {
+  if (archivePathChecked) {
+    return cachedArchivePath;
+  }
+
   const kspRoot = await getKspRoot(conn);
-  if (!kspRoot) return null;
+  if (!kspRoot) {
+    archivePathChecked = true;
+    return null;
+  }
 
   const archivePath = join(kspRoot, 'Ships', 'Script');
 
   // Validate archive directory exists
-  if (!existsSync(archivePath)) {
-    return null;
+  if (existsSync(archivePath)) {
+    cachedArchivePath = archivePath;
   }
 
-  return archivePath;
+  archivePathChecked = true;
+  return cachedArchivePath;
 }
 
 /**

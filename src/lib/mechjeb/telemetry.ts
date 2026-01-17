@@ -7,6 +7,7 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import type { VesselState, OrbitInfo, MechJebInfo } from '../types.js';
 import type { TargetEncounterInfo, BodyEncounterInfo, VesselEncounterInfo } from './shared.js';
+import type { StatusData } from '../../utils/mcp-status.js';
 import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
@@ -15,15 +16,6 @@ import { formatTime, formatOrbit, fmtNum, fmtDist, fmtVel } from '../utils/forma
 
 // Delay between query batches - set to 0 since all telemetry queries are read-only
 const TELEMETRY_DELAY_MS = 0;
-
-/**
- * Safely check if a string contains 'true' (case-insensitive)
- * Returns false if input is undefined or null
- */
-function parseBool(output: string | undefined | null): boolean {
-  if (!output) return false;
-  return output.toLowerCase().includes('true');
-}
 
 /**
  * Query multiple values in a batch (comma-separated)
@@ -262,9 +254,6 @@ export interface ShipTelemetry {
   formatted: string;
 }
 
-// Separator for inline PRINT values
-const SEP = '|~|';
-
 /**
  * Format distance for human-readable output
  */
@@ -294,90 +283,69 @@ export async function getShipTelemetry(
   await conn.flushStaleData(10);
 
   // ============================================================================
-  // GROUP 1: Ship State (Orbit + Vessel + Node + Delta-V + Slope)
+  // SINGLE STATUS QUERY: kOS builds JSON and prints to terminal
   // ============================================================================
-  // Combined query for all basic ship state data (19 fields)
-  const parentBodyExpr = '(CHOOSE "Sun" IF SHIP:BODY:NAME = "Sun" ELSE SHIP:BODY:BODY:NAME)';
-  const slopeExpr = '(CHOOSE ROUND(ABS(90 - VANG(SHIP:UP:VECTOR, SHIP:FACING:TOPVECTOR)),1) IF SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" OR SHIP:STATUS = "PRELAUNCH" ELSE 0)';
-
-  let soi = '';
-  let soiParent = 'Sun';
-  let apoRaw = 0;
-  let per = 0;
-  let periodRaw = 0;
-  let inc = 0;
-  let ecc = 0;
-  let lan = 0;
-  let vesselName = '';
-  let vesselType = '';
-  let vesselStatus = '';
-  let altitude = 0;
-  let latitude = 0;
-  let longitude = 0;
-  let nodeDv = 0;
-  let nodeEta = 0;
-  let shipDeltaV = 0;
-  let slopeDegrees = 0;
-
-  let shipStateQueryFailed = true;
-
-  try {
-    const g1Result = await conn.execute(
-      `PRINT "G1|" + ` +
-      // Orbit (8 fields)
-      `SHIP:ORBIT:BODY:NAME + "${SEP}" + ${parentBodyExpr} + "${SEP}" + ` +
-      `(CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "${SEP}" + ROUND(PERIAPSIS) + "${SEP}" + ` +
-      `(CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(ORBIT:PERIOD)) + "${SEP}" + ` +
-      `ROUND(ORBIT:INCLINATION,2) + "${SEP}" + ROUND(ORBIT:ECCENTRICITY,4) + "${SEP}" + ROUND(ORBIT:LAN,2) + "${SEP}" + ` +
-      // Vessel (6 fields)
-      `SHIP:NAME + "${SEP}" + SHIP:TYPE + "${SEP}" + SHIP:STATUS + "${SEP}" + ` +
-      `ROUND(ALTITUDE) + "${SEP}" + ROUND(SHIP:LATITUDE,4) + "${SEP}" + ROUND(SHIP:LONGITUDE,4) + "${SEP}" + ` +
-      // Node (3 fields)
-      `(CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0) + "${SEP}" + ` +
-      `(CHOOSE ROUND(NEXTNODE:ETA) IF HASNODE ELSE 0) + "${SEP}" + ` +
-      `(CHOOSE NEXTNODE:ORBIT:HASNEXTPATCH IF HASNODE ELSE ORBIT:HASNEXTPATCH) + "${SEP}" + ` +
-      // Delta-V (1 field)
-      `ROUND(SHIP:DELTAV:CURRENT) + "${SEP}" + ` +
-      // Slope (1 field - 0 if not on surface)
-      `${slopeExpr}.`,
+  // Run status script from local volume (extensionless - kOS prefers .ksm, falls back to .ks)
+  // Retry up to 3 times due to intermittent kOS string handling bug
+  let jsonMatch: RegExpMatchArray | null = null;
+  let lastError = '';
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const statusResult = await conn.execute(
+      'RUNPATH("1:/boot/mcp_status").',
       timeoutMs
     );
 
-    // Parse Group 1: 19 fields total
-    const g1Match = g1Result.output.match(
-      /G1\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|(-?[\d.]+)\|~\|([\d.]+)\|~\|(-?[\d.]+)\|~\|(True|False)\|~\|(-?\d+)\|~\|([\d.]+)/i
-    );
-
-    if (g1Match) {
-      soi = g1Match[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-      soiParent = g1Match[2].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-      apoRaw = parseNumber(g1Match[3]);
-      per = parseNumber(g1Match[4]);
-      periodRaw = parseNumber(g1Match[5]);
-      inc = parseNumber(g1Match[6]);
-      ecc = parseNumber(g1Match[7]);
-      lan = parseNumber(g1Match[8]);
-      vesselName = g1Match[9].trim().replaceAll('"', '');
-      vesselType = g1Match[10].trim();
-      vesselStatus = g1Match[11].trim();
-      altitude = parseNumber(g1Match[12]);
-      latitude = parseNumber(g1Match[13]);
-      longitude = parseNumber(g1Match[14]);
-      nodeDv = parseNumber(g1Match[15]);
-      nodeEta = parseNumber(g1Match[16]);
-      // hasEncounter parsed but not used - encounter logic is in Group 3 kOS query
-      parseBool(g1Match[17]);
-      shipDeltaV = parseInt(g1Match[18]);
-      slopeDegrees = parseFloat(g1Match[19]);
-      shipStateQueryFailed = false;
+    // Parse JSON from terminal output (prefixed with STATUS_JSON:)
+    jsonMatch = statusResult.output.match(/STATUS_JSON:(\{[\s\S]*\})/);
+    if (jsonMatch) {
+      break; // Success
     }
-  } catch {
-    // Group 1 failed - critical error
+
+    // Check if kOS threw the known string index error
+    if (statusResult.output.includes('Start index cannot be')) {
+      lastError = 'kOS string handling bug - retrying';
+      await new Promise(r => setTimeout(r, 100)); // Brief pause before retry
+      continue;
+    }
+
+    lastError = 'no JSON in output';
   }
 
-  if (shipStateQueryFailed) {
-    throw new Error('Telemetry error: failed to query ship data');
+  if (!jsonMatch) {
+    throw new Error(`Telemetry error: status script did not return JSON (${lastError})`);
   }
+
+  // Parse standard JSON (kOS booleans are True/False, need to handle)
+  let data: StatusData;
+  try {
+    // Convert kOS True/False to JSON true/false
+    const jsonStr = jsonMatch[1]
+      .replaceAll(/:True([,}])/g, ':true$1')
+      .replaceAll(/:False([,}])/g, ':false$1');
+    data = JSON.parse(jsonStr) as StatusData;
+  } catch (e) {
+    throw new Error(`Telemetry error: invalid JSON - ${e instanceof Error ? e.message : String(e)}`);
+  }
+
+  // Map JSON fields to local variables for existing code compatibility
+  const soi = data.soi;
+  const soiParent = data.soiParent;
+  const apoRaw = data.apo;
+  const per = data.per;
+  const periodRaw = data.period;
+  const inc = data.inc;
+  const ecc = data.ecc;
+  const lan = data.lan;
+  const vesselName = data.shipName;
+  const vesselType = data.shipType;
+  const vesselStatus = data.status;
+  const altitude = data.alt;
+  const latitude = data.lat;
+  const longitude = data.lng;
+  const nodeDv = data.nodeDv;
+  const nodeEta = data.nodeEta;
+  const shipDeltaV = data.deltaV;
+  const slopeDegrees = data.slope;
 
   const hasNode = nodeDv > 0;
   const isEscapeTrajectory = apoRaw < 0 || periodRaw === -1;
@@ -395,67 +363,38 @@ export async function getShipTelemetry(
   const isMoon = soiParent.toLowerCase() !== 'sun' && soiParent.toLowerCase() !== 'kerbol';
   const soiDisplay = isMoon ? `${soi}, a moon of ${soiParent}` : soi;
 
-  // Small delay between query groups for connection stability
-  await delay(50);
-
   // ============================================================================
-  // GROUP 2: Timing (ETA values + Time to Impact + Orbital Speed)
+  // GROUP 2: Timing (from JSON data)
   // ============================================================================
   interface OrbitalEvent { name: string; eta: number; }
   const orbitalEvents: OrbitalEvent[] = [];
-  let atmHeight = 0;
-  let hasNextPatch = false;
-  let orbitalSpeed = 0;
-  let etaTransition = 0;  // Store for ENCOUNTER section
+  const atmHeight = data.atmHeight;
+  const hasNextPatch = data.hasNextPatch;
+  const orbitalSpeed = data.speed;
+  const etaTransition = data.etaTrans;
+  const etaApoapsis = data.etaApo;
+  const etaPeriapsis = data.etaPer;
+  const hasAtmosphere = data.hasAtm;
+  const timeToImpact = data.tti;
 
-  try {
-    const g2Result = await conn.execute(
-      // ETA values (6 fields) + Time to impact (1 field) + Orbital speed (1 field)
-      `LOCAL _tti IS ADDONS:MJ:INFO:TIMETOIMPACT. ` +
-      `PRINT "G2|" + ROUND(ETA:APOAPSIS) + "${SEP}" + ROUND(ETA:PERIAPSIS) + "${SEP}" + ` +
-      `ROUND(ETA:TRANSITION) + "${SEP}" + SHIP:ORBIT:HASNEXTPATCH + "${SEP}" + ` +
-      `ROUND(SHIP:BODY:ATM:HEIGHT) + "${SEP}" + SHIP:BODY:ATM:EXISTS + "${SEP}" + ` +
-      `(CHOOSE ROUND(_tti) IF _tti:TYPENAME = "Scalar" ELSE -1) + "${SEP}" + ` +
-      `ROUND(SHIP:VELOCITY:ORBIT:MAG).`,
-      timeoutMs
-    );
-
-    const g2Match = g2Result.output.match(
-      /G2\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(-?[\d.]+)\|~\|(True|False)\|~\|(-?\d+)\|~\|(\d+)/i
-    );
-
-    if (g2Match) {
-      const etaApoapsis = parseNumber(g2Match[1]);
-      const etaPeriapsis = parseNumber(g2Match[2]);
-      etaTransition = parseNumber(g2Match[3]);  // Store in outer scope
-      hasNextPatch = parseBool(g2Match[4]);
-      atmHeight = parseNumber(g2Match[5]);
-      const hasAtmosphere = parseBool(g2Match[6]);
-      const timeToImpact = parseInt(g2Match[7]);
-      orbitalSpeed = parseInt(g2Match[8]);
-
-      // Build orbital events (body names added, encounter body updated after G3)
-      if (etaApoapsis > 0 && etaApoapsis < 1e10 && !isEscapeTrajectory) {
-        orbitalEvents.push({ name: `${soi} Apoapsis`, eta: etaApoapsis });
-      }
-      if (etaPeriapsis > 0 && etaPeriapsis < 1e10) {
-        orbitalEvents.push({ name: `${soi} Periapsis`, eta: etaPeriapsis });
-      }
-      if (hasNextPatch && etaTransition > 0 && etaTransition < 1e10) {
-        // Placeholder - encounter body name will be prepended after G3 query
-        const transitionType = isEscapeTrajectory ? 'SOI Escape' : 'SOI Change';
-        orbitalEvents.push({ name: `_ENC_ ${transitionType}`, eta: etaTransition });
-      }
-      if (hasAtmosphere && atmHeight > 0 && per < atmHeight && altitude > atmHeight) {
-        const atmEntryEta = Math.max(0, etaPeriapsis * 0.7);
-        orbitalEvents.push({ name: 'Atmosphere Entry', eta: atmEntryEta });
-      }
-      if (timeToImpact > 0 && timeToImpact < 1e10) {
-        orbitalEvents.push({ name: '⚠️ IMPACT', eta: timeToImpact });
-      }
-    }
-  } catch {
-    // Timing query is optional
+  // Build orbital events (body names added, encounter body updated after target processing)
+  if (etaApoapsis > 0 && etaApoapsis < 1e10 && !isEscapeTrajectory) {
+    orbitalEvents.push({ name: `${soi} Apoapsis`, eta: etaApoapsis });
+  }
+  if (etaPeriapsis > 0 && etaPeriapsis < 1e10) {
+    orbitalEvents.push({ name: `${soi} Periapsis`, eta: etaPeriapsis });
+  }
+  if (hasNextPatch && etaTransition > 0 && etaTransition < 1e10) {
+    // Placeholder - encounter body name will be prepended after target processing
+    const transitionType = isEscapeTrajectory ? 'SOI Escape' : 'SOI Change';
+    orbitalEvents.push({ name: `_ENC_ ${transitionType}`, eta: etaTransition });
+  }
+  if (hasAtmosphere && atmHeight > 0 && per < atmHeight && altitude > atmHeight) {
+    const atmEntryEta = Math.max(0, etaPeriapsis * 0.7);
+    orbitalEvents.push({ name: 'Atmosphere Entry', eta: atmEntryEta });
+  }
+  if (timeToImpact > 0 && timeToImpact < 1e10) {
+    orbitalEvents.push({ name: '⚠️ IMPACT', eta: timeToImpact });
   }
 
   orbitalEvents.sort((a, b) => a.eta - b.eta);
@@ -506,134 +445,83 @@ export async function getShipTelemetry(
     lines.push(`Est. burn time: ${formatTime(estimatedBurnTime)}`);
   }
 
-  // Small delay between query groups for connection stability
-  await delay(50);
-
   // ============================================================================
-  // GROUP 3: Targeting (Encounter + Target + Rendezvous)
+  // GROUP 3: Targeting (from JSON data)
   // ============================================================================
-  // Combined query for all target-related info - only if HASTARGET or hasEncounter
-  // TARGET:BODY:NAME gives the parent body (Sun for planets, planet for moons)
-  const targetParentExpr = 'TARGET:BODY:NAME';
+  const encounterBody = data.encBody || '';
+  const encounterPe = data.encPe;
 
-  try {
-    // Single defensive query - uses HASSUFFIX to check MechJeb TGT availability
-    const g3Result = await conn.execute(
-      'IF HASTARGET OR ORBIT:HASNEXTPATCH { ' +
-        // Encounter info (2 fields)
-        `LOCAL encBody IS "NONE". LOCAL encPe IS 0. ` +
-        `IF ORBIT:HASNEXTPATCH { ` +
-          `IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { SET encBody TO NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. SET encPe TO ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). } ` +
-          `ELSE { SET encBody TO ORBIT:NEXTPATCH:BODY:NAME. SET encPe TO ROUND(ORBIT:NEXTPATCH:PERIAPSIS). } ` +
-        `} ` +
-        // Target info (4 fields)
-        `LOCAL tgtName IS "NONE". LOCAL tgtType IS "NONE". LOCAL tgtDist IS -1. LOCAL tgtParent IS "NONE". ` +
-        `IF HASTARGET { ` +
-          `SET tgtName TO TARGET:NAME. SET tgtType TO TARGET:TYPENAME. SET tgtDist TO ROUND(TARGET:DISTANCE). ` +
-          `IF TARGET:TYPENAME = "Body" { SET tgtParent TO ${targetParentExpr}. } ` +
-        `} ` +
-        // MechJeb rendezvous info (7 fields) - check HASSUFFIX before access
-        `LOCAL caTime IS -1. LOCAL caDist IS -1. LOCAL anTime IS -1. LOCAL dnTime IS -1. LOCAL anEx IS FALSE. LOCAL dnEx IS FALSE. LOCAL relI IS 0. ` +
-        `IF HASTARGET AND ADDONS:MJ:HASSUFFIX("TGT") { ` +
-          `SET caTime TO ADDONS:MJ:TGT:CLOSESTAPPROACHTIME. SET caDist TO ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE. ` +
-          `SET anTime TO ADDONS:MJ:TGT:TIMETOAN. SET dnTime TO ADDONS:MJ:TGT:TIMETODN. ` +
-          `SET anEx TO ADDONS:MJ:TGT:ANEXISTS. SET dnEx TO ADDONS:MJ:TGT:DNEXISTS. SET relI TO ADDONS:MJ:TGT:RELATIVEINCLINATION. ` +
-        `} ` +
-        `PRINT "G3|" + encBody + "${SEP}" + encPe + "${SEP}" + ` +
-        `tgtName + "${SEP}" + tgtType + "${SEP}" + tgtDist + "${SEP}" + tgtParent + "${SEP}" + ` +
-        `caTime + "${SEP}" + caDist + "${SEP}" + anTime + "${SEP}" + dnTime + "${SEP}" + anEx + "${SEP}" + dnEx + "${SEP}" + relI. ` +
-      '} ELSE { PRINT "G3|NOTGT". }',
-      timeoutMs
-    );
-
-    // Check for actual NOTGT result (not just the echoed command containing the string)
-    // The actual result would be like "G3|NOTGT" without quotes around NOTGT
-    const hasNoTarget = /G3\|NOTGT[^"]/i.test(g3Result.output) || g3Result.output.endsWith('G3|NOTGT');
-
-    if (!g3Result.error && !hasNoTarget) {
-      const g3Match = g3Result.output.match(
-        /G3\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^|]+)\|~\|([^|]+)\|~\|(-?[\d.]+)\|~\|([^|]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(-?[\d.e+]+)\|~\|(True|False)\|~\|(True|False)\|~\|(-?[\d.e+]+)/i
-      );
-
-      if (g3Match) {
-        const encounterBody = g3Match[1].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '');
-        const encounterPe = parseNumber(g3Match[2]);
-        const targetName = g3Match[3].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
-        const targetType = g3Match[4].trim();
-        const targetDist = parseNumber(g3Match[5]);
-        const targetParent = g3Match[6].replaceAll(/^Body\(|\)$/g, '').replaceAll('"', '').trim();
-        const closeApproachTime = parseNumber(g3Match[7]);
-        const closeApproachDist = parseNumber(g3Match[8]);
-        const timeToAN = parseNumber(g3Match[9]);
-        const timeToDN = parseNumber(g3Match[10]);
-        const anExists = parseBool(g3Match[11]);
-        const dnExists = parseBool(g3Match[12]);
-        const relInc = parseNumber(g3Match[13]);
-
-        // Update "Next:" line with encounter body name (replace _ENC_ placeholder)
-        if (encounterBody !== 'NONE' && encounterBody !== soi) {
-          for (const event of nextEvents) {
-            if (event.name.startsWith('_ENC_')) {
-              event.name = event.name.replace('_ENC_', encounterBody);
-            }
-          }
-        }
-        // Build "Next:" line now that we have encounter body name
-        if (nextLineIndex >= 0 && nextEvents.length > 0) {
-          const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
-          lines[nextLineIndex] = `Next: ${eventStrs.join(', ')}`;
-        }
-
-        // Encounter section - show even for negative periapsis (crash trajectories)
-        if (encounterBody !== 'NONE' && encounterBody !== soi) {
-          encounter = { body: encounterBody, periapsis: encounterPe };
-          // If we're at a planet (soiParent is Sun), encounter body is a moon of current SOI
-          const atPlanet = soiParent.toLowerCase() === 'sun' || soiParent.toLowerCase() === 'kerbol';
-          const encParentInfo = atPlanet ? ` (A moon of ${soi})` : '';
-
-          lines.push('', 'ENCOUNTER:');
-          lines.push(`Body: ${encounterBody}${encParentInfo}`);
-          if (encounterPe < 0) {
-            lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (CRASH TRAJECTORY!)`);
-          } else if (encounterPe < 10_000) {
-            lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (LOW - may need course_correct)`);
-          } else {
-            lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
-          }
-          // Show time to encounter
-          if (etaTransition > 0 && etaTransition < 1e10) {
-            lines.push(`Time: ${formatTime(etaTransition)}`);
-          }
-        }
-
-        // Target section
-        if (targetName !== 'NONE' && targetDist >= 0) {
-          target = { name: targetName, type: targetType, distance: targetDist };
-          lines.push('', 'TARGET:');
-          if (targetType === 'Body' && targetParent && targetParent !== 'NONE') {
-            const isSun = targetParent.toLowerCase() === 'sun' || targetParent.toLowerCase() === 'kerbol';
-            lines.push(isSun ? `${targetName} (Planet)` : `${targetName} (A moon of ${targetParent})`);
-          } else {
-            lines.push(`${targetName} (${targetType})`);
-          }
-          lines.push(`Distance: ${formatDistance(targetDist)}`);
-
-          // Rendezvous info
-          if (closeApproachTime > 0 && closeApproachTime < 864_000 && closeApproachDist < 1e9) {
-            lines.push(`Close approach: ${formatDistance(closeApproachDist)} in ${formatTime(closeApproachTime)}`);
-          }
-          if (relInc > 0.1) {
-            lines.push(`Relative inclination: ${relInc.toFixed(1)}°`);
-            const nodeInfo: string[] = [];
-            if (anExists && timeToAN > 0 && timeToAN < 1e10) nodeInfo.push(`AN: ${formatTime(timeToAN)}`);
-            if (dnExists && timeToDN > 0 && timeToDN < 1e10) nodeInfo.push(`DN: ${formatTime(timeToDN)}`);
-            if (nodeInfo.length > 0) lines.push(`Nodes: ${nodeInfo.join(', ')}`);
-          }
-        }
+  // Update "Next:" line with encounter body name (replace _ENC_ placeholder)
+  if (encounterBody && encounterBody !== soi) {
+    for (const event of nextEvents) {
+      if (event.name.startsWith('_ENC_')) {
+        event.name = event.name.replace('_ENC_', encounterBody);
       }
     }
-  } catch {
-    // Targeting query is optional
+  }
+  // Build "Next:" line now that we have encounter body name
+  if (nextLineIndex >= 0 && nextEvents.length > 0) {
+    const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
+    lines[nextLineIndex] = `Next: ${eventStrs.join(', ')}`;
+  }
+
+  // Encounter section - show even for negative periapsis (crash trajectories)
+  if (encounterBody && encounterBody !== soi) {
+    encounter = { body: encounterBody, periapsis: encounterPe };
+    // If we're at a planet (soiParent is Sun), encounter body is a moon of current SOI
+    const atPlanet = soiParent.toLowerCase() === 'sun' || soiParent.toLowerCase() === 'kerbol';
+    const encParentInfo = atPlanet ? ` (A moon of ${soi})` : '';
+
+    lines.push('', 'ENCOUNTER:');
+    lines.push(`Body: ${encounterBody}${encParentInfo}`);
+    if (encounterPe < 0) {
+      lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (CRASH TRAJECTORY!)`);
+    } else if (encounterPe < 10_000) {
+      lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (LOW - may need course_correct)`);
+    } else {
+      lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
+    }
+    // Show time to encounter
+    if (etaTransition > 0 && etaTransition < 1e10) {
+      lines.push(`Time: ${formatTime(etaTransition)}`);
+    }
+  }
+
+  // Target section (from JSON data)
+  if (data.hasTarget && data.tgtName) {
+    const targetName = data.tgtName;
+    const targetType = data.tgtType || 'Unknown';
+    const targetDist = data.tgtDist || 0;
+    const targetParent = data.tgtParent || '';
+    const closeApproachTime = data.caTime || 0;
+    const closeApproachDist = data.caDist || 0;
+    const timeToAN = data.anTime || 0;
+    const timeToDN = data.dnTime || 0;
+    const anExists = data.anEx || false;
+    const dnExists = data.dnEx || false;
+    const relInc = data.relInc || 0;
+
+    target = { name: targetName, type: targetType, distance: targetDist };
+    lines.push('', 'TARGET:');
+    if (targetType === 'Body' && targetParent) {
+      const isSun = targetParent.toLowerCase() === 'sun' || targetParent.toLowerCase() === 'kerbol';
+      lines.push(isSun ? `${targetName} (Planet)` : `${targetName} (A moon of ${targetParent})`);
+    } else {
+      lines.push(`${targetName} (${targetType})`);
+    }
+    lines.push(`Distance: ${formatDistance(targetDist)}`);
+
+    // Rendezvous info
+    if (closeApproachTime > 0 && closeApproachTime < 864_000 && closeApproachDist < 1e9) {
+      lines.push(`Close approach: ${formatDistance(closeApproachDist)} in ${formatTime(closeApproachTime)}`);
+    }
+    if (relInc > 0.1) {
+      lines.push(`Relative inclination: ${relInc.toFixed(1)}°`);
+      const nodeInfo: string[] = [];
+      if (anExists && timeToAN > 0 && timeToAN < 1e10) nodeInfo.push(`AN: ${formatTime(timeToAN)}`);
+      if (dnExists && timeToDN > 0 && timeToDN < 1e10) nodeInfo.push(`DN: ${formatTime(timeToDN)}`);
+      if (nodeInfo.length > 0) lines.push(`Nodes: ${nodeInfo.join(', ')}`);
+    }
   }
 
   // Fallback: Build "Next:" line if G3 didn't provide encounter body
@@ -909,68 +797,75 @@ async function queryMechJebAutopilotStatus(
 /**
  * Detect if MechJeb autopilot is running (without _MCP_OP set).
  * Used as fallback when operation wasn't started via our tools.
+ *
+ * Optimized: Single query checks all autopilots at once.
+ * Only queries details if something is actually enabled.
  */
 async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: KosOperationType; status: string; detail?: string } | null> {
-  // Check ascent autopilot
   try {
-    const ascentResult = await conn.execute('PRINT ADDONS:MJ:ASCENT:ENABLED.', 2000);
-    if (ascentResult.output.toLowerCase().includes('true')) {
+    // Single query to check all autopilot enabled states + node state
+    const result = await conn.execute(
+      'PRINT "MJ:" + ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:LANDING:ENABLED + "|" + ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0).',
+      2000
+    );
+    const match = result.output.match(/MJ:(True|False)\|(True|False)\|(True|False)\|(\w+)\|([\d.]+)/i);
+    if (!match) return null;
+
+    const ascentEnabled = match[1].toLowerCase() === 'true';
+    const landingEnabled = match[2].toLowerCase() === 'true';
+    const nodeEnabled = match[3].toLowerCase() === 'true';
+    const nodeState = match[4];
+    const nodeDv = parseNumber(match[5]);
+
+    // Check ascent (most likely during launch)
+    if (ascentEnabled) {
+      // Query ascent details only when needed
       const statusResult = await conn.execute(
         'PRINT ADDONS:MJ:ASCENT:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
         2000
       );
-      const match = statusResult.output.match(/([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/);
-      if (match) {
-        const status = match[1].trim() || 'Ascending';
-        const apo = parseNumber(match[2]);
-        const alt = parseNumber(match[3]);
+      const detailMatch = statusResult.output.match(/([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/);
+      if (detailMatch) {
+        const status = detailMatch[1].trim() || 'Ascending';
+        const apo = parseNumber(detailMatch[2]);
+        const alt = parseNumber(detailMatch[3]);
         return { opType: 'ascent', status, detail: `Alt: ${(alt/1000).toFixed(1)}km, Apo: ${(apo/1000).toFixed(1)}km` };
       }
       return { opType: 'ascent', status: 'Ascending' };
     }
-  } catch { /* ignore */ }
 
-  // Check landing autopilot
-  try {
-    const landResult = await conn.execute('PRINT ADDONS:MJ:LANDING:ENABLED.', 2000);
-    if (landResult.output.toLowerCase().includes('true')) {
+    // Check landing
+    if (landingEnabled) {
+      // Query landing details only when needed
       const statusResult = await conn.execute(
         'PRINT ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
         2000
       );
-      const match = statusResult.output.match(/(-?[\d.]+)\|(-?[\d.]+)/);
-      if (match) {
-        const alt = parseNumber(match[1]);
-        const vspeed = parseNumber(match[2]);
+      const detailMatch = statusResult.output.match(/(-?[\d.]+)\|(-?[\d.]+)/);
+      if (detailMatch) {
+        const alt = parseNumber(detailMatch[1]);
+        const vspeed = parseNumber(detailMatch[2]);
         return { opType: 'landing', status: 'Landing', detail: `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${fmtVel(vspeed)}` };
       }
       return { opType: 'landing', status: 'Landing' };
     }
-  } catch { /* ignore */ }
 
-  // Check node executor
-  try {
-    const nodeResult = await conn.execute(
-      'PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0).',
-      2000
-    );
-    const match = nodeResult.output.match(/(True|False)\|(\w+)\|([\d.]+)/i);
-    if (match && match[1].toLowerCase() === 'true') {
-      const state = match[2].trim();
-      const dvRemaining = parseNumber(match[3]);
-      // Translate MechJeb states to plain English
-      let status = state;
-      switch (state.toUpperCase()) {
+    // Check node executor (already have state and dv from combined query)
+    if (nodeEnabled) {
+      let status = nodeState;
+      switch (nodeState.toUpperCase()) {
         case 'WARPALIGN': status = 'Aligning'; break;
         case 'LEAD': status = 'Coasting to burn'; break;
         case 'BURN': status = 'Burning'; break;
         case 'IDLE': status = 'Idle'; break;
       }
-      return { opType: 'node', status, detail: dvRemaining > 0 ? `ΔV remaining: ${fmtVel(dvRemaining)}` : undefined };
+      return { opType: 'node', status, detail: nodeDv > 0 ? `ΔV remaining: ${fmtVel(nodeDv)}` : undefined };
     }
-  } catch { /* ignore */ }
 
-  return null;
+    return null;
+  } catch {
+    return null;
+  }
 }
 
 /**

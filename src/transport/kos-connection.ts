@@ -357,11 +357,11 @@ export class KosConnection {
         return { success: true, output: '' };
       }
 
-      // Send command followed by sentinel
+      // Send command followed by sentinel as a single line to avoid kOS buffer race condition
       const { token: sentinelToken, command: sentinelCommand } = this.createSentinel(command);
       const sentinelPattern = this.buildSentinelPattern(sentinelToken);
-      await this.transport.send(command, clearInput);
-      await this.transport.send(sentinelCommand, false);  // Sentinel doesn't need clear
+      // Combine into single line: "command. PRINT sentinel." - kOS parses as two statements
+      await this.transport.send(`${command} ${sentinelCommand}`, clearInput);
 
       // Wait for sentinel (primary) or prompt (fallback) to ensure completion
       let output: string;
@@ -378,7 +378,9 @@ export class KosConnection {
       }
 
       // Clean up output (remove the command echo, sentinel, and prompt)
-      const cleanOutput = this.cleanOutput([command, sentinelCommand], output, sentinelToken);
+      // Combined command is echoed as single line
+      const combinedCommand = `${command} ${sentinelCommand}`;
+      const cleanOutput = this.cleanOutput([combinedCommand], output, sentinelToken);
 
       // Track output in global monitor for kos://terminal/recent resource
       if (cleanOutput) {

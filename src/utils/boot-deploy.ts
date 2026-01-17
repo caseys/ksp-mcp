@@ -9,13 +9,33 @@
  * terminal transfer (slow but reliable).
  */
 
+import { createHash } from 'node:crypto';
 import type { KosConnection } from '../transport/kos-connection.js';
 import { generateMcpDaemon, MCP_DAEMON_VERSION } from './mcp-daemon.js';
+import { generateMcpEnv, MCP_ENV_VERSION } from './mcp-env.js';
+import { generateMcpStatus, MCP_STATUS_VERSION } from './mcp-status.js';
+import { generateMcpLanding, MCP_LANDING_VERSION } from './mcp-landing.js';
 import { deployScript } from './kos-archive.js';
 
-// Boot file paths
-const DAEMON_PATH = '0:/boot/mcp_daemon.ks';       // Archive (deployment target)
-const LOCAL_DAEMON_PATH = '1:/boot/mcp_daemon.ks'; // Local volume (self-installed)
+// Combined version: changes when ANY script changes
+// This ensures the daemon reinstalls all scripts when any one is updated
+export const MCP_COMBINED_VERSION = createHash('md5')
+  .update(MCP_DAEMON_VERSION)
+  .update(MCP_ENV_VERSION)
+  .update(MCP_STATUS_VERSION)
+  .update(MCP_LANDING_VERSION)
+  .digest('hex')
+  .slice(0, 8);
+
+// Boot file paths - source on archive, compiled on local for blackout resilience
+const DAEMON_PATH = '0:/boot/mcp_daemon.ks';
+const LOCAL_DAEMON_PATH = '1:/boot/mcp_daemon.ksm';
+const ENV_PATH = '0:/boot/mcp_env.ks';
+const LOCAL_ENV_PATH = '1:/boot/mcp_env.ksm';
+const STATUS_PATH = '0:/boot/mcp_status.ks';
+const LOCAL_STATUS_PATH = '1:/boot/mcp_status.ksm';
+const LANDING_PATH = '0:/boot/mcp_landing.ks';
+const LOCAL_LANDING_PATH = '1:/boot/mcp_landing.ksm';
 
 export interface DaemonStatus {
   installed: boolean;
@@ -54,7 +74,7 @@ export async function checkDaemonStatus(conn: KosConnection): Promise<DaemonStat
       installed: true, // We'll check file existence separately if needed
       running: version !== null && version.length > 0,
       version,
-      needsUpdate: version !== MCP_DAEMON_VERSION,
+      needsUpdate: version !== MCP_COMBINED_VERSION,
       bootFileSet,
       locallyInstalled,
     };
@@ -67,13 +87,18 @@ export async function checkDaemonStatus(conn: KosConnection): Promise<DaemonStat
  * Deploy daemon boot script to vessel.
  *
  * Writes to 0:/boot/mcp_daemon.ks and sets as CPU boot file.
+ * Also deploys mcp_env.ks for environment caching.
  * Uses direct archive write when available (fast), falls back to
  * terminal transfer (slow).
  */
 export async function deployDaemon(conn: KosConnection): Promise<DeployResult> {
-  const daemonContent = generateMcpDaemon();
+  // Pass combined version so daemon reinstalls when ANY script changes
+  const daemonContent = generateMcpDaemon(MCP_COMBINED_VERSION);
+  const envContent = generateMcpEnv();
+  const statusContent = generateMcpStatus();
+  const landingContent = generateMcpLanding();
 
-  // Deploy using fast direct write or fallback to terminal
+  // Deploy daemon using fast direct write or fallback to terminal
   const result = await deployScript(conn, DAEMON_PATH, daemonContent);
 
   if (!result.success) {
@@ -84,9 +109,25 @@ export async function deployDaemon(conn: KosConnection): Promise<DeployResult> {
     };
   }
 
-  // Set as boot file so it auto-runs on CPU startup
+  // Deploy helper scripts alongside daemon (non-fatal if any fail)
+  const envResult = await deployScript(conn, ENV_PATH, envContent);
+  if (!envResult.success) {
+    console.error(`[boot-deploy] Warning: Failed to deploy mcp_env.ks: ${envResult.error}`);
+  }
+
+  const statusResult = await deployScript(conn, STATUS_PATH, statusContent);
+  if (!statusResult.success) {
+    console.error(`[boot-deploy] Warning: Failed to deploy mcp_status.ks: ${statusResult.error}`);
+  }
+
+  const landingResult = await deployScript(conn, LANDING_PATH, landingContent);
+  if (!landingResult.success) {
+    console.error(`[boot-deploy] Warning: Failed to deploy mcp_landing.ks: ${landingResult.error}`);
+  }
+
+  // Set as boot file so it auto-runs on CPU startup (no volume prefix per kOS docs)
   try {
-    await conn.execute(`SET CORE:BOOTFILENAME TO "${DAEMON_PATH}".`, 3000);
+    await conn.execute('SET CORE:BOOTFILENAME TO "boot/mcp_daemon".', 3000);
     return { success: true, method: result.method };
   } catch (error) {
     return {
@@ -103,7 +144,8 @@ export async function deployDaemon(conn: KosConnection): Promise<DeployResult> {
  */
 export async function ensureBootFile(conn: KosConnection): Promise<boolean> {
   try {
-    await conn.execute(`SET CORE:BOOTFILENAME TO "${DAEMON_PATH}".`, 3000);
+    // No volume prefix per kOS docs - just the relative path
+    await conn.execute('SET CORE:BOOTFILENAME TO "boot/mcp_daemon".', 3000);
     return true;
   } catch {
     return false;
@@ -111,16 +153,40 @@ export async function ensureBootFile(conn: KosConnection): Promise<boolean> {
 }
 
 /**
- * Run the daemon. Clears MCP_DAEMON_RUNNING first to ensure fresh start.
+ * Run the daemon. Copies scripts to local, compiles, and reboots for clean start.
+ * All scripts on local volume for blackout resilience (archive not accessible during blackout).
+ * Uses extensionless paths so kOS falls back from .ksm to .ks if needed.
  */
 export async function runDaemon(conn: KosConnection): Promise<void> {
-  // Clear the running flag first - the old daemon loop is dead (we Ctrl+C'd it)
-  // Without this, boot file sees "Already running" and doesn't start a new loop
-  await conn.execute('SET MCP_DAEMON_RUNNING TO FALSE.', 2000, { clear: false });
-  await conn.execute(`RUNPATH("${DAEMON_PATH}").`, 5000, { fireAndForget: true, clear: false });
+  // Create local boot directory
+  await conn.execute('IF NOT EXISTS("1:/boot") { CREATEDIR("1:/boot"). }', 3000);
+
+  // Copy .ks sources to local first (for kOS fallback if .ksm missing)
+  await conn.execute(`COPYPATH("${DAEMON_PATH}", "1:/boot/mcp_daemon.ks").`, 3000);
+  await conn.execute(`COPYPATH("${ENV_PATH}", "1:/boot/mcp_env.ks").`, 3000);
+  await conn.execute(`COPYPATH("${STATUS_PATH}", "1:/boot/mcp_status.ks").`, 3000);
+  await conn.execute(`COPYPATH("${LANDING_PATH}", "1:/boot/mcp_landing.ks").`, 3000);
+
+  // Compile from local .ks to local .ksm (faster execution)
+  // Use fireAndForget to avoid sentinel interference with COMPILE output
+  await conn.execute(`COMPILE "1:/boot/mcp_daemon.ks" TO "${LOCAL_DAEMON_PATH}".`, 5000, { fireAndForget: true });
+  await new Promise(r => setTimeout(r, 500));
+  await conn.execute(`COMPILE "1:/boot/mcp_env.ks" TO "${LOCAL_ENV_PATH}".`, 5000, { fireAndForget: true });
+  await new Promise(r => setTimeout(r, 500));
+  await conn.execute(`COMPILE "1:/boot/mcp_status.ks" TO "${LOCAL_STATUS_PATH}".`, 5000, { fireAndForget: true });
+  await new Promise(r => setTimeout(r, 500));
+  await conn.execute(`COMPILE "1:/boot/mcp_landing.ks" TO "${LOCAL_LANDING_PATH}".`, 5000, { fireAndForget: true });
+  await new Promise(r => setTimeout(r, 500));
+
+  // Set boot file (no volume prefix per kOS docs) and reboot
+  await conn.execute('SET CORE:BOOTFILENAME TO "boot/mcp_daemon".', 2000);
+  await conn.execute('REBOOT.', 1000, { fireAndForget: true });
 }
 
 export { MCP_DAEMON_VERSION } from './mcp-daemon.js';
+export { MCP_ENV_VERSION } from './mcp-env.js';
+export { MCP_STATUS_VERSION } from './mcp-status.js';
+export { MCP_LANDING_VERSION } from './mcp-landing.js';
 
 // Re-export archive utilities
 export { getKspRoot, getArchivePath } from './kos-archive.js';

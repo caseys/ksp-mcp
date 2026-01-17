@@ -6,7 +6,7 @@ import {
   deployDaemon,
   ensureBootFile,
   runDaemon,
-  MCP_DAEMON_VERSION,
+  MCP_COMBINED_VERSION,
 } from '../utils/boot-deploy.js';
 
 // Shared connection instance
@@ -26,6 +26,10 @@ interface CpuPreference {
 }
 let cpuPreference: CpuPreference | null = null;
 
+// Cache for daemon status to avoid redundant checks
+let lastDaemonCheck: { timestamp: number; running: boolean; version: string | null } | null = null;
+const DAEMON_CACHE_TTL_MS = 30_000; // 30 seconds - daemon doesn't change often
+
 // =============================================================================
 // MCP-Daemon Boot Script
 // =============================================================================
@@ -37,11 +41,30 @@ let cpuPreference: CpuPreference | null = null;
  * - Sets up WHEN triggers for autonomous blackout recovery
  * - Stays alive with WAIT UNTIL FALSE so triggers persist
  * - Auto-warps to radio contact when idle in blackout
+ *
+ * Uses caching to avoid redundant daemon checks on every command.
  */
 async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
   try {
+    // Use cached status if recent and daemon was running with current version
+    const now = Date.now();
+    if (lastDaemonCheck &&
+        now - lastDaemonCheck.timestamp < DAEMON_CACHE_TTL_MS &&
+        lastDaemonCheck.running &&
+        lastDaemonCheck.version === MCP_COMBINED_VERSION) {
+      // Daemon was recently verified as running and up-to-date, skip check
+      return;
+    }
+
     // Check daemon status (includes boot file check)
     const status = await checkDaemonStatus(conn);
+
+    // Update cache
+    lastDaemonCheck = {
+      timestamp: now,
+      running: status.running,
+      version: status.version,
+    };
 
     // Always ensure boot file is set (even if daemon is running)
     if (!status.bootFileSet) {
@@ -51,21 +74,22 @@ async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
 
     // If running and current, nothing more to do
     if (status.running && !status.needsUpdate) {
-      console.log(`[ksp-mcp] mcp-daemon v${status.version} active.`);
       return;
     }
 
     // Deploy if needed (handles both install and update)
     if (!status.running || status.needsUpdate) {
       if (!status.running) {
-        console.log(`[ksp-mcp] Installing mcp-daemon v${MCP_DAEMON_VERSION}...`);
+        console.log(`[ksp-mcp] Installing mcp-daemon v${MCP_COMBINED_VERSION}...`);
       } else {
-        console.log(`[ksp-mcp] Updating mcp-daemon v${status.version} -> v${MCP_DAEMON_VERSION}...`);
+        console.log(`[ksp-mcp] Updating mcp-daemon v${status.version} -> v${MCP_COMBINED_VERSION}...`);
       }
 
       const deployResult = await deployDaemon(conn);
       if (!deployResult.success) {
         console.warn('[ksp-mcp] mcp-daemon deployment failed:', deployResult.error);
+        // Invalidate cache on failure
+        lastDaemonCheck = null;
         return;
       }
       console.log(`[ksp-mcp] Deployed via ${deployResult.method}.`);
@@ -79,15 +103,23 @@ async function ensureMcpDaemon(conn: KosConnection): Promise<void> {
         await runDaemon(conn);
         // Brief pause to let it initialize before tool Ctrl+C's it
         await new Promise(resolve => setTimeout(resolve, 200));
-        console.log(`[ksp-mcp] mcp-daemon v${MCP_DAEMON_VERSION} started.`);
+        console.log(`[ksp-mcp] mcp-daemon v${MCP_COMBINED_VERSION} started.`);
+        // Update cache after successful start
+        lastDaemonCheck = {
+          timestamp: Date.now(),
+          running: true,
+          version: MCP_COMBINED_VERSION,
+        };
       } catch (error) {
         console.warn('[ksp-mcp] Failed to run mcp-daemon:', error);
+        lastDaemonCheck = null;
       }
     } else if (status.needsUpdate) {
       console.log('[ksp-mcp] Update deployed - will apply on ship reload.');
     }
   } catch (error) {
     console.warn('[ksp-mcp] mcp-daemon setup failed:', error);
+    lastDaemonCheck = null;
   }
 }
 
@@ -252,6 +284,8 @@ export async function forceDisconnect(): Promise<void> {
     }
     connection = null;
   }
+  // Invalidate daemon cache on disconnect (vessel may have changed)
+  lastDaemonCheck = null;
   // Note: Don't clear lastConnectedVessel here - we may need it to detect crashes
   // It's cleared in handleDisconnect() for explicit disconnects
 }

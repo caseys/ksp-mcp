@@ -13,19 +13,29 @@ import { formatDistance } from './shared.js';
  * Returns all celestial bodies in the solar system and all vessels
  * in the current SOI, both sorted by distance from ship.
  *
+ * Uses cached _MCP_MOONS, _MCP_PLANETS, _MCP_VESSELS when available
+ * (set by mcp_env.ks), falling back to LIST BODIES/TARGETS if not.
+ *
  * @param conn kOS connection
  */
 export async function listTargets(conn: KosConnection): Promise<ListTargetsResult> {
-  // Single atomic kOS command that lists bodies and vessels with distances
-  // Categorizes bodies as MOON (of parent planet) or PLANET (orbits Sun)
-  // Excludes current body and Sun from all lists
+  // Use cached moon/planet/vessel lists - only query distances
+  // Compute the "relevant parent" for moon filtering:
+  // - Orbiting Kerbin: show Kerbin's moons (Mun, Minmus)
+  // - Orbiting Mun: show Kerbin's moons (siblings)
+  // - Orbiting Sun: no moons to show
+  // Initialize env if not already set (inline, no extra round-trip)
+  // Use extensionless path - kOS prefers .ksm, falls back to .ks
+  // Use cached moon/planet lists but scan vessels fresh (they can be destroyed anytime)
   const cmd = [
-    'LIST BODIES IN bods.',
-    'LIST TARGETS IN tgts.',
-    'SET parentBody TO SHIP:BODY.',
-    'IF parentBody:BODY:NAME <> "Sun" { SET parentBody TO parentBody:BODY. }',
-    'FOR b IN bods { IF b <> SHIP:BODY AND b:NAME <> "Sun" { IF b:BODY:NAME = "Sun" { PRINT "PLANET|" + b:NAME + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). } ELSE IF b:BODY = parentBody { PRINT "MOON|" + b:NAME + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). } } }',
-    'FOR t IN tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|" + ROUND((t:POSITION - SHIP:POSITION):MAG). } }',
+    'IF NOT (DEFINED _MCP_MOONS) { RUNPATH("1:/boot/mcp_env", "boot"). }',
+    'LOCAL _soi IS SHIP:BODY:NAME.',
+    'LOCAL _moonParent IS _soi.',
+    'IF _MCP_BODIES:HASKEY(_soi) { IF _MCP_BODIES[_soi]["parent"] <> "Sun" { SET _moonParent TO _MCP_BODIES[_soi]["parent"]. } }',
+    'FOR n IN _MCP_MOONS { IF n <> _soi AND _MCP_BODIES[n]["parent"] = _moonParent { LOCAL b IS BODY(n). PRINT "MOON|" + n + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). } }',
+    'FOR n IN _MCP_PLANETS { IF n <> _soi { LOCAL b IS BODY(n). PRINT "PLANET|" + n + "|" + ROUND((b:POSITION - SHIP:POSITION):MAG). } }',
+    // Scan vessels fresh - cached _MCP_VESSELS can become stale when vessels are destroyed
+    'LOCAL _tgts IS LIST(). LIST TARGETS IN _tgts. FOR t IN _tgts { IF t <> SHIP AND t:BODY = SHIP:BODY { PRINT "VESSEL|" + t:NAME + "|" + ROUND((t:POSITION - SHIP:POSITION):MAG). } }',
     'PRINT "LIST_DONE".',
   ].join(' ');
 

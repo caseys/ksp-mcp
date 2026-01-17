@@ -16,7 +16,6 @@ import {
   getConnection,
   ensureConnected,
 } from '../transport/connection-tools.js';
-import { runDaemon } from '../utils/boot-deploy.js';
 import { config } from '../config/index.js';
 import { isClaudeClient, type ClientInfo } from '../lib/tool-types.js';
 import { ManeuverOrchestrator } from '../lib/mechjeb/orchestrator.js';
@@ -168,7 +167,10 @@ export function createServer(): McpServer {
       try {
         const conn = getConnection();
         if (conn.isConnected()) {
-          await runDaemon(conn);
+          // Just restart the daemon loop - don't call runDaemon() which does REBOOT
+          // The daemon script checks if already running and preserves globals
+          await conn.execute('IF DEFINED MCP_DAEMON_RUNNING { SET MCP_DAEMON_RUNNING TO FALSE. }', 1000, { fireAndForget: true });
+          await conn.execute('RUNPATH("1:/boot/mcp_daemon").', 1000, { fireAndForget: true });
         }
       } catch {
         // Best effort - don't fail the tool if daemon restart fails

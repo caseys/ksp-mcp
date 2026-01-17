@@ -483,7 +483,6 @@ export class AscentHandle {
         if (now - lastLogTime < 15_000 && !statusChanged) {
           return;
         }
-        lastLogTime = now;
         lastStatus = state?.status;
         let newStatus;
 
@@ -531,7 +530,10 @@ export class AscentHandle {
           newStatus = `[Ascent] ${formatMeasurements(state.status)} at ${formatOrbit(state.apoapsis, state.periapsis)}`;
         }
 
-        if (newStatus) this.logger.progress(newStatus);
+        if (newStatus) {          
+          this.logger.progress(newStatus);
+          lastLogTime = now;
+        }
       },
     });
 
