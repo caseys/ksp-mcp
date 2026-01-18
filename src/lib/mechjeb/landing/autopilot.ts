@@ -930,6 +930,17 @@ export const landTool: ToolDefinition = {
         }
 
         if (monitorResult.success) {
+          // Post-landing stabilization - enable SAS radial-out and RCS
+          try {
+            logger.progress('[Landing] Stabilizing...');
+            await conn.execute('SAS ON. WAIT 0.1. SET SASMODE TO "RADIALOUT". RCS ON.', 5000);
+            // Wait 10 seconds then disable RCS and switch SAS to stability assist
+            await conn.execute('WAIT 10. RCS OFF. SET SASMODE TO "STABILITYASSIST".', 15_000);
+            logger.progress('[Landing] Stabilized');
+          } catch {
+            logger.warn('[Landing] Stabilization commands failed');
+          }
+
           // Reset thrust limits if we modified them
           if (thrustLimit.limited) {
             await resetThrustLimits(conn, logger);
