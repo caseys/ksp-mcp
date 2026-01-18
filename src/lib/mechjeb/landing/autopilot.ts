@@ -103,7 +103,8 @@ interface VesselScanResult {
 
 /**
  * Scan vessel structure for landing legs and decouplers.
- * Returns info about landing legs and any decoupler/separator below them.
+ * First looks for a part tagged 'lander' (decoupler/separator/docking port),
+ * then falls back to finding the highest-staged decoupler.
  */
 async function scanVesselForLanding(conn: KosConnection): Promise<VesselScanResult> {
   // Note: p:MODULES returns a list of module NAME STRINGS, not module objects
@@ -111,35 +112,42 @@ async function scanVesselForLanding(conn: KosConnection): Promise<VesselScanResu
   //
   // Landing legs may be at stage -1 (removed from staging) - that's fine, we just
   // need to confirm they exist. Decouplers must be in staging sequence (stage >= 0).
+  //
+  // Priority for jettison:
+  // 1. Part with kOS tag "lander" that can separate (decoupler/separator/docking port)
+  // 2. Fallback: highest-staged decoupler
+  // kOS script to scan vessel - no // comments allowed (flattened to single line)
   const script = `
     LOCAL hasLegs IS FALSE.
+    LOCAL taggedStage IS -1.
     LOCAL decStages IS LIST().
-
     FOR p IN SHIP:PARTS {
       FOR m IN p:MODULES {
-        IF m = "ModuleLandingLeg" OR m = "ModuleWheelDeployment" OR m = "ModuleWheelBase" {
-          SET hasLegs TO TRUE.
-        }
+        IF m = "ModuleLandingLeg" OR m = "ModuleWheelDeployment" OR m = "ModuleWheelBase" { SET hasLegs TO TRUE. }
       }
     }
-
-    IF NOT hasLegs {
-      PRINT "NOLEGS".
-    } ELSE {
+    IF NOT hasLegs { PRINT "NOLEGS". }
+    ELSE {
       FOR p IN SHIP:PARTS {
-        IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
-          IF p:STAGE >= 0 {
-            IF NOT decStages:CONTAINS(p:STAGE) { decStages:ADD(p:STAGE). }
+        IF p:TAG = "lander" {
+          IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") OR p:HASMODULE("ModuleDockingNode") {
+            IF p:STAGE >= 0 { SET taggedStage TO p:STAGE. }
           }
         }
       }
-
-      IF decStages:LENGTH = 0 {
-        PRINT "LEGS|NODEC".
-      } ELSE {
-        LOCAL maxDecStage IS decStages[0].
-        FOR s IN decStages { IF s > maxDecStage { SET maxDecStage TO s. } }
-        PRINT "LEGS|DEC|" + maxDecStage.
+      IF taggedStage >= 0 { PRINT "LEGS|TAG|" + taggedStage. }
+      ELSE {
+        FOR p IN SHIP:PARTS {
+          IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
+            IF p:STAGE >= 0 { IF NOT decStages:CONTAINS(p:STAGE) { decStages:ADD(p:STAGE). } }
+          }
+        }
+        IF decStages:LENGTH = 0 { PRINT "LEGS|NODEC". }
+        ELSE {
+          LOCAL maxDecStage IS decStages[0].
+          FOR s IN decStages { IF s > maxDecStage { SET maxDecStage TO s. } }
+          PRINT "LEGS|DEC|" + maxDecStage.
+        }
       }
     }
   `.trim().replaceAll('\n', ' ');
@@ -157,7 +165,13 @@ async function scanVesselForLanding(conn: KosConnection): Promise<VesselScanResu
     return { hasLandingLegs: true, landingLegStage: null, jettisonStage: null };
   }
 
-  // LEGS|DEC|<decStage>
+  // LEGS|TAG|<stage> - tagged "lander" part found
+  const tagMatch = rawOutput.match(/LEGS\|TAG\|(\d+)$/);
+  if (tagMatch) {
+    return { hasLandingLegs: true, landingLegStage: null, jettisonStage: parseInt(tagMatch[1]) };
+  }
+
+  // LEGS|DEC|<decStage> - fallback to highest staged decoupler
   const decMatch = rawOutput.match(/LEGS\|DEC\|(\d+)$/);
   if (decMatch) {
     return { hasLandingLegs: true, landingLegStage: null, jettisonStage: parseInt(decMatch[1]) };

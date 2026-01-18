@@ -532,6 +532,28 @@ For most commands, `KosConnection.execute()` automatically injects a sentinel ma
 
 See `docs/kos-protocol-analysis.md` for complete protocol details.
 
+#### Multi-line kOS Scripts
+When embedding multi-line kOS scripts in TypeScript, they are typically flattened to a single line using `.replaceAll('\n', ' ')`. **Never use `//` comments in these scripts** - they will comment out everything after them on the now-single line.
+
+```typescript
+// BAD - the // comment breaks everything after it
+const script = `
+  SET x TO 1.
+  // This breaks the script
+  SET y TO 2.
+`.replaceAll('\n', ' ');
+// Result: "SET x TO 1. // This breaks the script SET y TO 2."
+// kOS sees only "SET x TO 1." - everything after // is a comment!
+
+// GOOD - no comments inside kOS script
+const script = `
+  SET x TO 1.
+  SET y TO 2.
+`.replaceAll('\n', ' ');
+```
+
+Put explanatory comments in the TypeScript code above the script string instead.
+
 #### Outcome-Based Polling
 For long-running operations like time warp, polling the actual outcome is more reliable than checking operation status:
 
