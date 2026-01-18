@@ -70,7 +70,7 @@ export const changeAscendingNodeTool: ToolDefinition = {
       if (result.success) {
         let text = result.executed
           ? 'Burn complete'
-          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
           const lanInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:LAN, 2).', 2000);
           const lan = lanInfo.output.trim();

@@ -67,7 +67,7 @@ export const returnFromMoonTool: ToolDefinition = {
       if (result.success) {
         let text = result.executed
           ? 'Burn complete'
-          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
           // Show return trajectory info
           const trajInfo = await conn.execute(

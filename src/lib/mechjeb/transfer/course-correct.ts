@@ -442,7 +442,7 @@ export async function courseCorrection(
         // Check resulting periapsis after move
         const peAfterMove = await queryNodePeriapsis(conn);
         if (peAfterMove.hasEncounter) {
-          logger?.progress(`[CourseCorrect] Node adjusted: T-${formatTime(newEta)}, Pe ${(peAfterMove.periapsis / 1000).toFixed(0)}km`);
+          logger?.progress(`[CourseCorrect] Node adjusted: in ${formatTime(newEta)}, Pe ${(peAfterMove.periapsis / 1000).toFixed(0)}km`);
         } else {
           logger?.warn(`[CourseCorrect] Node moved but encounter lost - may need different timing`);
         }
@@ -680,7 +680,7 @@ export const courseCorrectTool: ToolDefinition = {
               // Node is after SOI transition - invalid
               await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
               return ctx.errorResponse('course_correct',
-                `Course correction node is scheduled after SOI transition (T-${formatTime(result.timeToNode)} vs SOI in ${formatTime(timeToSOI)}).\n` +
+                `Course correction node is scheduled after SOI transition (in ${formatTime(result.timeToNode)} vs SOI in ${formatTime(timeToSOI)}).\n` +
                 `Execute the transfer first, warp to SOI, then course correct.`);
             }
           }
@@ -689,7 +689,7 @@ export const courseCorrectTool: ToolDefinition = {
         if (!shouldExecute) {
           // Not executing - just return node info
           return ctx.successResponse('course_correct',
-            `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}\nTarget: ${(targetDistance / 1000).toFixed(0)}km`);
+            `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}\nTarget: ${(targetDistance / 1000).toFixed(0)}km`);
         }
 
         totalBurns++;

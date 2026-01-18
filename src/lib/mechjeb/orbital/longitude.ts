@@ -70,7 +70,7 @@ export const changePeriapsisLongitudeTool: ToolDefinition = {
       if (result.success) {
         let text = result.executed
           ? 'Burn complete'
-          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
           const argPeInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:ARGUMENTOFPERIAPSIS, 2).', 2000);
           const argPe = argPeInfo.output.trim();

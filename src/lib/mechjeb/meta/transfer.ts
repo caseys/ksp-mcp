@@ -118,7 +118,7 @@ export const transferTool: ToolDefinition = {
         const nodeCount = result.nodesCreated ?? 1;
         let text = result.executed
           ? `Transfer to ${targetInfo.name} (${transferType}) burn complete`
-          : `Transfer to ${targetInfo.name} (${transferType}): ${nodeCount} node(s), ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
+          : `Transfer to ${targetInfo.name} (${transferType}): ${nodeCount} node(s), ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
 
         // Include warning if present
         if (result.warning) {

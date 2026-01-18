@@ -18,29 +18,29 @@
  *   120 → "2min 0sec" (unchanged)
  */
 export function formatTime(seconds: number): string {
-  const s = Math.abs(seconds);
-  const sign = seconds < 0 ? '-' : '';
+  // Always use absolute value - negative times don't make sense for TTS
+  const s = Math.max(0, Math.abs(seconds));
 
   // Apply latency adjustment for short times only
   if (s < 10) {
     // Imminent - already in progress
-    return 'progress...';
+    return 'mark.';
   } else if (s <= 40) {
     // Scale the 30-second range [10,40] to [0,25]
     // Formula: (s - 10) * 25/30
     const adjusted = Math.ceil((s - 10) * (25 / 30));
     if (adjusted <= 4) {
-      // Very small adjusted values look odd (e.g., "-1sec"), show countdown instead
-      return '5... 4... 3...';
+      // Very small adjusted values look odd, show countdown instead
+      return '4... 3... 2...';
     }
-    return `${sign}${adjusted}sec`;
+    return `${adjusted}sec`;
   }
 
   // Times > 40s: pass through unchanged (original formatting)
-  if (s < 60) return `${sign}${s.toFixed(0)}sec`;
-  if (s < 3600) return `${sign}${Math.floor(s / 60)}min ${Math.floor(s % 60)}sec`;
-  if (s < 86_400) return `${sign}${Math.floor(s / 3600)}hrs ${Math.floor((s % 3600) / 60)}min`;
-  return `${sign}${Math.floor(s / 86_400)}days ${Math.floor((s % 86_400) / 3600)}hrs`;
+  if (s < 60) return `${s.toFixed(0)}sec`;
+  if (s < 3600) return `${Math.floor(s / 60)}min ${Math.floor(s % 60)}sec`;
+  if (s < 86_400) return `${Math.floor(s / 3600)}hrs ${Math.floor((s % 3600) / 60)}min`;
+  return `${Math.floor(s / 86_400)}days ${Math.floor((s % 86_400) / 3600)}hrs`;
 }
 
 /**

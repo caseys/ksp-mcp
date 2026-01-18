@@ -615,7 +615,7 @@ export async function executeNode(
     };
   }
 
-  log.progress(`${logPrefix} ${fmtVel(dvRequired)}, T-${formatTime(initialNodeEta)}`);
+  log.progress(`${logPrefix} ${fmtVel(dvRequired)}, in ${formatTime(initialNodeEta)}`);
 
   // Set operation state in kOS (persists across restarts, auto-cleared by safety monitor)
   // This enables status tracking even if MCP client times out
@@ -668,7 +668,7 @@ export async function executeNode(
   const warpLeadTime = halfBurn + alignmentBuffer;
 
   if (nodeEta > warpLeadTime + 10 && config.warp.onRails) {
-    log.progress(`${logPrefix} Node in T-minus ${formatTime(nodeEta)}, burn ~${formatTime(burnDuration)}, warping to T-minus ${formatTime(warpLeadTime)}`);
+    log.progress(`${logPrefix} Helm, course set for maneuver. Ignition in ${formatTime(nodeEta)}... Engage!`);
 
     const warpTargetSeconds = nodeEta - warpLeadTime;
     await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
@@ -681,16 +681,16 @@ export async function executeNode(
       try {
         const currentEta = await queryNumber(conn, 'NEXTNODE:ETA');
         if (currentEta <= warpLeadTime + 5) {
-          log.progress(`${logPrefix} Warp complete, ETA: ${formatTime(currentEta)}`);
+          log.progress(`${logPrefix} Dropping out of warp. preparing for maneuver.`);
           break;
         }
         if (warpAttempts % 30 === 0) {
-          log.progress(`${logPrefix} Still warping, ETA: ${formatTime(currentEta)}`);
+          log.progress(`${logPrefix} On approach... ignition in ${formatTime(currentEta)}`);
         }
       } catch {
         // May be in blackout during warp - that's fine, MechJeb will handle it
         if (warpAttempts % 30 === 0) {
-          log.progress(`${logPrefix} Warping (no signal - MechJeb handling autonomously)`);
+          log.progress(`${logPrefix} Warp in progress (no signal - autopilot handling)`);
         }
       }
       warpAttempts++;
@@ -833,7 +833,7 @@ export async function executeNode(
         let statusMsg: string;
         switch (execState) {
         case 'LEAD': {
-          statusMsg = `T-${formatTime(state.nodeEta)} to ignition`;
+          statusMsg = `Ignition in ${formatTime(state.nodeEta)}`;
         
         break;
         }

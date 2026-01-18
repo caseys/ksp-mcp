@@ -254,7 +254,7 @@ export const adjustOrbitTool: ToolDefinition = {
           if (!execute) {
             return ctx.successResponse(toolName,
               `Step 1 planned: Raise Ap to ${fmtDist(targetAp)}\n` +
-              `Node: ${fmtVel(result.deltaV ?? 0)}, T-${formatTime(result.timeToNode ?? 0)}`);
+              `Node: ${fmtVel(result.deltaV ?? 0)}, in ${formatTime(result.timeToNode ?? 0)}`);
           }
           totalDeltaV += result.deltaV ?? 0;
           burns.push(`Ap: ${fmtVel(result.deltaV ?? 0)}`);
@@ -290,7 +290,7 @@ export const adjustOrbitTool: ToolDefinition = {
           if (!execute) {
             return ctx.successResponse(toolName,
               `Step 1 planned: Lower Pe to ${fmtDist(targetPe)}\n` +
-              `Node: ${fmtVel(planResult.deltaV ?? 0)}, T-${formatTime(planResult.timeToNode ?? 0)}`);
+              `Node: ${fmtVel(planResult.deltaV ?? 0)}, in ${formatTime(planResult.timeToNode ?? 0)}`);
           }
 
           // Execute the planned node
@@ -325,7 +325,7 @@ export const adjustOrbitTool: ToolDefinition = {
           if (!execute) {
             return ctx.successResponse(toolName,
               `Planned: ${action} Ap to ${fmtDist(targetAp)}\n` +
-              `Node: ${fmtVel(result.deltaV ?? 0)}, T-${formatTime(result.timeToNode ?? 0)}`);
+              `Node: ${fmtVel(result.deltaV ?? 0)}, in ${formatTime(result.timeToNode ?? 0)}`);
           }
           totalDeltaV += result.deltaV ?? 0;
           burns.push(`Ap: ${fmtVel(result.deltaV ?? 0)}`);

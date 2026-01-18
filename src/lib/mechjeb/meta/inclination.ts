@@ -113,7 +113,7 @@ export const inclinationTool: ToolDefinition = {
         if (result.success) {
           responseText = result.executed
             ? 'Match planes: burn complete'
-            : `Match planes: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
+            : `Match planes: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
 
           if (result.warning) {
             responseText += `\n${result.warning}`;
@@ -143,7 +143,7 @@ export const inclinationTool: ToolDefinition = {
         if (result.success) {
           responseText = result.executed
             ? `Change inclination to ${targetAngle}°: burn complete`
-            : `Change inclination to ${targetAngle}°: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
+            : `Change inclination to ${targetAngle}°: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
 
           if (result.warning) {
             responseText += `\n${result.warning}`;

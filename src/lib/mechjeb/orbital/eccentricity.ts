@@ -87,7 +87,7 @@ export const changeEccentricityTool: ToolDefinition = {
       if (result.success) {
         let text = result.executed
           ? 'Burn complete'
-          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, T-${formatTime(result.timeToNode ?? 0)}`;
+          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
           const eccInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:ECCENTRICITY, 4).', 2000);
           const ecc = eccInfo.output.trim();

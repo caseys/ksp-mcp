@@ -510,15 +510,15 @@ export class AscentHandle {
               const nodeEta = Number.parseFloat(etaResult.output.match(/([\d.]+)/)?.[1] ?? '0');
               if (nodeEta > 30) {
                 const warpTarget = nodeEta - 15;
-                newStatus=`[Ascent] Circularizing in T-${formatTime(nodeEta)}`;
+                newStatus=`[Ascent] Circularizing in in ${formatTime(nodeEta)}`;
                 await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
                 await delay(500);
                 await this.conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
-                newStatus=`[Ascent] Warping to burn (T-${formatTime(warpTarget)})`;
+                newStatus=`[Ascent] Warping to burn (in ${formatTime(warpTarget)})`;
               } else {
                 // Short time to burn - ensure we're in rails mode
                 await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
-                newStatus=`[Ascent] Circularizing in T-${formatTime(nodeEta)}`;
+                newStatus=`[Ascent] Circularizing in in ${formatTime(nodeEta)}`;
               }
             } catch {
               newStatus=`[Ascent] Coasting to circularization`;

@@ -367,7 +367,7 @@ async function warpToNode(
     };
   }
 
-  log.progress(`[Warp] Helm, set course for maneuver node. T-${formatTime(initialEta)}... Engage!`);
+  log.progress(`[Warp] Helm, course set for maneuver node. ETA ${formatTime(initialEta)}... Engage!`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
@@ -561,7 +561,7 @@ async function warpToOrbitalPoint(
   }
 
   const pointName = point === 'PERIAPSIS' ? 'periapsis' : 'apoapsis';
-  log.progress(`[Warp] Helm, lay in a course to ${pointName}. T-${formatTime(initialEta)}... Engage!`);
+  log.progress(`[Warp] Helm, course laid in for ${pointName}. ETA ${formatTime(initialEta)}... Engage!`);
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
