@@ -76,6 +76,13 @@ async function attemptHohmannTransfer(
     return { success: false, error: sanitizeError(result.output, 'Hohmann transfer') };
   }
 
+  // Verify MechJeb actually created a node (it returns True even when no node needed)
+  const hasNodeCheck = await conn.execute('PRINT HASNODE.', 2000);
+  if (!hasNodeCheck.output.includes('True')) {
+    // MechJeb said success but didn't create a node - likely already on transfer
+    return { success: false, noEncounter: false, error: 'MechJeb returned success but no node was created - vessel may already be on transfer trajectory' };
+  }
+
   // Query node info
   const nodeInfo = await queryNodeInfo(conn);
 
@@ -221,13 +228,91 @@ export async function hohmannTransfer(
     );
     const reachMatch = caCheck.output.match(/REACH\|(\d+)\|(\d+)/);
     if (reachMatch) {
+      // Ship's apoapsis reaches target's orbital radius - check actual encounter/approach
+      // Use ADDONS:MJ:TARGET (always available) not ADDONS:MJ:TGT (may not exist)
+      const encCheck = await conn.execute(
+        'LOCAL hasEnc IS SHIP:ORBIT:HASNEXTPATCH AND SHIP:ORBIT:NEXTPATCH:BODY:NAME = TARGET:NAME. ' +
+        'SET MJTGT TO ADDONS:MJ:TARGET. ' +
+        'LOCAL caDist IS MJTGT:CLOSESTAPPROACHDISTANCE. ' +
+        'LOCAL caTime IS MJTGT:CLOSESTAPPROACHTIME. ' +
+        'LOCAL tgtRad IS TARGET:RADIUS. ' +
+        'LOCAL tgtSOI IS TARGET:SOIRADIUS. ' +
+        'IF hasEnc { ' +
+        '  LOCAL encPe IS SHIP:ORBIT:NEXTPATCH:PERIAPSIS. ' +
+        '  LOCAL encEta IS SHIP:ORBIT:NEXTPATCHETA. ' +
+        '  PRINT "ENC|" + ROUND(encPe) + "|" + ROUND(encEta) + "|" + ROUND(tgtRad) + "|" + ROUND(tgtSOI). ' +
+        '} ELSE IF caDist > 0 AND caTime > 0 { ' +
+        '  PRINT "CA|" + ROUND(caDist) + "|" + ROUND(caTime) + "|" + ROUND(tgtRad) + "|" + ROUND(tgtSOI). ' +
+        '} ELSE { PRINT "NOAPPROACH". }',
+        5000
+      );
+
+      // Parse encounter info
+      const encMatch = encCheck.output.match(/ENC\|(-?\d+)\|(\d+)\|(\d+)\|(\d+)/);
+      if (encMatch) {
+        const periapsis = parseInt(encMatch[1]);
+        const caTime = parseInt(encMatch[2]);
+        const tgtRadius = parseInt(encMatch[3]);
+        const peKm = (periapsis / 1000).toFixed(0);
+
+        // Check if periapsis is safe (above surface)
+        if (periapsis < tgtRadius * 0.1) {
+          return {
+            success: true,
+            warning: `Already on transfer to ${targetName} with SOI encounter!\n` +
+                     `⚠️ CRASH WARNING: Periapsis ${peKm}km is dangerously low.\n` +
+                     `Use course_correct with targetDistance=50000 to raise periapsis.`
+          };
+        } else if (periapsis < 30_000) {
+          return {
+            success: true,
+            warning: `Already on transfer to ${targetName} with SOI encounter!\n` +
+                     `Periapsis: ${peKm}km in ${formatTime(caTime)} (low but safe).\n` +
+                     `Ready: warp to SOI, then circularize.`
+          };
+        } else {
+          return {
+            success: true,
+            warning: `Already on transfer to ${targetName} with SOI encounter!\n` +
+                     `Periapsis: ${peKm}km in ${formatTime(caTime)} (good).\n` +
+                     `Ready: warp to SOI, then circularize.`
+          };
+        }
+      }
+
+      // Close approach without SOI encounter
+      const closeMatch = encCheck.output.match(/CA\|(\d+)\|(\d+)\|(\d+)\|(\d+)/);
+      if (closeMatch) {
+        const caDist = parseInt(closeMatch[1]);
+        const caTime = parseInt(closeMatch[2]);
+        const tgtSOI = parseInt(closeMatch[4]);
+        const caKm = (caDist / 1000).toFixed(0);
+        const soiKm = (tgtSOI / 1000).toFixed(0);
+
+        if (caDist <= tgtSOI * 1.5) {
+          return {
+            success: true,
+            warning: `Already on transfer to ${targetName}!\n` +
+                     `Close approach: ${caKm}km in ${formatTime(caTime)} (SOI: ${soiKm}km).\n` +
+                     `Use course_correct to refine approach and achieve SOI encounter.`
+          };
+        } else {
+          return {
+            success: true,
+            warning: `Already on transfer trajectory toward ${targetName}.\n` +
+                     `Close approach: ${caKm}km in ${formatTime(caTime)} (needs refinement, SOI: ${soiKm}km).\n` +
+                     `Use course_correct to achieve SOI encounter.`
+          };
+        }
+      }
+
+      // Fallback: orbit reaches target plane but no approach data available
       const shipApo = parseInt(reachMatch[1]);
       const tgtSma = parseInt(reachMatch[2]);
-      // Ship's apoapsis reaches target's orbital radius - likely already on transfer
       return {
         success: true,
-        warning: `WARNING: Current orbit (Ap: ${(shipApo / 1000).toFixed(0)}km) already reaches ${targetName} orbital plane (${(tgtSma / 1000).toFixed(0)}km), no changes made.\n` +
-                 `This may be a transfer orbit. Check trajectory and use course_correct if needed.`
+        warning: `Current orbit (Ap: ${(shipApo / 1000).toFixed(0)}km) reaches ${targetName} orbit (${(tgtSma / 1000).toFixed(0)}km).\n` +
+                 `Use course_correct to establish encounter with ${targetName}.`
       };
     }
   }
@@ -349,6 +434,28 @@ export async function hohmannTransfer(
 
   // Handle other errors
   if (!attempt.success) {
+    // Special case: MechJeb returned success but no node created - vessel likely already on transfer
+    if (attempt.error?.includes('no node was created')) {
+      // Check current close approach distance using MechJeb's target info
+      // Use ADDONS:MJ:TARGET (always available) not ADDONS:MJ:TGT (may not exist)
+      const caCheck = await conn.execute(
+        'IF HASTARGET { SET MJTGT TO ADDONS:MJ:TARGET. PRINT "CA|" + ROUND(MJTGT:CLOSESTAPPROACHDISTANCE) + "|" + ROUND(MJTGT:CLOSESTAPPROACHTIME). } ELSE { PRINT "NOTGT". }',
+        3000
+      );
+      const caMatch = caCheck.output.match(/CA\|(-?\d+)\|(-?\d+)/);
+      if (caMatch) {
+        const caDist = parseInt(caMatch[1]);
+        const caTime = parseInt(caMatch[2]);
+        if (caDist > 0 && caTime > 0) {
+          return {
+            success: true,
+            warning: `Already on transfer trajectory to ${targetName}!\n` +
+                     `Closest approach: ${(caDist / 1000).toFixed(0)}km in ${formatTime(caTime)}\n` +
+                     `Use course_correct to fine-tune approach or warp to SOI change.`
+          };
+        }
+      }
+    }
     return { success: false, error: attempt.error ?? 'Hohmann transfer failed' };
   }
 

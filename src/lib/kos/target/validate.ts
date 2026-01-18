@@ -83,8 +83,19 @@ export async function getTargetValidationInfo(conn: KosConnection): Promise<Targ
     'PRINT "INFO|" + _tgtType + "|" + _tgtName + "|" + _tgtParent + "|" + _inSOI + "|" + _tgtRad.',
   ].join(' ');
 
-  const infoResult = await conn.execute(infoCmd, 3000);
-  const infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/);
+  // Flush stale data before query (prevents reading leftover output from previous commands)
+  await conn.flushStaleData(50);
+
+  // Retry once if output is empty (handles timing/buffer issues)
+  let infoResult = await conn.execute(infoCmd, 5000);
+  let infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/);
+
+  if (!infoMatch && infoResult.output.trim() === '') {
+    // Empty output - wait briefly and retry
+    await new Promise(r => setTimeout(r, 200));
+    infoResult = await conn.execute(infoCmd, 5000);
+    infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/);
+  }
 
   if (!infoMatch) {
     throw new Error(`[validateTarget] Failed to parse target info. Output: "${infoResult.output}"`);

@@ -7,7 +7,9 @@
 
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition, ToolContext } from './tool-types.js';
-import { getKosOperation } from '../utils/kos-operation-state.js';
+import { getKosOperation, clearKosOperation } from '../utils/kos-operation-state.js';
+import { getOperationProgress } from './mechjeb/telemetry.js';
+import { addBroadcastSubscriber, getActiveBroadcastLogger } from '../utils/mcp-logger.js';
 
 // Import tool definitions from lib files
 
@@ -181,20 +183,44 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
         _meta: { tier: tool.tier },
       },
       async (args, extra) => {
-        // Check operation guard (exempt certain tools)
+        // Smart operation guard with auto-recovery from stale operations
         if (!GUARD_EXEMPT_TOOLS.has(tool.name)) {
           const conn = context.getConnection();
           if (conn) {
             const activeOp = await getKosOperation(conn);
-            if (activeOp && activeOp.toolName !== tool.name) {
-              const duration = Math.round(activeOp.duration);
-              return {
-                isError: true,
-                content: [{
-                  type: 'text' as const,
-                  text: `Cannot run ${tool.name}: ${activeOp.toolName} is currently executing (${duration}s). Use abort_operation to cancel, or continue_operation to subscribe to notifications.`,
-                }],
-              };
+            if (activeOp) {
+              const isSameTool = activeOp.toolName === tool.name;
+              const isStale = activeOp.duration > 600; // 10 minutes
+
+              // Check if MechJeb autopilot is actually still running
+              const progress = await getOperationProgress(conn);
+              const isRunning = progress?.running ?? false;
+
+              if (!isRunning) {
+                // Operation completed or failed - clear and proceed
+                await clearKosOperation(conn);
+              } else if (!isSameTool) {
+                // Different tool requested - clear and proceed
+                await clearKosOperation(conn);
+              } else if (isStale) {
+                // Same tool but stale (>10 min) - clear and proceed
+                await clearKosOperation(conn);
+              } else {
+                // Same tool, <10 min, still running - subscribe to broadcast
+                const broadcastLogger = getActiveBroadcastLogger();
+                if (broadcastLogger) {
+                  addBroadcastSubscriber(extra);
+                  const duration = Math.round(activeOp.duration);
+                  return {
+                    content: [{
+                      type: 'text' as const,
+                      text: `${tool.name} is already running (${duration}s). Subscribed to progress notifications.\nTarget: ${activeOp.target || 'N/A'}`,
+                    }],
+                  };
+                }
+                // No broadcast logger means operation lost its logger (shouldn't happen)
+                await clearKosOperation(conn);
+              }
             }
           }
         }

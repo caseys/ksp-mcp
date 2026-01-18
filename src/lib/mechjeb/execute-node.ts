@@ -375,21 +375,20 @@ const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 
 // Alignment configuration
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
-const OSCILLATION_THRESHOLD = 8; // degrees - if stuck oscillating below this, try SAS fallback
-const OSCILLATION_TIME = 8000; // ms - time oscillating before SAS fallback
-const SKIP_ROLL_THRESHOLD = 110; // degrees - skip roll alignment if angle > this (just point at target)
-const STEERING_RESET_TRIGGER_TIME = 5000; // ms - unlock and re-lock steering if still stuck
+const ALIGN_POLL_INTERVAL = 600; // ms - poll interval for alignment
+const MODE_SWITCH_INTERVAL = 2; // switch steering mode every N poll cycles
+
+/** Steering mode for alignment */
+type SteeringMode = 'lock' | 'sas';
 
 /**
- * Align ship to maneuver node using two-pass steering for faster, cleaner alignment.
+ * Align ship to maneuver node using alternating steering modes.
  *
- * Two-pass approach:
- * 1. Pass 1: Roll-only alignment - rotates around forward axis to set target roll
- * 2. Pass 2: Pitch/Yaw alignment - points to burn vector while preserving roll
- *
- * This prevents unnecessary roll corrections that slow down single-pass alignment.
- *
- * Fallback: If LOCK STEERING makes no progress, falls back to SAS MANEUVER mode.
+ * Approach:
+ * - Enable physics warp x2 at start for faster rotation
+ * - Alternate between LOCK STEERING and SAS MANEUVER when stuck
+ * - RCS pulses in both modes (unless noRcs)
+ * - Reset to rails warp x1 at end
  *
  * @param conn kOS connection
  * @param logger Optional MCP logger for progress updates
@@ -406,16 +405,11 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
     return false;
   }
 
-  // Check initial angle (determines if we do roll alignment first)
+  // Check initial angle
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+  log.progress(`${logPrefix} Aligning to burn vector (${fmtNum(initialAngle)}°)...`);
 
-  // If noRcs mode, ensure RCS is off to prevent trajectory changes during alignment
-  if (noRcs) {
-    await conn.execute('RCS OFF.');
-  }
-
-  // Check if vessel supports SAS MANEUVER mode (for fallback)
-  // MANEUVER requires: pilot with experience >= 3, OR advanced probe core
+  // Check if vessel supports SAS MANEUVER mode
   const sasCapabilityCheck = await conn.execute(`
     LOCAL has_sas3 IS FALSE.
     FOR c IN SHIP:CREW {
@@ -441,225 +435,118 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
 
   const supportsSasManeuver = sasCapabilityCheck.output.includes('SAS3:True');
 
-  const alignStartTime = Date.now();
-  let warnedSlow = false;
+  // ========== ENABLE PHYSICS WARP AT START ==========
+  try {
+    await conn.execute('SAS OFF. UNLOCK STEERING. SET WARPMODE TO "PHYSICS". SET WARP TO 1.');
+  } catch { /* ignore warp errors */ }
+
+  // Start with LOCK STEERING mode
+  // Use object to avoid TypeScript control flow narrowing issues with async callbacks
+  const state = { currentMode: 'lock' as SteeringMode, pollCount: 0 };
+  let lastAngle = initialAngle;
+
+  /** Switch to LOCK STEERING mode */
+  async function switchToLock(): Promise<void> {
+    const script = `
+      SAS OFF. WAIT 0.1.
+      LOCAL frozenTop IS SHIP:FACING:TOPVECTOR.
+      LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, frozenTop).
+    `.trim().replaceAll('\n', ' ');
+    await conn.execute(script, 3000);
+    state.currentMode = 'lock';
+  }
+
+  /** Switch to SAS MANEUVER mode */
+  async function switchToSas(): Promise<void> {
+    await conn.execute('UNLOCK STEERING. SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER".', 3000);
+    state.currentMode = 'sas';
+  }
+
+  // Initialize LOCK STEERING
+  const initScript = `
+    SAS OFF. WAIT 0.1.
+    LOCAL frozenTop IS SHIP:FACING:TOPVECTOR.
+    LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, frozenTop).
+  `.trim().replaceAll('\n', ' ');
+  await conn.execute(initScript, 3000);
 
   interface AlignState {
     angle: number;
     aligned: boolean;
   }
 
-  // ========== PASS 1: ROLL ALIGNMENT (skip if large angle change needed) ==========
-  // Skip roll alignment if we need to turn > 110° - just point at target directly
-  if (initialAngle <= SKIP_ROLL_THRESHOLD) {
-    // Rotate around forward axis to set target roll, without changing pitch/yaw
-
-    // IMPORTANT: Capture forward vector ONCE to prevent drift during roll adjustment
-    const pass1Script = `
-      LOCAL finalDir IS NEXTNODE:BURNVECTOR:NORMALIZED.
-      LOCAL finalRot IS LOOKDIRUP(finalDir, V(0,1,0)).
-      LOCAL targetUp IS finalRot:TOPVECTOR.
-      LOCAL frozenFwd IS SHIP:FACING:FOREVECTOR.
-      LOCK STEERING TO LOOKDIRUP(frozenFwd, targetUp).
-    `.trim().replaceAll('\n', ' ');
-
-    await conn.execute('SAS OFF. WAIT 0.1.', 2000);
-
-    // Tiny RCS burst to break any drift before alignment (skip for small burns)
-    if (!noRcs) {
-      try { await conn.execute('RCS ON. WAIT 0.05. RCS OFF.'); } catch { /* ignore */ }
-    }
-
-    await conn.execute(pass1Script, 5000);
-
-    let pass1LastAngle = 180;
-    let _pass1NoProgress = Date.now();
-
-    // Pass 1 result not checked - we proceed to pass 2 regardless (it will handle any remaining misalignment)
-    await pollWithBlackoutResilience<AlignState>({
-      poll: async () => {
-        const result = await conn.execute(`
-          LOCAL finalDir IS NEXTNODE:BURNVECTOR:NORMALIZED.
-          LOCAL finalRot IS LOOKDIRUP(finalDir, V(0,1,0)).
-          LOCAL targetUp IS finalRot:TOPVECTOR.
-          PRINT VANG(SHIP:FACING:TOPVECTOR, targetUp).
-        `.trim().replaceAll('\n', ' '), 3000);
-        const angle = parseNumber(result.output);
-        const effectiveAngle = (angle === 0 && pass1LastAngle > 10) ? pass1LastAngle : angle;
-        return { angle: effectiveAngle, aligned: effectiveAngle < ALIGN_THRESHOLD };
-      },
-      isDone: (s) => s.aligned,
-      isSuccess: (s) => s.aligned,
-      timeoutMs: 10_000,  // 10 seconds max for roll
-      pollIntervalMs: 500,
-      logger: log,
-      context: 'AlignRoll',
-      connection: conn,
-      onPoll: async (s) => {
-        // Silent roll alignment - just track progress
-        if (s.angle < pass1LastAngle - 0.5) {
-          _pass1NoProgress = Date.now();
-          pass1LastAngle = s.angle;
-        }
-        // RCS pulse to help rotation (skip for small burns)
-        if (!noRcs) {
-          try { await conn.execute('RCS ON. WAIT 0.15. RCS OFF.'); } catch { /* ignore */ }
-        }
-      },
-    });
-  } else {
-    // Large angle - skip roll alignment, just point directly at target
-    await conn.execute('SAS OFF.', 2000);
-  }
-
-  // ========== PASS 2: PITCH/YAW ALIGNMENT ==========
-  // Point to burn vector while maintaining current topvector (preserves roll)
-  log.progress(`${logPrefix} Aligning to burn vector...`);
-
-  // Query actual angle at start of pass 2 (may differ from initialAngle after roll alignment)
-  const pass2StartAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-
-  // Enable physics warp BEFORE locking steering - only for large angles (>60°)
-  // This speeds up alignment without constant warp adjustments interfering with steering
-  const WARP_THRESHOLD = 60;
-  const usePhysicsWarp = pass2StartAngle > WARP_THRESHOLD;
-  if (usePhysicsWarp) {
-    try {
-      await conn.execute('SET WARPMODE TO "PHYSICS". SET WARP TO 2.');
-      log.info(`${logPrefix} Physics warp enabled for large angle (${fmtNum(pass2StartAngle)}°)`);
-    } catch { /* ignore warp errors */ }
-  }
-
-  // Use LOCK STEERING with roll preservation as primary method
-  // IMPORTANT: Capture topvector ONCE to avoid instability from continuously reading a moving value
-  const pass2Script = `
-    LOCAL frozenTop IS SHIP:FACING:TOPVECTOR.
-    LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, frozenTop).
-  `.trim().replaceAll('\n', ' ');
-  await conn.execute(pass2Script, 3000);
-  let usingSasMode = false;
-
-  let pass2LastAngle = 180;
-  let pass2NoProgress = Date.now();
-  let oscillationStart: number | null = null; // Track when we entered oscillation zone
-  let triedSasFallback = false;
-
-  const pass2Result = await pollWithBlackoutResilience<AlignState>({
+  const alignResult = await pollWithBlackoutResilience<AlignState>({
     poll: async () => {
       const result = await conn.execute('PRINT VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR).', 2000);
       const angle = parseNumber(result.output);
-      const effectiveAngle = (angle === 0 && pass2LastAngle > 10) ? pass2LastAngle : angle;
+      // Protect against spurious 0 readings
+      const effectiveAngle = (angle === 0 && lastAngle > 10) ? lastAngle : angle;
       return { angle: effectiveAngle, aligned: effectiveAngle < ALIGN_THRESHOLD };
     },
     isDone: (s) => s.aligned,
     isSuccess: (s) => s.aligned,
-    timeoutMs: 60_000,  // 60 seconds max for pitch/yaw
-    pollIntervalMs: 750,
+    timeoutMs: 60_000,  // 60 seconds max
+    pollIntervalMs: ALIGN_POLL_INTERVAL,
     logger: log,
-    context: 'AlignPitchYaw',
+    context: 'Align',
     connection: conn,
     onPoll: async (s) => {
-      // Stop physics warp when getting close to aligned (< 30°)
-      if (usePhysicsWarp && s.angle < 30) {
-        try { await conn.execute('SET WARP TO 0.'); } catch { /* ignore */ }
-      }
+      state.pollCount++;
 
       if (s.aligned) {
         log.progress(`${logPrefix} Aligned (${fmtNum(s.angle)}°)`);
         return;
       }
 
-      // Log progress only for significant angle changes (every ~20°) or every 5 seconds
-      const angleChanged = pass2LastAngle - s.angle >= 20;
-      const timeElapsed = Date.now() - pass2NoProgress >= 5000;
-      if (angleChanged || timeElapsed) {
-        log.progress(`${logPrefix} Aligning: ${fmtNum(s.angle)}° to go`);
+      // Log progress periodically (every ~15° or every 5 polls)
+      const angleChanged = lastAngle - s.angle >= 15;
+      if (angleChanged || state.pollCount % 5 === 0) {
+        log.progress(`${logPrefix} Aligning: ${fmtNum(s.angle)}° (${state.currentMode})`);
       }
 
-      // Warn if alignment is taking a long time (but don't fail)
-      if (!warnedSlow && Date.now() - alignStartTime > 30_000) {
-        log.warn(`${logPrefix} Alignment is slow (30s+), angle: ${fmtNum(s.angle)}°`);
-        warnedSlow = true;
-      }
+      lastAngle = s.angle;
 
-      // RCS pulse (skip for small burns)
+      // RCS pulse to help rotation (in both modes, unless noRcs)
       if (!noRcs) {
-        try { await conn.execute('RCS ON. WAIT 0.15. RCS OFF.'); } catch { /* ignore */ }
+        try { await conn.execute('RCS ON. WAIT 0.12. RCS OFF.'); } catch { /* ignore */ }
       }
 
-      // Track oscillation: we're close but can't settle below threshold
-      if (s.angle < OSCILLATION_THRESHOLD && s.angle >= ALIGN_THRESHOLD) {
-        if (oscillationStart === null) {
-          oscillationStart = Date.now();
-        }
-      } else {
-        oscillationStart = null; // Reset if we move out of oscillation zone
-      }
-
-      // Progress tracking & SAS fallback for stuck steering
-      const timeSinceProgress = Date.now() - pass2NoProgress;
-      if (s.angle < pass2LastAngle - 0.5) {
-        pass2NoProgress = Date.now();
-        pass2LastAngle = s.angle;
-        triedSasFallback = false;
-      }
-
-      // SAS fallback triggers on either:
-      // 1. Steering completely stuck (no progress for STEERING_RESET_TRIGGER_TIME)
-      // 2. Oscillating in the close zone for OSCILLATION_TIME
-      const isStuck = timeSinceProgress > STEERING_RESET_TRIGGER_TIME;
-      const isOscillating = oscillationStart !== null && (Date.now() - oscillationStart) > OSCILLATION_TIME;
-
-      if ((isStuck || isOscillating) && !usingSasMode && !triedSasFallback && supportsSasManeuver) {
-        const reason = isOscillating ? 'oscillating' : 'stuck';
-        try {
-          log.progress(`${logPrefix} Steering ${reason}, trying SAS MANEUVER... (${fmtNum(s.angle)}°)`);
-          await conn.execute('UNLOCK STEERING. SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER".');
-          usingSasMode = true;
-          triedSasFallback = true;
-          pass2NoProgress = Date.now();
-          oscillationStart = null;
-        } catch {
-          log.progress(`${logPrefix} SAS fallback failed, continuing...`);
-          triedSasFallback = true;
+      // Switch steering mode every MODE_SWITCH_INTERVAL polls
+      if (state.pollCount % MODE_SWITCH_INTERVAL === 0) {
+        if (state.currentMode === 'lock' && supportsSasManeuver) {
+          await switchToSas();
+        } else {
+          await switchToLock();
         }
       }
     },
   });
 
-  // Always unlock steering, disable SAS, and stop warp when done (MechJeb will take over)
+  // ========== CLEANUP: RESET TO RAILS WARP ==========
   try {
     await conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".');
   } catch { /* ignore warp errors */ }
+
+  // Clean up steering
   try {
-    if (usingSasMode) {
+    if (state.currentMode === 'sas') {
       await conn.execute('SAS OFF.');
     } else {
       await conn.execute('UNLOCK STEERING. SAS OFF.');
     }
-  } catch {
-    // Ignore cleanup errors
-  }
+  } catch { /* ignore */ }
 
-  // Tiny RCS burst to settle drift after alignment (skip for small burns)
-  if (!noRcs) {
-    try { await conn.execute('RCS ON. WAIT 0.05. RCS OFF.'); } catch { /* ignore */ }
-  }
-
-  // Ensure RCS is off at end of alignment
+  // Ensure RCS is off
   try {
     await conn.execute('RCS OFF.');
-  } catch {
-    // Ignore errors during cleanup
-  }
+  } catch { /* ignore */ }
 
-  // Final verification (silent - already logged "Aligned" in onPoll)
+  // Final verification
   try {
     const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
     return finalAngle < ALIGN_THRESHOLD;
   } catch {
-    // If we can't verify, trust the poll result
-    return pass2Result.success;
+    return alignResult.success;
   }
 }
 
@@ -864,49 +751,70 @@ export async function executeNode(
 
     // Track last valid state for fallback during parsing errors
     let lastValidState: BurnPollState | null = null;
+    let parseFailureCount = 0;
+    const MAX_PARSE_FAILURES = 10; // After this many failures, assume state is stale and check node directly
 
     // Wait for burn completion using pollWithBlackoutResilience
     const result = await pollWithBlackoutResilience<BurnPollState>({
       poll: async () => {
-        // Query progress - when MechJeb completes the burn, it removes the node
+        // Query MechJeb state first - this is most reliable for completion detection
+        // Then query node if it exists. Split into two parts to handle node removal gracefully.
         const progressResult = await conn.execute(
-          'IF HASNODE { PRINT NEXTNODE:DELTAV:MAG + "|" + ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + ROUND(NEXTNODE:ETA). } ELSE { PRINT "NONODE". }',
+          'PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + HASNODE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0) + "|" + (CHOOSE ROUND(NEXTNODE:ETA) IF HASNODE ELSE 0).',
           3000
         );
 
-        // Node removed = burn complete (MechJeb removes node when done)
-        // IMPORTANT: Check for NONODE as actual output, not in command echo
-        const noNode = /(?:^|\n|PRINT ""\.)NONODE(?:\n|$|")/i.test(progressResult.output);
-        if (noNode) {
-          return { noNode: true, dvRemaining: 0, executorEnabled: false, executorState: 'IDLE', burnComplete: true, executorStopped: false, nodeEta: 0 };
+        // Check for no node - either HASNODE returned False or node was removed
+        // Format: enabled|state|hasNode|dv|eta
+        const noNodeMatch = progressResult.output.match(/(True|False)\|(\w+)\|False\|/i);
+        if (noNodeMatch) {
+          const executorEnabled = noNodeMatch[1].toLowerCase() === 'true';
+          const executorState = noNodeMatch[2];
+          return { noNode: true, dvRemaining: 0, executorEnabled, executorState, burnComplete: true, executorStopped: false, nodeEta: 0 };
         }
 
-        // Parse "dv|enabled|state|eta" format
-        // IMPORTANT: Use \d[\d.]* to require starting with a digit
-        const progressMatch = progressResult.output.match(/(\d[\d.]*)\|(True|False)\|(\w+)\|(-?\d+)/i);
+        // Parse "enabled|state|hasNode|dv|eta" format (hasNode=True case)
+        const progressMatch = progressResult.output.match(/(True|False)\|(\w+)\|True\|([\d.]+)\|(-?\d+)/i);
         if (!progressMatch) {
-          // Parsing failed but connection worked - return last valid state or a placeholder
-          // Don't throw - that would trigger false blackout detection
+          parseFailureCount++;
+          // After too many parse failures, do a direct node check to break the stall
+          if (parseFailureCount >= MAX_PARSE_FAILURES) {
+            log.warn(`${logPrefix} Parse failures detected, checking node directly...`);
+            try {
+              const directCheck = await conn.execute('PRINT HASNODE.', 2000);
+              if (!directCheck.output.includes('True')) {
+                return { noNode: true, dvRemaining: 0, executorEnabled: false, executorState: 'IDLE', burnComplete: true, executorStopped: false, nodeEta: 0 };
+              }
+            } catch { /* ignore */ }
+            parseFailureCount = 0; // Reset and continue
+          }
+          // Return last valid state if available (but don't loop forever)
           if (lastValidState) {
-            return lastValidState; // Keep monitoring with last known state
+            return lastValidState;
           }
           // No previous state - return a "still checking" state
           return { noNode: false, dvRemaining: 999, executorEnabled: true, executorState: 'WARPALIGN', burnComplete: false, executorStopped: false, nodeEta: 0 };
         }
 
-        const dvRemaining = Number.parseFloat(progressMatch[1]);
-        const executorEnabled = progressMatch[2].toLowerCase() === 'true';
-        const executorState = progressMatch[3];
+        // Successful parse - reset failure counter
+        parseFailureCount = 0;
+
+        const executorEnabled = progressMatch[1].toLowerCase() === 'true';
+        const executorState = progressMatch[2];
+        const dvRemaining = Number.parseFloat(progressMatch[3]);
         const nodeEta = Number.parseInt(progressMatch[4]);
         const burnComplete = dvRemaining < DV_THRESHOLD;
-        const executorStopped = !executorEnabled && dvRemaining >= DV_THRESHOLD;
+        // Executor stopped: either disabled, or IDLE state (MechJeb sets IDLE when done even if enabled)
+        const executorIdle = executorState.toUpperCase() === 'IDLE';
+        const executorStopped = (!executorEnabled || executorIdle) && dvRemaining >= DV_THRESHOLD;
 
         const state = { noNode: false, dvRemaining, executorEnabled, executorState, burnComplete, executorStopped, nodeEta };
         lastValidState = state; // Save for fallback
         return state;
       },
 
-      isDone: (state) => state.noNode || state.burnComplete || state.executorStopped,
+      // Include executorIdle in isDone check - MechJeb going IDLE means it's done (for better or worse)
+      isDone: (state) => state.noNode || state.burnComplete || state.executorStopped || state.executorState.toUpperCase() === 'IDLE',
       isSuccess: (state) => state.noNode || state.burnComplete,
 
       timeoutMs,
@@ -967,19 +875,22 @@ export async function executeNode(
       const state = result.result;
 
       if (state.noNode || state.burnComplete) {
-        await stopWarp(conn);
+        // All cleanup commands wrapped in try/catch to prevent stalls if connection dies
+        try { await stopWarp(conn); } catch { /* ignore */ }
+
         // Log completion - show residual dV only if significant (> 0.5 m/s)
         if (state.dvRemaining > 0.5) {
           log.progress(`${logPrefix} Burn complete (${fmtVel(state.dvRemaining)} residual)`);
         } else {
           log.progress(`${logPrefix} Burn complete`);
         }
+
         // Clear any residual node to avoid "No maneuver nodes present!" errors
-        await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000);
+        try { await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000); } catch { /* ignore */ }
 
         // Restore thrust if it was limited for small burns
         if (thrustWasLimited) {
-          await restoreEngineThrust(conn, log);
+          try { await restoreEngineThrust(conn, log); } catch { /* ignore */ }
         }
 
         // RCS refinement for small burns - DISABLED

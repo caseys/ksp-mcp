@@ -139,101 +139,90 @@ interface ClosestApproachInfo {
  * Uses MechJeb TGT module first, then kOS orbit suffixes, then geometric check.
  */
 async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproachInfo> {
-  const script = `
-    LOCAL found IS FALSE.
-    LOCAL dist IS 0.
-    LOCAL t IS 0.
-    LOCAL inCurrent IS TRUE.
-    LOCAL patchBody IS "".
-    LOCAL intermediate IS "".
+  // Split into multiple simpler queries for reliability
 
-    // First try MechJeb TGT module - works even for non-intersecting orbits
-    IF HASTARGET AND ADDONS:MJ:HASSUFFIX("TGT") {
-      LOCAL mjDist IS ADDONS:MJ:TGT:CLOSESTAPPROACHDISTANCE.
-      LOCAL mjTime IS ADDONS:MJ:TGT:CLOSESTAPPROACHTIME.
-      IF mjDist > 0 AND mjTime > 0 {
-        SET found TO TRUE.
-        SET dist TO mjDist.
-        SET t TO mjTime.
+  // Check 1: SOI encounter (pure kOS, most reliable)
+  const encResult = await conn.execute(
+    'IF SHIP:ORBIT:HASNEXTPATCH AND HASTARGET { ' +
+    'LOCAL nb IS SHIP:ORBIT:NEXTPATCH:BODY:NAME. ' +
+    'IF nb = TARGET:NAME { PRINT "ENC|" + nb. } ELSE { PRINT "INT|" + nb. } ' +
+    '} ELSE { PRINT "NOENC". }',
+    3000
+  );
+
+  let intermediateBody: string | undefined;
+  if (encResult.output.includes('ENC|')) {
+    // We have a direct encounter - use that
+    const encMatch = encResult.output.match(/ENC\|(\w+)/);
+    if (encMatch) {
+      // Query encounter details
+      const detailResult = await conn.execute(
+        'PRINT "DET|" + ROUND(SHIP:ORBIT:NEXTPATCHETA) + "|" + TARGET:NAME.',
+        3000
+      );
+      const detMatch = detailResult.output.match(/DET\|(\d+)\|(\w+)/);
+      if (detMatch) {
+        return {
+          hasApproach: true,
+          distance: 0, // Actual encounter, not just close approach
+          time: parseInt(detMatch[1]),
+          inCurrentPatch: true,
+        };
       }
     }
-
-    // Check for intermediate body (transfer through wrong moon)
-    IF SHIP:ORBIT:HASNEXTPATCH {
-      LOCAL nextBody IS SHIP:ORBIT:NEXTPATCH:BODY:NAME.
-      IF HASTARGET AND nextBody <> TARGET:NAME {
-        SET intermediate TO nextBody.
-      }
-    }
-
-    // Fallback: kOS orbit suffixes (only works for intersecting orbits)
-    IF NOT found AND HASTARGET AND SHIP:ORBIT:TARGETDISTANCE > 0 {
-      SET found TO TRUE.
-      SET dist TO SHIP:ORBIT:TARGETDISTANCE.
-      SET t TO SHIP:ORBIT:TARGETTIME.
-    }
-
-    // Fallback: check future patches
-    IF NOT found {
-      LOCAL patch IS SHIP:ORBIT.
-      LOCAL count IS 0.
-      UNTIL count > 5 {
-        IF patch:HASNEXTPATCH {
-          SET patch TO patch:NEXTPATCH.
-          SET patchBody TO patch:BODY:NAME.
-          IF HASTARGET AND patch:TARGETDISTANCE > 0 {
-            SET found TO TRUE.
-            SET dist TO patch:TARGETDISTANCE.
-            SET t TO patch:TARGETTIME.
-            SET inCurrent TO FALSE.
-            BREAK.
-          }
-        } ELSE { BREAK. }
-        SET count TO count + 1.
-      }
-    }
-
-    // Final fallback: geometric check - does our orbit reach the target's orbital radius?
-    // If apoapsis >= target's semi-major axis * 0.8, we're in a potential transfer orbit
-    IF NOT found AND HASTARGET AND TARGET:TYPENAME = "Body" AND TARGET:HASSUFFIX("ORBIT") {
-      LOCAL tgtSma IS TARGET:ORBIT:SEMIMAJORAXIS.
-      LOCAL shipApo IS APOAPSIS + SHIP:BODY:RADIUS.
-      IF shipApo >= tgtSma * 0.8 {
-        SET found TO TRUE.
-        SET dist TO TARGET:DISTANCE.
-        SET t TO ETA:APOAPSIS.
-      }
-    }
-
-    IF found {
-      PRINT "CA|" + ROUND(dist) + "|" + ROUND(t) + "|" + inCurrent + "|" + patchBody + "|" + intermediate.
-    } ELSE {
-      PRINT "NOCA".
-    }
-  `.trim().replaceAll('\n', ' ');
-
-  const result = await conn.execute(script, 10_000);
-  const output = result.output.trim();
-
-  // Check for no closest approach
-  if (output.endsWith('NOCA')) {
-    return { hasApproach: false, distance: 0, time: 0, inCurrentPatch: true };
+  } else if (encResult.output.includes('INT|')) {
+    const intMatch = encResult.output.match(/INT\|(\w+)/);
+    intermediateBody = intMatch?.[1];
   }
 
-  // Parse CA|dist|time|inCurrent|patchBody|intermediate
-  const match = output.match(/CA\|(\d+)\|(\d+)\|(True|False)\|([^|]*)\|([^|]*)$/i);
-  if (!match) {
-    return { hasApproach: false, distance: 0, time: 0, inCurrentPatch: true };
+  // Check 2: Geometric check - does orbit reach target's orbital plane? (pure kOS)
+  const geoResult = await conn.execute(
+    'IF HASTARGET AND TARGET:TYPENAME = "Body" { ' +
+    'LOCAL tgtSma IS TARGET:ORBIT:SEMIMAJORAXIS. ' +
+    'LOCAL shipApo IS APOAPSIS + SHIP:BODY:RADIUS. ' +
+    'IF shipApo >= tgtSma * 0.8 { ' +
+    'PRINT "GEO|" + ROUND(TARGET:DISTANCE) + "|" + ROUND(ETA:APOAPSIS) + "|" + ROUND(TARGET:SOIRADIUS). ' +
+    '} ELSE { PRINT "NOGEO". } ' +
+    '} ELSE { PRINT "NOGEO". }',
+    3000
+  );
+
+  const geoMatch = geoResult.output.match(/GEO\|(\d+)\|(\d+)\|(\d+)/);
+  if (geoMatch) {
+    return {
+      hasApproach: true,
+      distance: parseInt(geoMatch[1]),
+      time: parseInt(geoMatch[2]),
+      inCurrentPatch: true,
+      intermediateBody,
+    };
   }
 
-  return {
-    hasApproach: true,
-    distance: parseInt(match[1]),
-    time: parseInt(match[2]),
-    inCurrentPatch: match[3].toLowerCase() === 'true',
-    patchBody: match[4] || undefined,
-    intermediateBody: match[5] || undefined,
-  };
+  // Check 3: Try MechJeb target module (may not always work)
+  try {
+    const mjResult = await conn.execute(
+      'IF HASTARGET { SET MJTGT TO ADDONS:MJ:TARGET. ' +
+      'LOCAL d IS MJTGT:CLOSESTAPPROACHDISTANCE. LOCAL t IS MJTGT:CLOSESTAPPROACHTIME. ' +
+      'IF d > 0 AND t > 0 { PRINT "MJ|" + ROUND(d) + "|" + ROUND(t). } ELSE { PRINT "NOMJ". } ' +
+      '} ELSE { PRINT "NOMJ". }',
+      3000
+    );
+
+    const mjMatch = mjResult.output.match(/MJ\|(\d+)\|(\d+)/);
+    if (mjMatch) {
+      return {
+        hasApproach: true,
+        distance: parseInt(mjMatch[1]),
+        time: parseInt(mjMatch[2]),
+        inCurrentPatch: true,
+        intermediateBody,
+      };
+    }
+  } catch {
+    // MechJeb access failed - continue without it
+  }
+
+  return { hasApproach: false, distance: 0, time: 0, inCurrentPatch: true, intermediateBody };
 }
 
 /**
@@ -463,24 +452,55 @@ export async function courseCorrection(
     // Non-fatal - proceed with original node timing
   }
 
-  // Check resulting periapsis from node prediction
+  // Check resulting trajectory from node prediction
   const nodeResult = await queryNodePeriapsis(conn);
-  if (!nodeResult.hasEncounter) {
+  const nodeInfo = await queryNodeInfo(conn);
+
+  if (nodeResult.hasEncounter) {
+    // Great - we have an SOI encounter
     return {
-      success: false,
-      error: 'Course correction resulted in no encounter',
+      success: true,
+      deltaV: nodeInfo.deltaV,
+      timeToNode: nodeInfo.timeToNode,
       attempts: 1,
-      finalPeriapsis: 0,
+      finalPeriapsis: nodeResult.periapsis,
     };
   }
 
-  const nodeInfo = await queryNodeInfo(conn);
+  // No SOI encounter yet, but MechJeb created a node - check if it improves close approach
+  // Query the predicted close approach after the node
+  try {
+    const caResult = await conn.execute(
+      'IF HASNODE AND HASTARGET { SET MJTGT TO ADDONS:MJ:TARGET. ' +
+      'PRINT "CA|" + ROUND(MJTGT:CLOSESTAPPROACHDISTANCE) + "|" + ROUND(MJTGT:CLOSESTAPPROACHTIME). ' +
+      '} ELSE { PRINT "NOCA". }',
+      3000
+    );
+    const caMatch = caResult.output.match(/CA\|(\d+)\|(\d+)/);
+    if (caMatch) {
+      const caDist = parseInt(caMatch[1]);
+      const caTime = parseInt(caMatch[2]);
+      // If we have a close approach, the node is useful even without SOI entry
+      if (caDist > 0 && caTime > 0) {
+        return {
+          success: true,
+          deltaV: nodeInfo.deltaV,
+          timeToNode: nodeInfo.timeToNode,
+          attempts: 1,
+          finalPeriapsis: caDist, // Use close approach as "periapsis" estimate
+          warning: `Close approach: ${(caDist / 1000).toFixed(0)}km (no SOI entry yet - may need additional correction)`,
+        };
+      }
+    }
+  } catch {
+    // MechJeb query failed - continue to error
+  }
+
   return {
-    success: true,
-    deltaV: nodeInfo.deltaV,
-    timeToNode: nodeInfo.timeToNode,
+    success: false,
+    error: 'Course correction resulted in no encounter',
     attempts: 1,
-    finalPeriapsis: nodeResult.periapsis,
+    finalPeriapsis: 0,
   };
 }
 

@@ -36,6 +36,7 @@ import { fmtVel, fmtDist } from '../../utils/format.js';
  * - Landed vessel on same body as ship
  * Returns { valid, lat?, lng?, name? } or { valid: false }
  */
+let myBody:string;
 async function getValidLandingTarget(conn: KosConnection): Promise<{
   valid: boolean;
   latitude?: number;
@@ -58,6 +59,7 @@ async function getValidLandingTarget(conn: KosConnection): Promise<{
 
     // Verify it's on our current body
     const shipBody = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+    myBody = shipBody.output;
     if (shipBody.output.includes(body)) {
       return { valid: true, latitude: lat, longitude: lng, name: `Position ${lat.toFixed(2)}°, ${lng.toFixed(2)}°` };
     }
@@ -605,9 +607,9 @@ export const landTool: ToolDefinition = {
       // Provide detailed error based on status
       let errorDetail = '';
       if (vesselStatus.includes('LANDED') || vesselStatus.includes('SPLASHED')) {
-        errorDetail = `Vessel is already ${vesselStatus.toLowerCase()}. Use launch tool to take off first.`;
+        errorDetail = `Vessel is already ${vesselStatus.toLowerCase()} on ${myBody}`;
       } else if (vesselStatus.includes('PRELAUNCH')) {
-        errorDetail = 'Vessel is on the launchpad. Use launch tool to reach orbit first.';
+        errorDetail = 'Vessel is on a ${myBody} launchpad.';
       } else if (vesselStatus.includes('DOCKED')) {
         errorDetail = 'Vessel is docked. Undock first, then use land tool.';
       } else {
@@ -714,7 +716,12 @@ export const landTool: ToolDefinition = {
 
           // Cleanup after orbit lowering: stop warp and unlock controls
           // MechJeb node executor may have left warp or steering engaged
-          await conn.execute('SET WARP TO 0. UNLOCK STEERING. UNLOCK THROTTLE. WAIT 0.5.', 5000);
+          // Wrapped in try/catch to prevent stalls if connection died during warp
+          try {
+            await conn.execute('SET WARP TO 0. UNLOCK STEERING. UNLOCK THROTTLE. WAIT 0.5.', 5000);
+          } catch {
+            logger.warn('[Landing] Cleanup command failed, continuing...');
+          }
         }
 
         // Now in stable landing orbit

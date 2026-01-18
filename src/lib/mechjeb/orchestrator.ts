@@ -126,6 +126,20 @@ export async function withTargetAndExecute(
     return { ...planResult, executed: false };
   }
 
+  // Check if a node was actually created (planning can succeed without creating nodes
+  // e.g., when vessel is already on transfer trajectory)
+  if (planResult.nodesCreated === 0 || (planResult.warning && !planResult.nodesCreated)) {
+    // No node created - return success without execution
+    return { ...planResult, executed: false };
+  }
+
+  // Verify node exists before executing (safety check)
+  const hasNode = await conn.execute('PRINT HASNODE.', 2000);
+  if (!hasNode.output.includes('True')) {
+    // No node to execute - return success with planning result
+    return { ...planResult, executed: false };
+  }
+
   // Execute the node
   const execResult = await executeNode(conn, { logger, callerTool, targetPeriapsis });
 
