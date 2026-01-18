@@ -15,8 +15,17 @@ import { hasTarget } from './target/shared.js';
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
 
-export type WarpTarget = 'node' | 'soi' | 'periapsis' | 'apoapsis';
+export type WarpTarget = 'node' | 'soi' | 'periapsis' | 'apoapsis' | 'reentry';
 
+/**
+ * Moon return scenario info (escaping moon to parent body)
+ */
+interface MoonReturnInfo {
+  isMoonReturn: boolean;
+  parentBody?: string;
+  parentAtmHeight?: number;  // 0 if no atmosphere
+  etaToReentry?: number;     // Time to atmosphere edge (~95% of periapsis time)
+}
 
 /**
  * Crash trajectory check result
@@ -80,6 +89,58 @@ async function getTrajectoryInfo(conn: KosConnection): Promise<TrajectoryInfo> {
 }
 
 /**
+ * Detect moon return scenario: in moon SOI with parent body encounter
+ * Returns info needed for reentry warp targeting
+ */
+async function detectMoonReturn(conn: KosConnection, targetName?: string): Promise<MoonReturnInfo> {
+  // Query: current body's parent, next patch body, and encounter body atmosphere
+  const cmd = [
+    'LOCAL _curParent IS SHIP:BODY:BODY:NAME.',
+    'LOCAL _hasPatch IS SHIP:ORBIT:HASNEXTPATCH.',
+    'LOCAL _nextBody IS "".',
+    'LOCAL _nextAtm IS 0.',
+    'LOCAL _nextPeTime IS 0.',
+    'IF _hasPatch {',
+    '  SET _nextBody TO SHIP:ORBIT:NEXTPATCH:BODY:NAME.',
+    '  SET _nextAtm TO ROUND(SHIP:ORBIT:NEXTPATCH:BODY:ATM:HEIGHT).',
+    '  SET _nextPeTime TO ROUND(SHIP:ORBIT:NEXTPATCH:ETA:PERIAPSIS).',
+    '}',
+    'PRINT "MR|" + _curParent + "|" + _nextBody + "|" + _nextAtm + "|" + _nextPeTime.',
+  ].join(' ');
+
+  const result = await conn.execute(cmd, 5000);
+  const match = result.output.match(/MR\|([^|]*)\|([^|]*)\|(\d+)\|(\d+)/);
+
+  if (!match) return { isMoonReturn: false };
+
+  const [, curParent, nextBody, nextAtmStr, nextPeTimeStr] = match;
+  const nextAtm = parseInt(nextAtmStr);
+  const nextPeTime = parseInt(nextPeTimeStr);
+
+  // Is moon return if:
+  // 1. Auto mode (no targetName): next body is our current parent
+  // 2. Explicit target: targetName matches next body AND next body is our parent
+  const autoModeMatch = !targetName && nextBody.toLowerCase() === curParent.toLowerCase();
+  const explicitTargetMatch = targetName &&
+    targetName.toLowerCase() === nextBody.toLowerCase() &&
+    nextBody.toLowerCase() === curParent.toLowerCase();
+
+  const isMoonReturn = autoModeMatch || explicitTargetMatch;
+
+  if (!isMoonReturn || nextPeTime <= 0) return { isMoonReturn: false };
+
+  // Estimate time to target altitude (~95% of periapsis time for reentry)
+  const etaToReentry = Math.round(nextPeTime * 0.95);
+
+  return {
+    isMoonReturn: true,
+    parentBody: nextBody,
+    parentAtmHeight: nextAtm,
+    etaToReentry,
+  };
+}
+
+/**
  * Build helpful error message when target name doesn't match trajectory
  */
 function buildTrajectoryError(targetName: string, trajInfo: TrajectoryInfo): string {
@@ -117,6 +178,14 @@ async function resolveTargetName(
       logger.info(`[Warp] "${targetName}" matches SOI, but node exists before - warping to node`);
       return { resolved: true, warpTarget: 'node' };
     }
+
+    // Check if this is a moon return scenario (target is parent body)
+    const moonReturn = await detectMoonReturn(conn, targetName);
+    if (moonReturn.isMoonReturn) {
+      logger.info(`[Warp] Moon return detected - warping to ${targetName} atmosphere edge`);
+      return { resolved: true, warpTarget: 'reentry' };
+    }
+
     logger.info(`[Warp] "${targetName}" matches upcoming SOI change`);
     return { resolved: true, warpTarget: 'soi' };
   }
@@ -289,7 +358,7 @@ async function queryValue(conn: KosConnection, expr: string): Promise<string> {
 }
 
 /**
- * Warp to a specific target (node, soi, periapsis, apoapsis)
+ * Warp to a specific target (node, soi, periapsis, apoapsis, reentry)
  */
 export async function warpTo(
   conn: KosConnection,
@@ -312,6 +381,9 @@ export async function warpTo(
     }
     case 'apoapsis': {
       return await warpToOrbitalPoint(conn, 'APOAPSIS', leadTime, timeout, logger);
+    }
+    case 'reentry': {
+      return await warpToReentry(conn, leadTime, timeout, logger);
     }
   }
 }
@@ -729,6 +801,77 @@ export async function warpForward(
   return { success: false, error: result.timedOut ? 'Warp timeout' : 'Warp failed' };
 }
 
+/**
+ * Warp to reentry: for moon-to-parent returns, warp to atmosphere edge
+ * Target altitude: atmosphere height × 1.5 (or 50km if no atmosphere)
+ */
+async function warpToReentry(
+  conn: KosConnection,
+  leadTime: number,
+  timeout: number,
+  logger?: McpLogger
+): Promise<WarpResult> {
+  const log = logger ?? nullLogger;
+
+  // Get moon return info
+  const moonReturn = await detectMoonReturn(conn);
+  if (!moonReturn.isMoonReturn || !moonReturn.etaToReentry) {
+    return { success: false, error: 'No parent body encounter detected. Use this from moon orbit with a return trajectory.' };
+  }
+
+  const { parentBody, parentAtmHeight, etaToReentry } = moonReturn;
+  const targetAlt = parentAtmHeight && parentAtmHeight > 0
+    ? Math.round(parentAtmHeight * 1.5)
+    : 50_000;
+  const targetDesc = parentAtmHeight && parentAtmHeight > 0
+    ? `${parentBody} atmosphere edge (~${Math.round(targetAlt / 1000)}km)`
+    : `${parentBody} 50km altitude`;
+
+  log.progress(`[Warp] Course laid in for ${targetDesc}. ETA ${formatTime(etaToReentry)}... Engage!`);
+
+  // Clear any existing warp and issue WARPTO command
+  await stopWarp(conn);
+  const warpTargetUT = `TIME:SECONDS + ${etaToReentry - leadTime}`;
+  await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(${warpTargetUT}).`, 5000);
+
+  // Poll until we reach the parent body's SOI
+  let pollCount = 0;
+  const result = await pollWithBlackoutResilience<{ body: string; alt: number }>({
+    poll: async () => {
+      const r = await conn.execute('PRINT "WR|" + SHIP:BODY:NAME + "|" + ROUND(ALTITUDE).', 3000);
+      const m = r.output.match(/WR\|(\w+)\|(\d+)/);
+      return m ? { body: m[1], alt: parseInt(m[2]) } : { body: '', alt: 0 };
+    },
+    isDone: (state) => state.body.toLowerCase() === parentBody!.toLowerCase(),
+    isSuccess: (state) => state.body.toLowerCase() === parentBody!.toLowerCase(),
+    timeoutMs: timeout,
+    pollIntervalMs: POLL_INTERVAL_MS,
+    logger: log,
+    context: 'Warp to reentry',
+    connection: conn,
+    onPoll: () => {
+      pollCount++;
+      if (pollCount % 15 === 0) {  // Every ~30 seconds
+        log.progress(`[Warp] Approaching ${parentBody}...`);
+      }
+    },
+  });
+
+  if (!result.success) {
+    return { success: false, error: result.timedOut ? 'Warp to reentry timed out' : 'Warp to reentry failed' };
+  }
+
+  const finalAlt = result.result?.alt ?? 0;
+  log.progress(`[Warp] Arrived at ${parentBody}. Altitude: ${fmtDist(finalAlt)}`);
+
+  return {
+    success: true,
+    body: parentBody,
+    altitude: finalAlt,
+    warning: `Ready for reentry.\nTarget altitude was ~${Math.round(targetAlt / 1000)}km (atm×1.5 or 50km).`,
+  };
+}
+
 // ============================================================================
 // Tool Definition
 // ============================================================================
@@ -744,10 +887,10 @@ export const warpTool: ToolDefinition = {
   description: 'Fast-forward time to specific moment, maneuver node, or SOI transition.',
   inputSchema: {
     target: z.union([
-      z.enum(['node', 'soi', 'periapsis', 'apoapsis', 'auto']),
+      z.enum(['node', 'soi', 'periapsis', 'apoapsis', 'reentry', 'auto']),
       z.number(),
       z.string(),
-    ]).optional().default('auto').describe('Optional. "node" = warp to maneuver, "soi" = warp to body encounter (after transfer), "periapsis"/"apoapsis" = orbital point, number = seconds, or body/vessel name (e.g., "Mun"). If omitted, auto-detects node or SOI.'),
+    ]).optional().default('auto').describe('Optional. "node" = warp to maneuver, "soi" = warp to body encounter (after transfer), "reentry" = warp to atmosphere edge (for moon returns), "periapsis"/"apoapsis" = orbital point, number = seconds, or body/vessel name (e.g., "Mun"). If omitted, auto-detects (moon return > node > SOI).'),
     leadTime: z.number().optional().default(10).describe('Seconds before target to stop (default: 10)'),
   },
   annotations: {
@@ -764,7 +907,7 @@ export const warpTool: ToolDefinition = {
 
       let target = args.target as WarpTarget | number | string;
       const leadTime = args.leadTime as number;
-      const knownTargets = ['node', 'soi', 'periapsis', 'apoapsis'];
+      const knownTargets = ['node', 'soi', 'periapsis', 'apoapsis', 'reentry'];
 
       // Get trajectory info for smart decisions
       const trajInfo = await getTrajectoryInfo(conn);
@@ -776,8 +919,15 @@ export const warpTool: ToolDefinition = {
           target = 'node';
           logger.info('[Warp] Computer recommends: course to maneuver node');
         } else if (trajInfo.hasSOIChange) {
-          target = 'soi';
-          logger.info('[Warp] Computer recommends: course to planetary encounter');
+          // Check for moon return scenario (escaping moon to parent body)
+          const moonReturn = await detectMoonReturn(conn);
+          if (moonReturn.isMoonReturn) {
+            target = 'reentry';
+            logger.info(`[Warp] Moon return detected - warping to ${moonReturn.parentBody} atmosphere edge`);
+          } else {
+            target = 'soi';
+            logger.info('[Warp] Computer recommends: course to planetary encounter');
+          }
         } else {
           return ctx.errorResponse('warp', 'No maneuver node or SOI change found. Specify target: "periapsis", "apoapsis", or seconds to warp forward.');
         }

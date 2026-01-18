@@ -65,19 +65,35 @@ export const returnFromMoonTool: ToolDefinition = {
       });
 
       if (result.success) {
-        let text = result.executed
-          ? 'Burn complete'
-          : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
+        let text: string;
         if (result.executed) {
-          // Show return trajectory info
+          // Show moon name and return trajectory info
           const trajInfo = await conn.execute(
-            'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "RET|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME + "|" + ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS/1000, 1). } ELSE { PRINT "NOPATCH". }',
+            'PRINT "RET|" + SHIP:BODY:NAME + "|" + ' +
+            '(CHOOSE SHIP:ORBIT:NEXTPATCH:BODY:NAME IF SHIP:ORBIT:HASNEXTPATCH ELSE "?") + "|" + ' +
+            '(CHOOSE ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS/1000, 1) IF SHIP:ORBIT:HASNEXTPATCH ELSE 0).',
             3000
           );
-          const match = trajInfo.output.match(/RET\|([^|]+)\|([\d.-]+)/);
+          const match = trajInfo.output.match(/RET\|([^|]+)\|([^|]+)\|([\d.-]+)/);
           if (match) {
-            text += `\nReturn trajectory: ${match[1]} periapsis ${match[2]}km`;
+            const [, moonName, parentBody, peKm] = match;
+            const peKmNum = parseFloat(peKm);
+
+            // Ideal reentry periapsis is ~30km. 5-55km is acceptable.
+            const isGoodPeriapsis = peKmNum >= 5 && peKmNum <= 55;
+            const peDescriptor = peKmNum < 5 ? 'steep ' : (peKmNum > 55 ? 'shallow ' : '');
+            const nextStep = isGoodPeriapsis
+              ? `Warp to ${parentBody} and align for reentry.`
+              : 'Course correct for a more comfortable reentry.';
+
+            text = `${moonName} escape burn complete\n` +
+                   `Return trajectory: ${parentBody} reentry with ${peDescriptor}periapsis ${peKm}km\n` +
+                   `Next: ${nextStep}`;
+          } else {
+            text = 'Escape burn complete';
           }
+        } else {
+          text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         }
         return ctx.successResponse('return_from_moon', text);
       } else {

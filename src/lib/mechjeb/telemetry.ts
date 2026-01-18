@@ -399,9 +399,15 @@ export async function getShipTelemetry(
     orbitalEvents.push({ name: `${soi} Periapsis`, eta: etaPeriapsis });
   }
   if (hasNextPatch && etaTransition > 0 && etaTransition < 1e10) {
-    // Placeholder - encounter body name will be prepended after target processing
-    const transitionType = isEscapeTrajectory ? 'SOI Escape' : 'SOI Change';
-    orbitalEvents.push({ name: `_ENC_ ${transitionType}`, eta: etaTransition });
+    if (isEscapeTrajectory) {
+      // Escaping current SOI - use current body name (not encounter body)
+      orbitalEvents.push({ name: `${soi} SOI Escape`, eta: etaTransition });
+      // Add reentry placeholder - will be populated with time in G3 if encounter has atmosphere
+      orbitalEvents.push({ name: '_ENC_REENTRY_', eta: 0 });
+    } else {
+      // Entering new SOI - placeholder for encounter body name
+      orbitalEvents.push({ name: '_ENC_ SOI Change', eta: etaTransition });
+    }
   }
   if (hasAtmosphere && atmHeight > 0 && per < atmHeight && altitude > atmHeight) {
     const atmEntryEta = Math.max(0, etaPeriapsis * 0.7);
@@ -464,40 +470,79 @@ export async function getShipTelemetry(
   // ============================================================================
   const encounterBody = data.encBody || '';
   const encounterPe = data.encPe;
+  const encDist = data.encDist || 0;
+  const encAtmH = data.encAtmH || 0;
+  const encPeTime = data.encPeTime || 0;
+  const hasEncAtm = encAtmH > 0;
 
   // Update "Next:" line with encounter body name (replace _ENC_ placeholder)
   if (encounterBody && encounterBody !== soi) {
+    // Update reentry event with actual time if encounter has atmosphere and crash trajectory
+    if (hasEncAtm && encounterPe < 0 && encPeTime > 0) {
+      // Atmosphere entry happens before periapsis - ~90% of the way there for steep trajectories
+      const atmEntryTime = Math.round(encPeTime * 0.9);
+      for (const event of orbitalEvents) {
+        if (event.name === '_ENC_REENTRY_') {
+          event.name = `${encounterBody} Reentry`;
+          event.eta = atmEntryTime;
+          break;
+        }
+      }
+    } else {
+      // Remove reentry placeholder if no atmosphere or not crash trajectory
+      const idx = orbitalEvents.findIndex(e => e.name === '_ENC_REENTRY_');
+      if (idx !== -1) orbitalEvents.splice(idx, 1);
+    }
+
+    // Update SOI Change placeholder with encounter body name
     for (const event of nextEvents) {
-      if (event.name.startsWith('_ENC_')) {
-        event.name = event.name.replace('_ENC_', encounterBody);
+      if (event.name === '_ENC_ SOI Change') {
+        event.name = `${encounterBody} SOI Change`;
       }
     }
+  } else {
+    // No encounter - remove reentry placeholder
+    const idx = orbitalEvents.findIndex(e => e.name === '_ENC_REENTRY_');
+    if (idx !== -1) orbitalEvents.splice(idx, 1);
   }
+
+  // Re-sort and rebuild nextEvents after modifications
+  orbitalEvents.sort((a, b) => a.eta - b.eta);
+  const updatedNextEvents = orbitalEvents.filter(e => e.eta > 0).slice(0, 2);
+
   // Build "Next:" line now that we have encounter body name
-  if (nextLineIndex >= 0 && nextEvents.length > 0) {
-    const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
+  if (nextLineIndex >= 0 && updatedNextEvents.length > 0) {
+    const eventStrs = updatedNextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
     lines[nextLineIndex] = `Next: ${eventStrs.join(', ')}`;
   }
 
   // Encounter section - show even for negative periapsis (crash trajectories)
   if (encounterBody && encounterBody !== soi) {
     encounter = { body: encounterBody, periapsis: encounterPe };
-    // If we're at a planet (soiParent is Sun), encounter body is a moon of current SOI
-    const atPlanet = soiParent.toLowerCase() === 'sun' || soiParent.toLowerCase() === 'kerbol';
-    const encParentInfo = atPlanet ? ` (A moon of ${soi})` : '';
 
     lines.push('', 'ENCOUNTER:');
-    lines.push(`Body: ${encounterBody}${encParentInfo}`);
-    if (encounterPe < 0) {
-      lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (CRASH TRAJECTORY!)`);
-    } else if (encounterPe < 10_000) {
-      lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km (LOW - may need course_correct)`);
-    } else {
-      lines.push(`Periapsis: ${(encounterPe / 1000).toFixed(1)} km`);
-    }
-    // Show time to encounter
+    lines.push(`SOI: ${encounterBody}`);
+
+    // Show ETA to SOI transition
     if (etaTransition > 0 && etaTransition < 1e10) {
-      lines.push(`Time: ${formatTime(etaTransition)}`);
+      lines.push(`ETA: ${formatTime(etaTransition)}`);
+    }
+
+    // Show distance to atmosphere (or body if no atmosphere)
+    if (encDist > 0) {
+      const distToAtm = hasEncAtm ? encDist - encAtmH : encDist;
+      lines.push(`Distance: ${fmtDist(distToAtm)}${hasEncAtm ? ' to atmosphere' : ''}`);
+    }
+
+    // Show periapsis with appropriate trajectory warning
+    if (encounterPe < 0) {
+      const belowSurface = Math.abs(encounterPe / 1000).toFixed(0);
+      const trajectoryType = hasEncAtm ? 'REENTRY' : 'IMPACT';
+      lines.push(`Periapsis: ${belowSurface}km below surface (${trajectoryType} TRAJECTORY)`);
+    } else if (encounterPe < 10_000) {
+      lines.push(`Periapsis: ${fmtDist(encounterPe)} (LOW)`);
+    } else {
+      lines.push(`Periapsis: ${fmtDist(encounterPe)}`);
     }
   }
 
@@ -538,16 +583,15 @@ export async function getShipTelemetry(
     }
   }
 
-  // Fallback: Build "Next:" line if G3 didn't provide encounter body
-  // Remove _ENC_ placeholder if still present (no encounter found)
+  // Fallback: Build "Next:" line if G3 didn't populate it
+  // Remove any remaining placeholders
   if (nextLineIndex >= 0 && lines[nextLineIndex] === '') {
-    for (const event of nextEvents) {
-      if (event.name.startsWith('_ENC_')) {
-        event.name = event.name.replace('_ENC_ ', '');  // Remove placeholder
-      }
-    }
-    if (nextEvents.length > 0) {
-      const eventStrs = nextEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
+    // Filter out placeholder events and clean up remaining placeholders
+    const cleanedEvents = orbitalEvents
+      .filter(e => e.eta > 0 && !e.name.startsWith('_ENC_'))
+      .slice(0, 2);
+    if (cleanedEvents.length > 0) {
+      const eventStrs = cleanedEvents.map(e => `${e.name} in ${formatTime(e.eta)}`);
       lines[nextLineIndex] = `Next: ${eventStrs.join(', ')}`;
     } else {
       lines.splice(nextLineIndex, 1);  // Remove empty placeholder

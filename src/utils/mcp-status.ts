@@ -58,13 +58,21 @@ LOCAL _slope IS 0.
 IF SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" OR SHIP:STATUS = "PRELAUNCH" { SET _slope TO ROUND(ABS(90 - VANG(SHIP:UP:VECTOR, SHIP:FACING:TOPVECTOR)),1). }
 SET s["slope"] TO _slope.
 SET s["hasTarget"] TO HASTARGET.
-LOCAL _encB IS "". LOCAL _encPe IS 0.
+LOCAL _encB IS "". LOCAL _encPe IS 0. LOCAL _encDist IS 0. LOCAL _encAtmH IS 0. LOCAL _encPeTime IS 0.
 IF ORBIT:HASNEXTPATCH {
-IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { SET _encB TO NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. SET _encPe TO ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). }
-ELSE { SET _encB TO ORBIT:NEXTPATCH:BODY:NAME. SET _encPe TO ROUND(ORBIT:NEXTPATCH:PERIAPSIS). }
+LOCAL _nextPatch IS ORBIT:NEXTPATCH.
+IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { SET _nextPatch TO NEXTNODE:ORBIT:NEXTPATCH. }
+SET _encB TO _nextPatch:BODY:NAME.
+SET _encPe TO ROUND(_nextPatch:PERIAPSIS).
+SET _encDist TO ROUND(_nextPatch:BODY:POSITION:MAG).
+SET _encAtmH TO ROUND(_nextPatch:BODY:ATM:HEIGHT).
+SET _encPeTime TO ROUND(_nextPatch:ETA:PERIAPSIS).
 }
 SET s["encBody"] TO _encB.
 SET s["encPe"] TO _encPe.
+SET s["encDist"] TO _encDist.
+SET s["encAtmH"] TO _encAtmH.
+SET s["encPeTime"] TO _encPeTime.
 SET s["tgtName"] TO _MCP_TARGET.
 SET s["tgtType"] TO _MCP_TARGETTYPE.
 SET s["tgtDist"] TO CHOOSE ROUND(TARGET:DISTANCE) IF HASTARGET ELSE 0.
@@ -139,6 +147,9 @@ export interface StatusData {
   hasTarget: boolean;
   encBody: string;
   encPe: number;
+  encDist: number;
+  encAtmH: number;
+  encPeTime: number;
   tgtName?: string;
   tgtType?: string;
   tgtDist?: number;
