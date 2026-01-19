@@ -9,6 +9,7 @@ import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/proto
 import type { ServerNotification, ServerRequest, CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { KosConnection } from '../transport/kos-connection.js';
 import type { ManeuverOrchestrator } from './mechjeb/orchestrator.js';
+import type { EnsureConnectedOptions } from '../transport/connection-tools.js';
 
 // Re-export for convenience
 export type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
@@ -41,7 +42,7 @@ export interface ToolDefinition {
  * Provides access to shared utilities and connection management.
  */
 export interface ToolContext {
-  ensureConnected: () => Promise<KosConnection>;
+  ensureConnected: (options?: EnsureConnectedOptions) => Promise<KosConnection>;
   getConnection: () => KosConnection;
   createLogger: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => McpLogger;
   successResponse: (prefix: string, text: string) => CallToolResult;

@@ -189,6 +189,13 @@ export interface EnsureConnectedOptions {
   pollIntervalMs?: number;
   /** Progress callback during retry loop */
   onProgress?: (elapsedMs: number) => void;
+  /**
+   * Allow returning connection during blackout (default: false).
+   * When false, throws an error if vessel has no signal.
+   * When true, returns connection with health.reason='signal_lost' set.
+   * Use for tools like status that want to return cached data during blackout.
+   */
+  allowBlackout?: boolean;
 }
 
 // Delay helper
@@ -262,14 +269,6 @@ async function checkConnectionHealth(conn: KosConnection): Promise<HealthCheckRe
 }
 
 /**
- * Simple health check for backward compatibility.
- */
-async function isConnectionHealthy(conn: KosConnection): Promise<boolean> {
-  const result = await checkConnectionHealth(conn);
-  return result.healthy;
-}
-
-/**
  * Force close the connection and reset state.
  * Used when health check fails to ensure clean reconnection,
  * or when CPU preference is cleared to force auto-selection.
@@ -309,10 +308,31 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
 
   if (conn.isConnected() && !needsReconnect) {
     // Verify connection is actually healthy (not stale)
-    if (await isConnectionHealthy(conn)) {
+    const healthCheck = await checkConnectionHealth(conn);
+    if (healthCheck.healthy) {
+      conn.clearHealth();  // Signal recovered
       return conn;
     }
-    // Connection is stale - disconnect and try fresh reconnect
+    // Signal lost = radio blackout - connection is fine, just no radio
+    if (healthCheck.reason === 'signal_lost') {
+      conn.setHealth('signal_lost');  // Mark blackout state
+      // Only return connection if caller wants to handle blackout themselves
+      if (options?.allowBlackout) {
+        return conn;
+      }
+      // Default: throw error so tools don't hang waiting for kOS
+      const vesselName = conn.getState().vesselName || 'Unknown';
+      throw new Error(
+        `Radio blackout - vessel '${vesselName}' has no signal. ` +
+        `Wait for line-of-sight to Kerbin or a relay.`
+      );
+    }
+    // No response could also be blackout (after "Signal lost" was already shown)
+    if (healthCheck.reason === 'no_response' && options?.allowBlackout) {
+      conn.setHealth('signal_lost', 'Radio blackout - no response from vessel');
+      return conn;
+    }
+    // Other failures (crash, power loss) - disconnect and try fresh reconnect
     await forceDisconnect();
   }
 
@@ -338,14 +358,28 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
       const vesselName = connectedState.vesselName || lastConnectedVessel?.name || 'Unknown';
 
       if (healthCheck.reason === 'signal_lost') {
-        // Radio blackout - don't disconnect, just throw informative error
+        // Radio blackout - mark state
+        freshConn.setHealth('signal_lost');
+        // Return connection if caller wants to handle blackout themselves
+        if (options?.allowBlackout) {
+          return freshConn;
+        }
+        // Default: throw error so tools don't hang waiting for kOS
         throw new Error(
           `Vessel '${vesselName}' has lost radio signal - waiting to re-acquire. ` +
           `Wait for the vessel to regain line-of-sight to Kerbin or a relay.`
         );
       }
 
-      // No response at all - try Ctrl+D to distinguish power loss from crash
+      // No response at all - could be blackout, power loss, or crash
+      // If caller wants to handle blackout, return early without slow diagnosis
+      if (options?.allowBlackout) {
+        // Treat no_response as potential blackout (after "Signal lost" message was already shown)
+        freshConn.setHealth('signal_lost', 'Radio blackout - no response from vessel');
+        return freshConn;
+      }
+
+      // Try Ctrl+D to distinguish power loss from crash
       // Power loss: Ctrl+D returns to CPU menu
       // Crashed: Ctrl+D has no effect, connection stuck
       const canDetach = await freshConn.tryDetach(2000);
@@ -365,6 +399,7 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
 
           if (retryHealth.healthy) {
             // Transient issue - connection is fine now, continue normally
+            retryConn.clearHealth();
             const connectedState = retryConn.getState();
             if (connectedState.vesselName) {
               lastConnectedVessel = {
@@ -377,6 +412,7 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
         }
 
         // Still failing after retry - now we can conclude power loss
+        freshConn.setHealth('power_loss');
         await forceDisconnect();
         throw new Error(
           `Vessel '${vesselName}' appears to have no power - connection works but no response. ` +
@@ -385,6 +421,7 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
       }
 
       // Couldn't detach - vessel crashed
+      freshConn.setHealth('crashed');
       lastConnectedVessel = null;
       await forceDisconnect();
       throw new Error(
@@ -393,8 +430,12 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
       );
     }
 
+    // Connection healthy - clear any stale health state
+    const successfulConn = getConnection();
+    successfulConn.clearHealth();
+
     // Save the vessel info for crash detection
-    const connectedState = getConnection().getState();
+    const connectedState = successfulConn.getState();
     if (connectedState.vesselName) {
       lastConnectedVessel = {
         name: connectedState.vesselName,
@@ -404,9 +445,9 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
 
     // Install and run mcp-daemon if not present (provides blackout recovery)
     // Note: First deployment to a new vessel may take a few seconds
-    await ensureMcpDaemon(getConnection());
+    await ensureMcpDaemon(successfulConn);
 
-    return getConnection();
+    return successfulConn;
   } catch (error) {
     // If connection failed, force cleanup and re-throw
     await forceDisconnect();

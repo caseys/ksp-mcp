@@ -5,12 +5,39 @@ import { config } from '../config/index.js';
 import { globalKosMonitor } from '../utils/kos-monitor.js';
 import { createHash } from 'node:crypto';
 
+/**
+ * Health reason codes for connection issues.
+ * These map to the nuanced detection in connection-tools.ts.
+ */
+export type HealthReason = 'signal_lost' | 'power_loss' | 'crashed' | 'no_response' | 'error';
+
+/**
+ * Health status for connection issues.
+ * Undefined means healthy, present means there's an issue.
+ */
+export interface HealthStatus {
+  reason: HealthReason;
+  message: string;
+  timestamp: number;
+}
+
+/** Default messages for each health reason */
+const HEALTH_MESSAGES: Record<HealthReason, string> = {
+  signal_lost: 'Radio blackout - vessel has no signal',
+  power_loss: 'Vessel has no power - waiting for batteries',
+  crashed: 'Vessel appears to have crashed',
+  no_response: 'No response from kOS',
+  error: 'Connection error',
+};
+
 export interface ConnectionState {
   connected: boolean;
   cpuId: number | null;
   vesselName: string | null;
   cpuTag: string | null;
   lastError: string | null;
+  /** Health status from last check (undefined = healthy) */
+  health?: HealthStatus;
 }
 
 export interface CommandResult {
@@ -515,6 +542,37 @@ export class KosConnection {
    */
   getState(): ConnectionState {
     return { ...this.state };
+  }
+
+  /**
+   * Set health status to indicate a connection issue.
+   * @param reason - Health reason code, or null to clear
+   * @param customMessage - Optional custom message (uses default if not provided)
+   */
+  setHealth(reason: HealthReason | null, customMessage?: string): void {
+    if (reason === null) {
+      this.state.health = undefined;
+    } else {
+      this.state.health = {
+        reason,
+        message: customMessage ?? HEALTH_MESSAGES[reason],
+        timestamp: Date.now(),
+      };
+    }
+  }
+
+  /**
+   * Clear health status (marks connection as healthy).
+   */
+  clearHealth(): void {
+    this.state.health = undefined;
+  }
+
+  /**
+   * Check if connection is in radio blackout.
+   */
+  isBlackout(): boolean {
+    return this.state.health?.reason === 'signal_lost';
   }
 
   /**

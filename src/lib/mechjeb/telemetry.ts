@@ -23,6 +23,19 @@ const TELEMETRY_DELAY_MS = 0;
 // - CLI runs are separate processes, so they don't benefit from this cache
 let telemetryCache: { result: ShipTelemetry; timestamp: number } | null = null;
 const TELEMETRY_CACHE_TTL_MS = 5000; // 5 seconds
+const BLACKOUT_CACHE_TTL_MS = 120_000; // 2 minutes - longer TTL for blackout fallback
+
+/**
+ * Get cached telemetry if available and within blackout TTL.
+ * Used by status tool to return cached data immediately during blackout.
+ */
+export function getCachedTelemetry(): { result: ShipTelemetry; timestamp: number } | null {
+  const now = Date.now();
+  if (telemetryCache && (now - telemetryCache.timestamp) < BLACKOUT_CACHE_TTL_MS) {
+    return telemetryCache;
+  }
+  return null;
+}
 
 /**
  * Query multiple values in a batch (comma-separated)
@@ -672,6 +685,43 @@ export async function getStatus(
     return await getShipTelemetry(conn, options);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
+    const reasonLower = reason.toLowerCase();
+
+    // Determine error type from message content
+    const isBlackout = reasonLower.includes('blackout') || reasonLower.includes('signal');
+    const isPowerLoss = reasonLower.includes('power') || reasonLower.includes('batteries');
+    const isCrash = reasonLower.includes('crash');
+
+    // Check if we have a cached result to show
+    const now = Date.now();
+    if (telemetryCache && (now - telemetryCache.timestamp) < BLACKOUT_CACHE_TTL_MS) {
+      const ageSeconds = Math.round((now - telemetryCache.timestamp) / 1000);
+
+      // Build header based on error type
+      let header: string;
+      let displayReason: string;
+      if (isBlackout) {
+        header = '=== RADIO BLACKOUT ===';
+        displayReason = 'Radio blackout - showing cached status';
+      } else if (isPowerLoss) {
+        header = '=== NO POWER ===';
+        displayReason = 'Vessel has no power - showing cached status';
+      } else if (isCrash) {
+        header = '=== VESSEL CRASHED ===';
+        displayReason = 'Vessel crashed - showing last known status';
+      } else {
+        header = '=== CONNECTION ERROR ===';
+        displayReason = `${reason} - showing cached status`;
+      }
+
+      return {
+        ...telemetryCache.result,
+        connected: false,
+        reason: displayReason,
+        formatted: `${header}\nLast contact: ${ageSeconds}s ago\n\n${telemetryCache.result.formatted}`,
+      };
+    }
+
     return {
       connected: false,
       reason,
@@ -1016,25 +1066,45 @@ export const statusTool: ToolDefinition = {
   tier: 1,
   handler: async (_args, ctx) => {
     try {
-      // Auto-connect if not connected (like other tools)
-      const conn = await ctx.ensureConnected();
+      // Status tool handles blackout specially - returns cached data
+      const conn = await ctx.ensureConnected({ allowBlackout: true });
+      const { health } = conn.getState();
 
-      // Check for active operation first
-      const opProgress = await getOperationProgress(conn);
+      // If in blackout, return cached status immediately - don't try to query kOS
+      if (health?.reason === 'signal_lost') {
+        const cached = getCachedTelemetry();
+        if (cached) {
+          const ageSeconds = Math.round((Date.now() - cached.timestamp) / 1000);
+          return ctx.successResponse('status',
+            `=== RADIO BLACKOUT ===\n` +
+            `Last contact: ${ageSeconds}s ago\n\n` +
+            cached.result.formatted);
+        }
+        // No cache - return error message
+        return ctx.errorResponse('status', health.message);
+      }
 
-      // Get ship telemetry
+      // Get ship telemetry (returns cached data if fresh)
       const telemetry = await getStatus(conn);
 
-      if (telemetry.connected) {
-        // Prepend operation progress if there's an active operation
-        let output = telemetry.formatted;
-        if (opProgress) {
-          output = formatOperationProgress(opProgress) + '\n\n' + output;
+      if (!telemetry.connected) {
+        // Query failed - check if we got cached data or just an error
+        const hasCachedData = telemetry.formatted.includes('Last contact:');
+        if (hasCachedData) {
+          // Showing cached data is still useful, return as success
+          return ctx.successResponse('status', telemetry.formatted);
         }
-        return ctx.successResponse('status', output);
-      } else {
-        return ctx.errorResponse('status', telemetry.reason ?? 'Not connected');
+        // No cached data - return as error
+        return ctx.errorResponse('status', telemetry.reason ?? 'Connection failed');
       }
+
+      // Connected - check for active operation
+      const opProgress = await getOperationProgress(conn);
+      let output = telemetry.formatted;
+      if (opProgress) {
+        output = formatOperationProgress(opProgress) + '\n\n' + output;
+      }
+      return ctx.successResponse('status', output);
     } catch (error) {
       return ctx.errorResponse('status', error instanceof Error ? error.message : String(error));
     }
