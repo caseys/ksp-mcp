@@ -1128,7 +1128,7 @@ async function getDefaultLaunchAltitude(conn: KosConnection): Promise<number> {
  */
 export const launchAscentTool: ToolDefinition = {
   name: 'launch',
-  description: 'Launch from pad or ground to orbit. With a target, automatically selects optimal launch mode (rendezvous for vessels, plane-matching for moons, transfer window for planets).',
+  description: 'Launch from pad or ground to orbit.',
   inputSchema: {
     altitude: z.union([distanceSchema, z.literal('auto')]).optional().default('auto')
       .describe('Target orbit altitude in meters. Default: safe altitude above atmosphere.'),

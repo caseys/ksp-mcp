@@ -19,10 +19,7 @@ import { fmtVel } from '../../utils/format.js';
 
 export const configureLandingTool: ToolDefinition = {
   name: 'configure_landing',
-  description:
-    'Configure landing settings without starting. Set touchdown speed, gear/chute deployment, ' +
-    'RCS usage, and optionally a landing target. Does NOT start landing - use land tool for that. ' +
-    'Useful for pre-configuring before reaching landing altitude.',
+  description: 'Configure landing settings without starting. Set touchdown speed, gear/chute deployment, RCS usage.',
   inputSchema: {
     // Position target (optional)
     latitude: z.number()
@@ -71,7 +68,7 @@ export const configureLandingTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: -2,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

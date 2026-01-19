@@ -20,7 +20,7 @@ import { formatTime,  fmtVel } from '../../utils/format.js';
 
 export const transferTool: ToolDefinition = {
   name: 'transfer',
-  description: 'Begin transfer or return to/from planet, moon, or vessel.',
+  description: 'Begin transfer or return to or from planet, moon, or vessel.',
   inputSchema: {
     target: autoTargetSchema,
     execute: executeSchema,

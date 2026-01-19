@@ -50,9 +50,7 @@ export async function setPositionTargetOp(
 
 export const setPositionTargetTool: ToolDefinition = {
   name: 'set_position_target',
-  description:
-    'Set landing target at surface coordinates. Required before precision landing. ' +
-    'Use preset="KSC" for Kerbin runway, or specify latitude/longitude for custom location.',
+  description: 'Set landing target at surface coordinates. Required before precision landing.',
   inputSchema: {
     latitude: z.number()
       .min(-90)
@@ -74,7 +72,7 @@ export const setPositionTargetTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: -2,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

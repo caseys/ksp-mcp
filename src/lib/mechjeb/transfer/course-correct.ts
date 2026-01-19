@@ -680,7 +680,7 @@ export async function courseCorrection(
 
 export const courseCorrectTool: ToolDefinition = {
   name: 'course_correct',
-  description: 'Fine tune arrival periapsis at target body. Use 50-100km for safe orbit insertion, 10-30km for aerobraking. Max 2500km.',
+  description: 'Fine tune arrival periapsis at target body.',
   inputSchema: {
     target: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
       .optional()

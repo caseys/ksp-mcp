@@ -12,10 +12,7 @@ import { getLandingPrediction,  } from './shared.js';
 
 export const getLandingPredictionTool: ToolDefinition = {
   name: 'get_landing_prediction',
-  description:
-    'Get predicted landing location, time, and outcome. Shows where vessel will land based on ' +
-    'current trajectory. Works during descent or after deorbit burn. ' +
-    'Returns coordinates, altitude, time to landing, and safety info (max speed, chute readiness).',
+  description: 'Get predicted landing location, time, and outcome. Shows where vessel will land based on current trajectory.',
   inputSchema: {
     _placeholder: z.boolean()
       .optional()
@@ -27,7 +24,7 @@ export const getLandingPredictionTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: -2,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

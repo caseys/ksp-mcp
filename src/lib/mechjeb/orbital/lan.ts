@@ -55,7 +55,7 @@ export const changeAscendingNodeTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 2,
+  tier: -1,
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();

@@ -23,7 +23,7 @@ export const continueOperationTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 4,
+  tier: -3,
   handler: async (_args, context, extra) => {
     const conn = context.getConnection();
     if (!conn.isConnected()) {

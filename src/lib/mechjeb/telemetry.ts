@@ -1055,7 +1055,7 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const statusTool: ToolDefinition = {
   name: 'status',
-  description: 'Get ship info: position, fuel, targets.',
+  description: 'Get simulation info: position, fuel, targets.',
   inputSchema: {},
   annotations: {
     readOnlyHint: true,
@@ -1063,7 +1063,7 @@ export const statusTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 1,
+  tier: 2,
   handler: async (_args, ctx) => {
     try {
       // Status tool handles blackout specially - returns cached data

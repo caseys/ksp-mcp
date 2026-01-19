@@ -16,7 +16,7 @@ import { ensureRadioContact } from '../../../utils/radio-contact.js';
 
 export const adjustOrbitTool: ToolDefinition = {
   name: 'adjust_orbit',
-  description: 'Raise or lower orbit. One altitude sets circular orbit, two altitudes set periapsis (lower) and apoapsis (higher).',
+  description: 'Raise or lower orbit.',
   inputSchema: {
     altitude: distanceSchema
       .describe('Target altitude in meters. Single value for circular orbit, or [low, high] for elliptical.'),

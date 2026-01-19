@@ -1041,7 +1041,7 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const warpTool: ToolDefinition = {
   name: 'warp',
-  description: 'Time warp, fast-forward time to specific moment, maneuver node, or SOI transition.  Only affects time, not Star Trek warp.',
+  description: 'Time warp, fast-forward time to specific moment, maneuver node, or SOI transition. ONLY affects time, NOT Star Trek warp.',
   inputSchema: {
     target: z.union([
       z.enum(['node', 'soi', 'periapsis', 'apoapsis', 'reentry', 'auto']),

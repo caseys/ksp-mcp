@@ -248,10 +248,7 @@ IF found {
 
 export const findLandingSiteTool: ToolDefinition = {
   name: 'find_landing_site',
-  description:
-    'Find optimal landing site along orbital ground track. Selects location with sunlight, ' +
-    'radio contact (Kerbin LOS), and low terrain. Auto-relaxes requirements if needed. ' +
-    'Sets position target - use with land tool or call land directly after.',
+  description: 'Find optimal landing site along orbital ground track with sunlight, radio contact (Kerbin LOS), and low terrain.',
   inputSchema: {
     maxAltitude: z.number()
       .optional()
@@ -272,7 +269,7 @@ export const findLandingSiteTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: -2,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

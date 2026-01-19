@@ -124,7 +124,7 @@ export const getTargetsTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 2,
   handler: async (_args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

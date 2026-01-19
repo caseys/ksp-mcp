@@ -12,7 +12,7 @@ import { getKosOperation, clearKosOperation } from '../utils/kos-operation-state
  */
 export const abortOperationTool: ToolDefinition = {
   name: 'abort_operation',
-  description: 'Cancel the currently running operation. Use if something goes wrong or you need to stop.',
+  description: 'Cancel the currently running operation.',
   inputSchema: {},
   annotations: {
     readOnlyHint: false,
@@ -20,7 +20,7 @@ export const abortOperationTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 4,
+  tier: -3,
   handler: async (_args, context) => {
     const conn = context.getConnection();
     if (!conn.isConnected()) {

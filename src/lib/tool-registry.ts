@@ -117,7 +117,7 @@ const GUARD_EXEMPT_TOOLS = new Set([
  * Each tool file exports a toolDefinition that is imported and added here.
  */
 export const allTools: ToolDefinition[] = [
-  // Tier 1 - Core Mission Operations
+  // === TIER 1 - Core Mission Operations (LLM-ready) ===
   landTool,
   launchAscentTool,
   circularizeTool,
@@ -126,9 +126,25 @@ export const allTools: ToolDefinition[] = [
   adjustOrbitTool,
   courseCorrectTool,
   warpTool,
-  statusTool,
 
-  // Tier 2 - Maneuvers & Orbital Changes
+  // === TIER 2 - Utility Tools (LLM-ready) ===
+  statusTool,
+  executeNodeTool,
+  clearNodesTool,
+  setTargetTool,
+  clearTargetTool,
+  getTargetInfoTool,
+  getTargetsTool,
+  runScriptTool,
+  commandTool,
+  listCpusTool,
+  switchCpuTool,
+  loadSaveTool,
+  listSavesTool,
+  quicksaveTool,
+
+  // === TIER -1 - Low-level Orbital (Hidden from LLM) ===
+  crashAvoidanceTool,
   matchVelocitiesTool,
   matchPlanesTool,
   ellipticizeTool,
@@ -141,39 +157,32 @@ export const allTools: ToolDefinition[] = [
   changePeriapsisLongitudeTool,
   changeSemiMajorAxisTool,
   changeEccentricityTool,
-  crashAvoidanceTool,
-  executeNodeTool,
-  clearNodesTool,
 
-  // Tier 3 - Targeting & Landing Config
-  getTargetInfoTool,
-  getTargetsTool,
-  setTargetTool,
+  // === TIER -2 - Landing Config (Hidden from LLM) ===
   setPositionTargetTool,
-  clearTargetTool,
   findLandingSiteTool,
   configureLandingTool,
   getLandingPredictionTool,
 
-  // Tier 4 - Utility & Low-Level
+  // === TIER -3 - Internal Operations (Hidden from LLM) ===
   abortOperationTool,
   continueOperationTool,
-  runScriptTool,
-  loadSaveTool,
-  listSavesTool,
-  quicksaveTool,
-  listCpusTool,
-  switchCpuTool,
-  commandTool,
   disconnectTool,
 ];
 
 /**
  * Register all tools with the MCP server.
  * Includes operation guard to prevent conflicting concurrent operations.
+ *
+ * Only tools with positive tiers (1, 2, etc.) are registered with MCP.
+ * Negative tier tools (-1, -2, -3) are hidden from LLM but still accessible
+ * internally via the allTools array.
  */
 export function registerAllTools(server: McpServer, context: ToolContext): void {
-  for (const tool of allTools) {
+  // Only register tools with positive tiers to MCP (LLM-ready tools)
+  const llmTools = allTools.filter(tool => tool.tier > 0);
+
+  for (const tool of llmTools) {
     server.registerTool(
       tool.name,
       {

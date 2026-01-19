@@ -15,9 +15,7 @@ import { getUnifiedTargetInfo } from './shared.js';
 
 export const getTargetInfoTool: ToolDefinition = {
   name: 'get_target_info',
-  description:
-    'Get comprehensive target information: orbit, position, velocity, and rendezvous data. ' +
-    'Optionally specify target, or uses current target.',
+  description: 'Get comprehensive target information: orbit, position, velocity, and rendezvous data.',
   inputSchema: {
     target: targetSchema,
   },
@@ -27,7 +25,7 @@ export const getTargetInfoTool: ToolDefinition = {
     idempotentHint: true,
     openWorldHint: false,
   },
-  tier: 3,
+  tier: 2,
   handler: async (args, ctx) => {
     try {
       const conn = await ctx.ensureConnected();

@@ -375,7 +375,7 @@ import { distanceSchema } from '../tool-types.js';
  */
 export const crashAvoidanceTool: ToolDefinition = {
   name: 'crash_avoidance',
-  description: 'Emergency burn to prevent crash. Raises periapsis to safe altitude.',
+  description: 'Emergency burn to prevent crash.',
   inputSchema: {
     targetPeriapsis: distanceSchema.optional().default(10_000).describe('Target periapsis in meters (default: 10000 = 10km)'),
     timeoutMs: z.number().optional().default(300_000).describe('Maximum burn time in milliseconds (default: 300000 = 5 min)'),
@@ -386,7 +386,7 @@ export const crashAvoidanceTool: ToolDefinition = {
     idempotentHint: false,
     openWorldHint: false,
   },
-  tier: 2,
+  tier: -1,
   handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
