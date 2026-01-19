@@ -658,9 +658,9 @@ async function warpToSOI(
     const newBody = result.result.body;
     log.progress(`[Warp] Entering ${newBody} space. All stop. Circularize to establish standard orbit.`);
 
-    // Stop warp and wait for KSP to settle
+    // Stop warp and wait for KSP to settle (500ms is sufficient for orbital recalculation)
     await stopWarp(conn);
-    await new Promise(resolve => setTimeout(resolve, 2000));
+    await new Promise(resolve => setTimeout(resolve, 500));
 
     // Get SOI info including periapsis check
     return await getSOIStatus(conn, newBody, logger);

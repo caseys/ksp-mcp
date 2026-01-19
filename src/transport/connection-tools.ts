@@ -327,18 +327,31 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
         `Wait for line-of-sight to Kerbin or a relay.`
       );
     }
-    // No response could also be blackout (after "Signal lost" was already shown once)
+    // No response is ambiguous - could be blackout, slow response, or buffered output
+    // Retry up to 5 times (1 second apart) before concluding it's a problem
     if (healthCheck.reason === 'no_response') {
-      conn.setHealth('signal_lost', 'Radio blackout - no response from vessel');
-      if (options?.allowBlackout) {
-        return conn;
+      for (let retry = 0; retry < 5; retry++) {
+        await delay(1000);
+        const retryCheck = await checkConnectionHealth(conn);
+        if (retryCheck.healthy) {
+          conn.clearHealth();
+          return conn;
+        }
+        if (retryCheck.reason === 'signal_lost') {
+          conn.setHealth('signal_lost');
+          if (options?.allowBlackout) {
+            return conn;
+          }
+          const vesselName = conn.getState().vesselName || 'Unknown';
+          throw new Error(
+            `Radio blackout - vessel '${vesselName}' has no signal. ` +
+            `Wait for line-of-sight to Kerbin or a relay.`
+          );
+        }
+        // Still no_response - continue retrying
       }
-      // Default: throw error so tools don't hang waiting for kOS
-      const vesselName = conn.getState().vesselName || 'Unknown';
-      throw new Error(
-        `No response from vessel '${vesselName}' - possible radio blackout. ` +
-        `Wait for signal to return.`
-      );
+      // Still no response after 5 retries - try fresh reconnect
+      await forceDisconnect();
     }
     // Other failures (crash, power loss) - disconnect and try fresh reconnect
     await forceDisconnect();

@@ -203,6 +203,8 @@ export async function pollWithBlackoutResilience<T>(
 
       // Check if operation is complete
       if (isDone(result)) {
+        // Yield to event loop to flush pending notifications before returning
+        await new Promise(resolve => setImmediate(resolve));
         return {
           success: isSuccess(result),
           result,
@@ -216,10 +218,11 @@ export async function pollWithBlackoutResilience<T>(
       const errorOutput = error instanceof Error ? error.message : String(error);
       const reason = await classifyConnectionFailure(connection, errorOutput);
 
-      // 'unknown' = transient error (parsing issue, timing, etc.) - just retry silently
+      // 'unknown' = transient error (parsing issue, timing, etc.) - just retry
       if (reason === 'unknown') {
-        // Don't log, don't set blackout - just continue polling
-        await delay(pollIntervalMs);
+        // Don't log, don't set blackout - continue to next poll iteration
+        // Small delay to prevent tight looping and allow I/O to flush
+        await delay(100);
         continue;
       }
 
@@ -255,6 +258,8 @@ export async function pollWithBlackoutResilience<T>(
           if (crashConfirmCount >= CRASH_CONFIRM_THRESHOLD) {
             // Confirmed crash - abort monitoring
             logger.progress(`[${context}] Vessel crash confirmed - aborting`);
+            // Yield to event loop to flush pending notifications before returning
+            await new Promise(resolve => setImmediate(resolve));
             return {
               success: false,
               result: lastResult,
@@ -275,6 +280,8 @@ export async function pollWithBlackoutResilience<T>(
   // Timeout - try one final poll
   try {
     const finalResult = await poll();
+    // Yield to event loop to flush pending notifications before returning
+    await new Promise(resolve => setImmediate(resolve));
     return {
       success: isDone(finalResult) && isSuccess(finalResult),
       result: finalResult,
@@ -284,6 +291,8 @@ export async function pollWithBlackoutResilience<T>(
     };
   } catch {
     // Still in blackout at timeout
+    // Yield to event loop to flush pending notifications before returning
+    await new Promise(resolve => setImmediate(resolve));
     return {
       success: false,
       result: lastResult,
