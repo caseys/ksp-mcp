@@ -47,32 +47,49 @@ export async function completeReturnFromMoon(
   logger: McpLogger = nullLogger
 ): Promise<ReturnSequenceResult> {
   // Wait for KSP to recalculate orbital patches after the burn
-  await new Promise(resolve => setTimeout(resolve, 500));
-
-  // Get moon name, escape trajectory info, and parent body
-  const trajInfo = await conn.execute(
-    'LOCAL _ecc IS SHIP:ORBIT:ECCENTRICITY. ' +
-    'LOCAL _hasPatch IS SHIP:ORBIT:HASNEXTPATCH. ' +
-    'LOCAL _nextBody IS CHOOSE SHIP:ORBIT:NEXTPATCH:BODY:NAME IF _hasPatch ELSE "?". ' +
-    'LOCAL _nextPeKm IS CHOOSE ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS/1000, 1) IF _hasPatch ELSE 0. ' +
-    'LOCAL _patchEta IS CHOOSE ROUND(SHIP:ORBIT:NEXTPATCHETA) IF _hasPatch ELSE 0. ' +
-    'PRINT "RET|" + SHIP:BODY:NAME + "|" + _nextBody + "|" + _nextPeKm + "|" + ROUND(_ecc, 3) + "|" + _patchEta.',
-    3000
-  );
-  const match = trajInfo.output.match(/RET\|([^|]+)\|([^|]+)\|([\d.-]+)\|([\d.]+)\|(\d+)/);
-
+  // Use retry loop - KSP can take a few seconds to update patches after escape burn
   let moonName = 'Moon';
   let parentBody = 'parent';
   let eccentricity = 0;
   let soiEtaSeconds = 0;
 
-  if (match) {
-    [, moonName, parentBody] = match;
-    eccentricity = parseFloat(match[4]);
-    soiEtaSeconds = parseInt(match[5]);
+  const MAX_RETRIES = 5;
+  const RETRY_DELAYS = [500, 1000, 1500, 2000, 2500]; // Increasing delays
+
+  for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS[attempt]));
+
+    // Get moon name, escape trajectory info, and parent body
+    const trajInfo = await conn.execute(
+      'LOCAL _ecc IS SHIP:ORBIT:ECCENTRICITY. ' +
+      'LOCAL _hasPatch IS SHIP:ORBIT:HASNEXTPATCH. ' +
+      'LOCAL _nextBody IS CHOOSE SHIP:ORBIT:NEXTPATCH:BODY:NAME IF _hasPatch ELSE "?". ' +
+      'LOCAL _nextPeKm IS CHOOSE ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS/1000, 1) IF _hasPatch ELSE 0. ' +
+      'LOCAL _patchEta IS CHOOSE ROUND(SHIP:ORBIT:NEXTPATCHETA) IF _hasPatch ELSE 0. ' +
+      'PRINT "RET|" + SHIP:BODY:NAME + "|" + _nextBody + "|" + _nextPeKm + "|" + ROUND(_ecc, 3) + "|" + _patchEta.',
+      3000
+    );
+    const match = trajInfo.output.match(/RET\|([^|]+)\|([^|]+)\|([\d.-]+)\|([\d.]+)\|(\d+)/);
+
+    if (match) {
+      [, moonName, parentBody] = match;
+      eccentricity = parseFloat(match[4]);
+      soiEtaSeconds = parseInt(match[5]);
+
+      // Got valid data - check if on escape trajectory
+      if (eccentricity >= 1) {
+        break; // Success - exit retry loop
+      }
+
+      // Not yet hyperbolic - KSP may still be calculating, retry
+      logger.info(`[return_from_moon] Waiting for escape trajectory (e=${eccentricity.toFixed(3)}, attempt ${attempt + 1}/${MAX_RETRIES})`);
+    } else {
+      // Regex failed - log for debugging
+      logger.warn(`[return_from_moon] Failed to parse trajectory info (attempt ${attempt + 1}/${MAX_RETRIES}): ${trajInfo.output.slice(0, 100)}`);
+    }
   }
 
-  // Verify we're on an escape trajectory
+  // After retries, check if we have a valid escape trajectory
   if (eccentricity < 1) {
     return {
       success: false,
