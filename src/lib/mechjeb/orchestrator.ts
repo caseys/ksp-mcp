@@ -665,6 +665,7 @@ export class ManeuverOrchestrator {
     if (!seqResult.success) {
       return {
         ...planResult,
+        success: false,  // Explicitly override - planResult.success is from node creation, not sequence
         executed: true,
         error: seqResult.error ?? 'Return sequence failed',
       };
