@@ -390,18 +390,16 @@ export class KosConnection {
       // Combine into single line: "command. PRINT sentinel." - kOS parses as two statements
       await this.transport.send(`${command} ${sentinelCommand}`, clearInput);
 
-      // Wait for sentinel (primary) or prompt (fallback) to ensure completion
+      // Wait for sentinel - this is our only reliable completion signal
+      // The kOS prompt '>' only appears at CPU menu, not after commands
       let output: string;
       try {
         output = await this.transport.waitFor(sentinelPattern, timeoutMs);
       } catch {
-        try {
-          // Fallback to classic prompt-based wait
-          output = await this.transport.waitFor(/>\s*$/, timeoutMs);
-        } catch {
-          // As a last resort, grab whatever is buffered
-          output = await this.transport.read();
-        }
+        // Sentinel didn't appear - command completion unknown
+        // Clear buffer to prevent pollution of next command
+        await this.transport.read();
+        throw new Error(`Command timed out (no sentinel after ${timeoutMs}ms): ${command.slice(0, 50)}...`);
       }
 
       // Clean up output (remove the command echo, sentinel, and prompt)
