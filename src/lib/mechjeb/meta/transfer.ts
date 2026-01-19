@@ -115,6 +115,11 @@ export const transferTool: ToolDefinition = {
       });
 
       if (result.success) {
+        // If the orchestrator provided pre-formatted text (e.g., return_from_moon), use it directly
+        if (result.text) {
+          return ctx.successResponse('transfer', result.text);
+        }
+
         const nodeCount = result.nodesCreated ?? 1;
         let text = result.executed
           ? `Transfer to ${targetInfo.name} (${transferType}) burn complete`
@@ -125,19 +130,8 @@ export const transferTool: ToolDefinition = {
           text += '\n\n' + result.warning;
         }
 
-        // Add trajectory info based on transfer type
-        if (transferType === 'return_from_moon' && result.executed) {
-          // Show return trajectory info
-          const trajInfo = await conn.execute(
-            'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "RET|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME + "|" + ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS/1000, 1). } ELSE { PRINT "NOPATCH". }',
-            3000
-          );
-          const match = trajInfo.output.match(/RET\|([^|]+)\|([\d.-]+)/);
-          if (match) {
-            text += `\nReturn trajectory: ${match[1]} periapsis ${match[2]}km`;
-            text += `\nNext: warp to ${match[1]} SOI, then circularize`;
-          }
-        } else if (result.executed) {
+        // Add trajectory info for hohmann/interplanetary transfers
+        if (result.executed) {
           // Wait for physics to settle after burn before querying encounter
           await new Promise(r => setTimeout(r, 1500));
 

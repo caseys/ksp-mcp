@@ -450,6 +450,57 @@ async function queryValue(conn: KosConnection, expr: string): Promise<string> {
 }
 
 /**
+ * Get context-aware advice after warp completes.
+ *
+ * Differentiates between:
+ * - Coming FROM moon (low periapsis + atmosphere): "course_correct for reentry" or "land"
+ * - Going TO a body (high periapsis or no atmosphere): "circularize"
+ * - Crash trajectory: "CRASH TRAJECTORY! Use crash_avoidance"
+ */
+async function getPostWarpAdvice(conn: KosConnection): Promise<string | null> {
+  try {
+    const result = await conn.execute(
+      'PRINT "ADV|" + ROUND(PERIAPSIS/1000, 1) + "|" + ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(SHIP:ORBIT:ECCENTRICITY, 3).',
+      3000
+    );
+    const match = result.output.match(/ADV\|([\d.-]+)\|(\d+)\|([\d.]+)/);
+    if (!match) return 'circularize to establish stable orbit';
+
+    const peKm = parseFloat(match[1]);
+    const atmKm = parseInt(match[2]);
+    const ecc = parseFloat(match[3]);
+
+    // Crash trajectory (periapsis below surface)
+    if (peKm < 0) {
+      return 'CRASH TRAJECTORY! Use crash_avoidance immediately.';
+    }
+
+    // Hyperbolic trajectory needs capture
+    if (ecc >= 1) {
+      return 'circularize to capture into orbit';
+    }
+
+    // Has atmosphere and periapsis is in/below it
+    if (atmKm > 0 && peKm < atmKm) {
+      // Low periapsis (5-55km on Kerbin) is good for aerobraking/landing
+      const isGoodPeriapsis = peKm >= 5 && peKm <= 55;
+      if (isGoodPeriapsis) {
+        return 'align for reentry, or land';
+      } else if (peKm < 5) {
+        return 'STEEP REENTRY! Consider course_correct to raise periapsis.';
+      } else {
+        return 'course_correct for a more comfortable reentry periapsis';
+      }
+    }
+
+    // No atmosphere or periapsis above atmosphere - standard orbit advice
+    return 'circularize to establish stable orbit';
+  } catch {
+    return 'circularize to establish stable orbit';
+  }
+}
+
+/**
  * Warp to a specific target (node, soi, periapsis, apoapsis, reentry)
  */
 export async function warpTo(
@@ -1107,6 +1158,13 @@ export const warpTool: ToolDefinition = {
         if (result.warning) {
           text += '\n\n' + result.warning;
         }
+
+        // Add context-aware advice based on current trajectory
+        const advice = await getPostWarpAdvice(conn);
+        if (advice) {
+          text += `\nNext: ${advice}`;
+        }
+
         return ctx.successResponse('warp', text);
       } else {
         return ctx.errorResponse('warp', result.error ?? 'Failed');

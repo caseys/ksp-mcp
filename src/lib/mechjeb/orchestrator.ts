@@ -45,7 +45,7 @@ import { killRelativeVelocity } from './rendezvous/kill-rel-vel.js';
 import { hohmannTransfer } from './transfer/hohmann.js';
 import { courseCorrection } from './transfer/course-correct.js';
 import { resonantOrbit } from './transfer/resonant-orbit.js';
-import { returnFromMoon } from './transfer/return-from-moon.js';
+import { returnFromMoon, completeReturnFromMoon } from './transfer/return-from-moon.js';
 import { interplanetaryTransfer } from './transfer/interplanetary.js';
 import type { McpLogger } from '../tool-types.js';
 
@@ -79,6 +79,8 @@ export interface OrchestratedResult extends ManeuverResult {
   executed?: boolean;
   /** Number of nodes executed (if executed) */
   nodesExecuted?: number;
+  /** Pre-formatted result text (for operations with complex post-execution logic) */
+  text?: string;
 }
 
 /**
@@ -607,17 +609,73 @@ export class ManeuverOrchestrator {
 
   /**
    * Return from moon to parent body.
+   *
+   * When executed, completes the full sequence:
+   * 1. Escape burn
+   * 2. Warp to parent body SOI
+   * 3. Change inclination to equatorial
+   * 4. Return smart advice based on trajectory
    */
   async returnFromMoon(
     targetPeriapsis: number,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
     const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
-    return withTargetAndExecute(this.conn, target, targetType, execute, () =>
-      returnFromMoon(this.conn, targetPeriapsis),
-      logger,
-      callerTool
-    );
+
+    // Handle target setting if provided
+    if (target !== undefined && target !== 'auto') {
+      const targetResult = await setTarget(this.conn, target, targetType);
+      if (!targetResult.success) {
+        return {
+          success: false,
+          error: targetResult.error ?? `Failed to set target "${target}"`,
+        };
+      }
+    }
+
+    // Plan the escape burn
+    const planResult = await returnFromMoon(this.conn, targetPeriapsis);
+    if (!planResult.success) {
+      return planResult;
+    }
+
+    // Return early if not executing
+    if (!execute) {
+      return { ...planResult, executed: false };
+    }
+
+    // Check if a node was created
+    const hasNode = await this.conn.execute('PRINT HASNODE.', 2000);
+    if (!hasNode.output.includes('True')) {
+      return { ...planResult, executed: false };
+    }
+
+    // Execute the escape burn
+    const execResult = await executeNode(this.conn, { logger, callerTool });
+    if (!execResult.success) {
+      return {
+        ...planResult,
+        executed: true,
+        error: execResult.error ?? 'Node execution failed',
+      };
+    }
+
+    // Complete the return sequence: warp to SOI, inclination change, smart advice
+    const seqResult = await completeReturnFromMoon(this.conn, this, logger);
+    if (!seqResult.success) {
+      return {
+        ...planResult,
+        executed: true,
+        error: seqResult.error ?? 'Return sequence failed',
+      };
+    }
+
+    return {
+      ...planResult,
+      executed: true,
+      nodesExecuted: 1,
+      text: seqResult.text,
+    };
   }
 
   /**
