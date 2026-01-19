@@ -269,10 +269,11 @@ async function resolveTargetName(
   }
 
   // Case 2: Check if it's a vessel with close approach
-  // Try to set target and check for close approach
+  // Search through targets list (EXISTS() is for files, not vessels)
   const vesselCheck = await conn.execute(
-    `IF EXISTS(VESSEL("${targetName}")) { ` +
-    `SET TARGET TO VESSEL("${targetName}"). WAIT 0.1. ` +
+    `LOCAL _vfound IS FALSE. LIST TARGETS IN _tlist. ` +
+    `FOR _t IN _tlist { IF _t:NAME = "${targetName}" { SET TARGET TO _t. SET _vfound TO TRUE. BREAK. } } ` +
+    `IF _vfound { WAIT 0.1. ` +
     `IF HASTARGET { PRINT "OK|" + ROUND(TARGET:CLOSESTAPPROACHTIME) + "|" + ROUND(TARGET:CLOSESTAPPROACHDISTANCE). } ` +
     `ELSE { PRINT "NOTARGET". } ` +
     `} ELSE { PRINT "NOTFOUND". }`,
@@ -298,12 +299,11 @@ async function resolveTargetName(
   }
 
   // Case 3: Check if it's a valid body but no encounter
-  // Try title case since KSP body names use that format (e.g., "Kerbin", "Minmus")
-  const titleCase = targetName.charAt(0).toUpperCase() + targetName.slice(1).toLowerCase();
+  // Search BODIES list (EXISTS() is for files, not bodies)
   const bodyCheck = await conn.execute(
-    `IF EXISTS(BODY("${titleCase}")) { PRINT "BODY|${titleCase}". } ` +
-    `ELSE IF EXISTS(BODY("${targetName}")) { PRINT "BODY|${targetName}". } ` +
-    `ELSE { PRINT "NO". }`,
+    `LOCAL _found IS "NO". LIST BODIES IN _blist. ` +
+    `FOR _b IN _blist { IF _b:NAME:TOLOWER = "${lowerTarget}" { SET _found TO "BODY|" + _b:NAME. BREAK. } } ` +
+    `PRINT _found.`,
     3000
   );
 
