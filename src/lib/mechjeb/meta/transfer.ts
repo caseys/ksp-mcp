@@ -20,7 +20,7 @@ import { formatTime,  fmtVel } from '../../utils/format.js';
 
 export const transferTool: ToolDefinition = {
   name: 'transfer',
-  description: 'Start transfer to vessel, moon or planet. Usually followed by course_correct.',
+  description: 'Begin transfer or return to/from planet, moon, or vessel.',
   inputSchema: {
     target: autoTargetSchema,
     execute: executeSchema,
@@ -258,6 +258,16 @@ export function determineTransferType(
   shipBodyName: string,
   shipParentBodyName: string
 ): TransferTypeResult {
+  // Safety check: already orbiting the target body
+  if ((targetClass === 'planet' || targetClass === 'moon') &&
+      targetName.toLowerCase() === shipBodyName.toLowerCase()) {
+    return {
+      transferType: 'hohmann',
+      error: `Already orbiting ${targetName}! Cannot transfer to current location.\n` +
+             `If returning to parent body, use return_from_moon.`,
+    };
+  }
+
   // Planet target
   if (targetClass === 'planet') {
     // Special case: at a moon, targeting the parent planet → return_from_moon

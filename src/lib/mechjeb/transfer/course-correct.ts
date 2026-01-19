@@ -494,6 +494,22 @@ export async function courseCorrection(
     };
   }
 
+  // Check if already orbiting the target body
+  // Course correction is for adjusting approach trajectories, not for when you're already at the target
+  if (targetInfo.class === 'planet' || targetInfo.class === 'moon') {
+    const bodyResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+    const currentBody = bodyResult.output.trim().split('\n').pop()?.trim().toLowerCase() ?? '';
+    if (targetInfo.name.toLowerCase() === currentBody) {
+      return {
+        success: false,
+        error: `Already orbiting ${targetInfo.name}! Course correction adjusts approach trajectories.\n` +
+               `If returning to parent body, use return_from_moon or transfer.`,
+        attempts: 0,
+        finalPeriapsis: 0,
+      };
+    }
+  }
+
   if (!targetInfo.hasEncounter) {
     // No formal SOI encounter from ship's current orbit
     // Check if there's a pending node that WOULD create an encounter
