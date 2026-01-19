@@ -141,9 +141,81 @@ async function detectMoonReturn(conn: KosConnection, targetName?: string): Promi
 }
 
 /**
+ * Orbit context for better error messages
+ */
+interface OrbitContext {
+  currentBody: string;
+  parentBody: string;
+  orbitType: 'circular' | 'elliptical' | 'hyperbolic';
+  eccentricity: number;
+  isAtMoon: boolean;  // Current body orbits a planet (not Sun)
+}
+
+/**
+ * Get orbit context for error messages
+ */
+async function getOrbitContext(conn: KosConnection): Promise<OrbitContext> {
+  const result = await conn.execute(
+    'LOCAL cb IS SHIP:BODY. ' +
+    'LOCAL pb IS cb:BODY:NAME. ' +
+    'LOCAL ecc IS SHIP:ORBIT:ECCENTRICITY. ' +
+    'LOCAL isMoon IS (pb <> "Sun"). ' +
+    'PRINT "CTX|" + cb:NAME + "|" + pb + "|" + ROUND(ecc, 4) + "|" + isMoon.',
+    3000
+  );
+
+  const match = result.output.match(/CTX\|([^|]+)\|([^|]+)\|([\d.]+)\|(True|False)/i);
+  if (!match) {
+    return { currentBody: '?', parentBody: '?', orbitType: 'elliptical', eccentricity: 0, isAtMoon: false };
+  }
+
+  const ecc = parseFloat(match[3]);
+  let orbitType: 'circular' | 'elliptical' | 'hyperbolic';
+  if (ecc >= 1) {
+    orbitType = 'hyperbolic';
+  } else if (ecc < 0.1) {
+    orbitType = 'circular';
+  } else {
+    orbitType = 'elliptical';
+  }
+
+  return {
+    currentBody: match[1].trim(),
+    parentBody: match[2].trim(),
+    orbitType,
+    eccentricity: ecc,
+    isAtMoon: match[4].toLowerCase() === 'true',
+  };
+}
+
+/**
  * Build helpful error message when target name doesn't match trajectory
  */
-function buildTrajectoryError(targetName: string, trajInfo: TrajectoryInfo): string {
+async function buildTrajectoryError(
+  conn: KosConnection,
+  targetName: string,
+  trajInfo: TrajectoryInfo
+): Promise<string> {
+  const ctx = await getOrbitContext(conn);
+
+  // Check if target is the parent body (e.g., Kerbin when at Minmus)
+  const isTargetParent = ctx.parentBody.toLowerCase() === targetName.toLowerCase();
+
+  if (isTargetParent && ctx.isAtMoon) {
+    // Trying to warp to parent body from moon orbit
+    if (ctx.orbitType === 'hyperbolic') {
+      // Has escape trajectory but no encounter with parent
+      return `Hyperbolic orbit around ${ctx.currentBody} but no ${targetName} encounter.\n` +
+             `Your escape trajectory may not intercept ${targetName}.\n` +
+             `Use return_from_moon to create a proper return trajectory.`;
+    } else {
+      // Circular/elliptical orbit - needs escape burn
+      return `Cannot warp to ${targetName} from ${ctx.orbitType} orbit around ${ctx.currentBody}.\n` +
+             `Use return_from_moon to escape ${ctx.currentBody} first.`;
+    }
+  }
+
+  // Generic case - body exists but no encounter
   let msg = `No encounter with "${targetName}" on current trajectory.`;
 
   if (trajInfo.hasSOIChange) {
@@ -156,7 +228,13 @@ function buildTrajectoryError(targetName: string, trajInfo: TrajectoryInfo): str
     msg += `\nNo upcoming events on current trajectory.`;
   }
 
-  msg += `\nUse hohmann_transfer to create an encounter first.`;
+  // Suggest appropriate transfer tool
+  if (ctx.isAtMoon && isTargetParent) {
+    msg += `\nUse return_from_moon to create an escape trajectory.`;
+  } else {
+    msg += `\nUse transfer or hohmann_transfer to create an encounter first.`;
+  }
+
   return msg;
 }
 
@@ -220,14 +298,20 @@ async function resolveTargetName(
   }
 
   // Case 3: Check if it's a valid body but no encounter
+  // Try title case since KSP body names use that format (e.g., "Kerbin", "Minmus")
+  const titleCase = targetName.charAt(0).toUpperCase() + targetName.slice(1).toLowerCase();
   const bodyCheck = await conn.execute(
-    `IF EXISTS(BODY("${targetName}")) { PRINT "BODY". } ELSE { PRINT "NO". }`,
+    `IF EXISTS(BODY("${titleCase}")) { PRINT "BODY|${titleCase}". } ` +
+    `ELSE IF EXISTS(BODY("${targetName}")) { PRINT "BODY|${targetName}". } ` +
+    `ELSE { PRINT "NO". }`,
     3000
   );
 
-  if (bodyCheck.output.includes('BODY')) {
-    // Valid body but no SOI encounter
-    return { resolved: false, error: buildTrajectoryError(targetName, trajInfo) };
+  const bodyMatch = bodyCheck.output.match(/BODY\|(\w+)/);
+  if (bodyMatch) {
+    // Valid body but no SOI encounter - provide context-aware error
+    const canonicalName = bodyMatch[1];
+    return { resolved: false, error: await buildTrajectoryError(conn, canonicalName, trajInfo) };
   }
 
   // Case 4: Not a valid body or vessel
