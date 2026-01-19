@@ -251,17 +251,11 @@ export const returnFromMoonTool: ToolDefinition = {
       });
 
       if (result.success) {
-        let text: string;
-        if (result.executed) {
-          // Complete the return sequence: warp to SOI, inclination change, smart advice
-          const seqResult = await completeReturnFromMoon(conn, orchestrator, logger);
-          if (!seqResult.success) {
-            return ctx.errorResponse('return_from_moon', seqResult.error ?? 'Return sequence failed');
-          }
-          text = seqResult.text ?? `Arrived at ${seqResult.body}`;
-        } else {
-          text = `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
-        }
+        // Orchestrator handles full sequence (warp, inclination, advice) and returns text
+        const text = result.text
+          ?? (result.executed
+            ? `Return complete`
+            : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`);
         return ctx.successResponse('return_from_moon', text);
       } else {
         return ctx.errorResponse('return_from_moon', result.error ?? 'Failed');
