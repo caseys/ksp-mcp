@@ -12,6 +12,7 @@ import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js'
 import { formatTime, fmtDist } from '../utils/format.js';
 import { hasTarget } from './target/shared.js';
 import { ManeuverOrchestrator } from '../mechjeb/orchestrator.js';
+import { generateArrivalAdvice } from '../mechjeb/transfer/return-from-moon.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -439,6 +440,7 @@ export interface WarpResult {
   warning?: string;      // Warning message (e.g., crash trajectory)
   periapsis?: number;    // Periapsis in new SOI (meters)
   bodyRadius?: number;   // Body radius for context
+  text?: string;         // Full formatted text for tool response
 }
 
 /**
@@ -997,50 +999,26 @@ async function warpToReentry(
   );
   const peMatch = peInfo.output.match(/PE\|([\d.-]+)\|(\d+)\|(\d+)/);
 
-  let warning: string;
   if (peMatch) {
     const peKm = parseFloat(peMatch[1]);
     const atmKm = parseInt(peMatch[2]);
     const altitude = parseInt(peMatch[3]);
 
-    if (atmKm > 0) {
-      // Body has atmosphere - use percentage-based thresholds
-      const steepThreshold = atmKm * 0.2;   // < 20% of atm = steep
-      const shallowThreshold = atmKm * 0.7; // > 70% of atm = shallow
-
-      if (peKm >= atmKm) {
-        warning = `Periapsis ${peKm}km is above atmosphere (${atmKm}km).\n` +
-                  `Use course_correct for reentry trajectory.`;
-      } else if (peKm > shallowThreshold) {
-        warning = `Periapsis ${peKm}km - shallow reentry (>${Math.round(shallowThreshold)}km).\n` +
-                  `Use course_correct for reentry trajectory.`;
-      } else if (peKm < steepThreshold) {
-        warning = `Periapsis ${peKm}km - steep reentry (<${Math.round(steepThreshold)}km).\n` +
-                  `Use course_correct for safer reentry.`;
-      } else {
-        warning = `Periapsis ${peKm}km - good for reentry.\n` +
-                  `Ready to land or circularize.`;
-      }
-    } else {
-      // No atmosphere - use absolute thresholds
-      if (peKm < 20) {
-        warning = `Periapsis ${peKm}km - low orbit.\n` +
-                  `Correct course for a higher orbit, or land.`;
-      } else if (peKm <= 250) {
-        warning = `Periapsis ${peKm}km - good orbit.\n` +
-                  `Circularize at periapsis, or land.`;
-      } else {
-        warning = `Periapsis ${peKm}km - far orbit.\n` +
-                  `Use course_correct to lower, or land.`;
-      }
-    }
+    // Use shared advice generation
+    const arrivalAdvice = generateArrivalAdvice({
+      bodyName: parentBody ?? 'parent body',
+      periapsisKm: peKm,
+      atmosphereKm: atmKm,
+      altitudeM: altitude,
+    });
 
     return {
       success: true,
       body: parentBody,
       altitude,
       periapsis: peKm * 1000,
-      warning,
+      warning: arrivalAdvice.advice,
+      text: arrivalAdvice.text,
     };
   }
 

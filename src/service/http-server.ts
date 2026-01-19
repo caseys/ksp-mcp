@@ -87,22 +87,23 @@ async function selectTarget(
 }
 
 /**
- * Get basic orbit info for tool context (periapsis, apoapsis, altitude)
+ * Get basic orbit info for tool context (periapsis, apoapsis, altitude, eccentricity)
  * Note: This is a simpler helper than the full getOrbitInfo from telemetry.ts
  */
 async function getBasicOrbitInfo(conn: ReturnType<typeof getConnection> | null): Promise<OrbitInfo | null> {
   if (!conn) return null;
   try {
     const result = await conn.execute(
-      'PRINT SHIP:ORBIT:PERIAPSIS + "|" + SHIP:ORBIT:APOAPSIS + "|" + SHIP:ALTITUDE.',
+      'PRINT SHIP:ORBIT:PERIAPSIS + "|" + SHIP:ORBIT:APOAPSIS + "|" + SHIP:ALTITUDE + "|" + SHIP:ORBIT:ECCENTRICITY.',
       3000
     );
-    const match = result.output.match(/([\d.]+)\|([\d.]+)\|([\d.]+)/);
+    const match = result.output.match(/([\d.]+)\|([\d.]+)\|([\d.]+)\|([\d.]+)/);
     if (match) {
       return {
         periapsis: parseFloat(match[1]),
         apoapsis: parseFloat(match[2]),
         altitude: parseFloat(match[3]),
+        eccentricity: parseFloat(match[4]),
       };
     }
   } catch {

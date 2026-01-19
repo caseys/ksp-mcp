@@ -497,16 +497,26 @@ export async function courseCorrection(
   // Check if already orbiting the target body
   // Course correction is for adjusting approach trajectories, not for when you're already at the target
   if (targetInfo.class === 'planet' || targetInfo.class === 'moon') {
-    const bodyResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
-    const currentBody = bodyResult.output.trim().split('\n').pop()?.trim().toLowerCase() ?? '';
+    const bodyResult = await conn.execute('PRINT SHIP:BODY:NAME + "|" + SHIP:ORBIT:ECCENTRICITY.', 2000);
+    const match = bodyResult.output.match(/([^|]+)\|([\d.]+)/);
+    const currentBody = match?.[1]?.trim().toLowerCase() ?? '';
+    const eccentricity = match ? parseFloat(match[2]) : 0;
+
     if (targetInfo.name.toLowerCase() === currentBody) {
-      return {
-        success: false,
-        error: `Already orbiting ${targetInfo.name}! Course correction adjusts approach trajectories.\n` +
-               `If returning to parent body, use return_from_moon or transfer.`,
-        attempts: 0,
-        finalPeriapsis: 0,
-      };
+      // Moon targets: always block if at moon
+      // Planet targets: allow if on eccentric/hyperbolic trajectory (returning from moon)
+      // ecc > 0.3 indicates transfer/return trajectory, not a stable parking orbit
+      if (targetInfo.class === 'moon' || eccentricity <= 0.3) {
+        return {
+          success: false,
+          error: `Already orbiting ${targetInfo.name}! Course correction adjusts approach trajectories.\n` +
+                 `If returning to parent body, use return_from_moon or transfer.`,
+          attempts: 0,
+          finalPeriapsis: 0,
+        };
+      }
+      // Planet with eccentric trajectory - allow course correction (returning from moon)
+      logger?.info(`[CourseCorrect] On eccentric approach to ${targetInfo.name} (e=${eccentricity.toFixed(2)})`);
     }
   }
 
@@ -716,13 +726,31 @@ export const courseCorrectTool: ToolDefinition = {
         const bodyResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
         const currentBody = bodyResult.output.trim().split('\n').pop()?.trim() ?? '';
 
-        // Body targets: must NOT be in current SOI (we're transferring TO it)
-        if ((targetInfo.class === 'planet' || targetInfo.class === 'moon') && currentBody.toLowerCase() === target.toLowerCase()) {
-            const orbitInfo = await ctx.getBasicOrbitInfo(conn);
+        // Body targets: check if we're actually "at" the target vs. on approach
+        if ((targetInfo.class === 'planet' || targetInfo.class === 'moon') &&
+            currentBody.toLowerCase() === target.toLowerCase()) {
+
+          const orbitInfo = await ctx.getBasicOrbitInfo(conn);
+          const isEccentricApproach = orbitInfo && orbitInfo.eccentricity > 0.3;
+
+          // Moon targets: must NOT be in same SOI (you're transferring TO the moon)
+          // Planet targets: allow if on eccentric trajectory (returning from moon)
+          if (targetInfo.class === 'moon') {
             return ctx.successResponse('course_correct',
               `Already at ${target}! No course correction needed.\n` +
               `Orbit: Pe=${Math.round((orbitInfo?.periapsis ?? 0) / 1000)}km, Ap=${Math.round((orbitInfo?.apoapsis ?? 0) / 1000)}km`);
           }
+
+          // Planet: only block if in stable/circular orbit (ecc <= 0.3)
+          if (!isEccentricApproach) {
+            return ctx.successResponse('course_correct',
+              `Already orbiting ${target}! No course correction needed.\n` +
+              `Orbit: Pe=${Math.round((orbitInfo?.periapsis ?? 0) / 1000)}km, Ap=${Math.round((orbitInfo?.apoapsis ?? 0) / 1000)}km`);
+          }
+
+          // Eccentric trajectory at planet - allow course correction (returning from moon)
+          logger.info(`[CourseCorrect] On eccentric approach to ${target} (e=${orbitInfo?.eccentricity?.toFixed(2)})`);
+        }
 
         // Vessel targets: must be IN current SOI
         if (targetInfo.class === 'vessel' && !targetInfo.isInShipSOI) {

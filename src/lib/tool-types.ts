@@ -78,6 +78,7 @@ export interface OrbitInfo {
   periapsis: number;
   apoapsis: number;
   altitude: number;
+  eccentricity: number;
 }
 
 /**

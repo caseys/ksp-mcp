@@ -12,6 +12,79 @@ import { formatTime, fmtVel, fmtDist } from '../../utils/format.js';
 import { warpTo } from '../../kos/warp.js';
 
 // ============================================================================
+// Shared Arrival Advice Generation
+// ============================================================================
+
+/**
+ * Generate smart advice for arrival at a celestial body.
+ * Used by return_from_moon, warp (reentry mode), and transfer tools.
+ */
+export interface ArrivalAdviceParams {
+  bodyName: string;
+  periapsisKm: number;
+  atmosphereKm: number;
+  altitudeM: number;
+}
+
+export interface ArrivalAdvice {
+  advice: string;
+  periapsisDescriptor: string;  // '', 'steep ', or 'shallow '
+  text: string;  // Full formatted text for tool response
+}
+
+/**
+ * Generate arrival advice based on periapsis and atmosphere.
+ * Consolidates advice logic from warp.ts and return-from-moon.ts.
+ */
+export function generateArrivalAdvice(params: ArrivalAdviceParams): ArrivalAdvice {
+  const { bodyName, periapsisKm, atmosphereKm, altitudeM } = params;
+
+  let advice: string;
+  let periapsisDescriptor = '';
+
+  if (atmosphereKm > 0) {
+    // Body has atmosphere - use percentage-based thresholds
+    const steepThreshold = atmosphereKm * 0.2;   // < 20% of atm = steep
+    const shallowThreshold = atmosphereKm * 0.7; // > 70% of atm = shallow
+
+    if (periapsisKm < 0) {
+      advice = 'CRASH TRAJECTORY! Use crash_avoidance immediately.';
+    } else if (periapsisKm >= atmosphereKm) {
+      periapsisDescriptor = 'high ';
+      advice = `Periapsis above atmosphere (${atmosphereKm}km). Use course_correct for reentry.`;
+    } else if (periapsisKm > shallowThreshold) {
+      periapsisDescriptor = 'shallow ';
+      advice = `Shallow reentry (>${Math.round(shallowThreshold)}km). Use course_correct for steeper approach.`;
+    } else if (periapsisKm < steepThreshold) {
+      periapsisDescriptor = 'steep ';
+      advice = `Steep reentry (<${Math.round(steepThreshold)}km). Use course_correct for safer approach.`;
+    } else {
+      // Good periapsis range
+      advice = 'Good for reentry. Ready to land or circularize.';
+    }
+  } else {
+    // No atmosphere - use absolute thresholds
+    if (periapsisKm < 0) {
+      advice = 'CRASH TRAJECTORY! Use crash_avoidance immediately.';
+    } else if (periapsisKm < 20) {
+      periapsisDescriptor = 'low ';
+      advice = 'Low orbit. Use course_correct for higher orbit, or land.';
+    } else if (periapsisKm <= 250) {
+      advice = 'Good orbit. Circularize at periapsis, or land.';
+    } else {
+      periapsisDescriptor = 'high ';
+      advice = 'Far orbit. Use course_correct to lower, or land.';
+    }
+  }
+
+  const text = `Arrived at ${bodyName}\n` +
+               `Altitude: ${fmtDist(altitudeM)}, ${periapsisDescriptor}Periapsis: ${periapsisKm}km\n` +
+               `Next: ${advice}`;
+
+  return { advice, periapsisDescriptor, text };
+}
+
+// ============================================================================
 // Shared Post-Escape Sequence
 // ============================================================================
 
@@ -173,25 +246,13 @@ export async function completeReturnFromMoon(
     const atmKm = parseInt(atmKmStr);
     const altitude = parseInt(altStr);
 
-    // Ideal reentry periapsis is ~30km. 5-55km is acceptable.
-    const isGoodPeriapsis = peKm >= 5 && peKm <= 55;
-    const peDescriptor = peKm < 5 ? 'steep ' : (peKm > 55 ? 'shallow ' : '');
-
-    let advice: string;
-    if (atmKm > 0 && peKm > 0 && peKm < atmKm) {
-      // Has atmosphere and will reenter
-      advice = isGoodPeriapsis
-        ? 'Align for reentry.'
-        : 'Course correct for a more comfortable reentry.';
-    } else if (peKm < 0) {
-      advice = 'CRASH TRAJECTORY! Use crash_avoidance immediately.';
-    } else {
-      advice = 'Circularize to establish orbit.';
-    }
-
-    const text = `Arrived at ${currentBody}\n` +
-                 `Altitude: ${fmtDist(altitude)}, ${peDescriptor}Periapsis: ${peKm}km\n` +
-                 `Next: ${advice}`;
+    // Use shared advice generation
+    const arrivalAdvice = generateArrivalAdvice({
+      bodyName: currentBody,
+      periapsisKm: peKm,
+      atmosphereKm: atmKm,
+      altitudeM: altitude,
+    });
 
     return {
       success: true,
@@ -199,8 +260,8 @@ export async function completeReturnFromMoon(
       altitude,
       periapsisKm: peKm,
       atmosphereKm: atmKm,
-      advice,
-      text,
+      advice: arrivalAdvice.advice,
+      text: arrivalAdvice.text,
     };
   }
 

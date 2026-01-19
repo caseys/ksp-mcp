@@ -287,8 +287,9 @@ Examples:
       process.stdin.on('end', cleanup);
       process.stdin.on('close', cleanup);
 
-      // Also listen for transport close (MCP SDK internal event)
-      transport.addEventListener('close', cleanup);
+      // Also listen for transport close (MCP SDK uses onclose property)
+      // eslint-disable-next-line unicorn/prefer-add-event-listener
+      transport.onclose = cleanup;
     }
   }
 
