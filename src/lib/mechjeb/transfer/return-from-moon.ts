@@ -97,7 +97,20 @@ export const returnFromMoonTool: ToolDefinition = {
             return ctx.errorResponse('return_from_moon', `Escape burn complete but warp failed: ${warpResult.error}`);
           }
 
-          // Get updated trajectory info after SOI transition
+          // Align to equatorial orbit for optimal reentry
+          logger.progress(`Arrived at ${parentBody}. Aligning to equatorial...`);
+          const incResult = await orchestrator.changeInclination(0, 'EQ_NEAREST_AD', {
+            execute: true,
+            logger,
+            callerTool: 'ensure_prograde_return',
+          });
+
+          if (!incResult.success) {
+            // Non-fatal - continue with current inclination
+            logger.warn(`[return_from_moon] Inclination change failed: ${incResult.error}`);
+          }
+
+          // Get updated trajectory info after SOI transition and inclination change
           const postWarpInfo = await conn.execute(
             'PRINT "POST|" + SHIP:BODY:NAME + "|" + ROUND(PERIAPSIS/1000, 1) + "|" + ' +
             'ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(ALTITUDE).',
