@@ -68,34 +68,87 @@ export const returnFromMoonTool: ToolDefinition = {
       if (result.success) {
         let text: string;
         if (result.executed) {
-          // Get moon name and trajectory info before warping
+          // Wait for KSP to recalculate orbital patches after the burn
+          // Without this, HASNEXTPATCH may return false even on escape trajectory
+          await new Promise(resolve => setTimeout(resolve, 500));
+
+          // Get moon name, escape trajectory info, and parent body
           const trajInfo = await conn.execute(
-            'PRINT "RET|" + SHIP:BODY:NAME + "|" + ' +
-            '(CHOOSE SHIP:ORBIT:NEXTPATCH:BODY:NAME IF SHIP:ORBIT:HASNEXTPATCH ELSE "?") + "|" + ' +
-            '(CHOOSE ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS/1000, 1) IF SHIP:ORBIT:HASNEXTPATCH ELSE 0).',
+            'LOCAL _ecc IS SHIP:ORBIT:ECCENTRICITY. ' +
+            'LOCAL _hasPatch IS SHIP:ORBIT:HASNEXTPATCH. ' +
+            'LOCAL _nextBody IS CHOOSE SHIP:ORBIT:NEXTPATCH:BODY:NAME IF _hasPatch ELSE "?". ' +
+            'LOCAL _nextPeKm IS CHOOSE ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS/1000, 1) IF _hasPatch ELSE 0. ' +
+            'LOCAL _patchEta IS CHOOSE ROUND(SHIP:ORBIT:NEXTPATCHETA) IF _hasPatch ELSE 0. ' +
+            'PRINT "RET|" + SHIP:BODY:NAME + "|" + _nextBody + "|" + _nextPeKm + "|" + ROUND(_ecc, 3) + "|" + _patchEta.',
             3000
           );
-          const match = trajInfo.output.match(/RET\|([^|]+)\|([^|]+)\|([\d.-]+)/);
+          const match = trajInfo.output.match(/RET\|([^|]+)\|([^|]+)\|([\d.-]+)\|([\d.]+)\|(\d+)/);
 
           let moonName = 'Moon';
           let parentBody = 'parent';
+          let eccentricity = 0;
+          let soiEtaSeconds = 0;
 
           if (match) {
             [, moonName, parentBody] = match;
+            eccentricity = parseFloat(match[4]);
+            soiEtaSeconds = parseInt(match[5]);
+          }
+
+          // Verify we're on an escape trajectory
+          if (eccentricity < 1) {
+            return ctx.errorResponse('return_from_moon',
+              `Burn complete but not on escape trajectory (e=${eccentricity.toFixed(3)}).\n` +
+              `Current orbit may be elliptical. Try return_from_moon again with more delta-v.`);
           }
 
           logger.progress(`${moonName} escape burn complete. Warping to ${moonName} escape...`);
 
           // Warp to parent body SOI
-          const warpResult = await warpTo(conn, 'soi', {
-            leadTime: 10,
-            timeout: 300_000,
-            logger,
-          });
+          // If HASNEXTPATCH is available, use 'soi' mode
+          // Otherwise, warp by time estimate (soiEtaSeconds from orbital calc)
+          let warpResult;
+          if (parentBody !== '?' && soiEtaSeconds > 0) {
+            // Normal case: SOI transition detected
+            warpResult = await warpTo(conn, 'soi', {
+              leadTime: 10,
+              timeout: 300_000,
+              logger,
+            });
+          } else {
+            // Fallback: hyperbolic but no NEXTPATCH yet
+            // This can happen if KSP hasn't fully calculated the trajectory
+            // Wait a bit more and retry
+            logger.warn(`[return_from_moon] No SOI patch detected (e=${eccentricity.toFixed(3)}). Waiting for KSP...`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+
+            // Retry the patch check
+            const retryCheck = await conn.execute(
+              'PRINT (CHOOSE SHIP:ORBIT:NEXTPATCHETA IF SHIP:ORBIT:HASNEXTPATCH ELSE 0).',
+              3000
+            );
+            const retryEta = parseInt(retryCheck.output.match(/(\d+)/)?.[1] || '0');
+
+            if (retryEta > 0) {
+              warpResult = await warpTo(conn, 'soi', {
+                leadTime: 10,
+                timeout: 300_000,
+                logger,
+              });
+            } else {
+              // Still no patch - give up with helpful error
+              return ctx.errorResponse('return_from_moon',
+                `Escape trajectory confirmed (e=${eccentricity.toFixed(3)}) but no SOI transition detected.\n` +
+                `KSP may not have calculated the encounter. Try using warp with a time value.`);
+            }
+          }
 
           if (!warpResult.success) {
             return ctx.errorResponse('return_from_moon', `Escape burn complete but warp failed: ${warpResult.error}`);
           }
+
+          // Wait for KSP to settle after SOI transition before planning maneuver
+          await new Promise(resolve => setTimeout(resolve, 500));
 
           // Align to equatorial orbit for optimal reentry
           logger.progress(`Arrived at ${parentBody}. Aligning to equatorial...`);

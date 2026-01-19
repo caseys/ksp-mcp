@@ -11,6 +11,7 @@ import { type McpLogger, nullLogger } from '../tool-types.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { formatTime, fmtDist } from '../utils/format.js';
 import { hasTarget } from './target/shared.js';
+import { ManeuverOrchestrator } from '../mechjeb/orchestrator.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -893,8 +894,9 @@ export async function warpForward(
 }
 
 /**
- * Warp to reentry: for moon-to-parent returns, warp to atmosphere edge
- * Target altitude: atmosphere height × 1.5 (or 50km if no atmosphere)
+ * Warp to reentry: for moon-to-parent returns
+ * 1. Warp to SOI transition
+ * 2. Check periapsis and provide reentry advice
  */
 async function warpToReentry(
   conn: KosConnection,
@@ -906,60 +908,95 @@ async function warpToReentry(
 
   // Get moon return info
   const moonReturn = await detectMoonReturn(conn);
-  if (!moonReturn.isMoonReturn || !moonReturn.etaToReentry) {
+  if (!moonReturn.isMoonReturn) {
     return { success: false, error: 'No parent body encounter detected. Use this from moon orbit with a return trajectory.' };
   }
 
-  const { parentBody, parentAtmHeight, etaToReentry } = moonReturn;
-  const targetAlt = parentAtmHeight && parentAtmHeight > 0
-    ? Math.round(parentAtmHeight * 1.5)
-    : 50_000;
-  const targetDesc = parentAtmHeight && parentAtmHeight > 0
-    ? `${parentBody} atmosphere edge (~${Math.round(targetAlt / 1000)}km)`
-    : `${parentBody} 50km altitude`;
+  const { parentBody } = moonReturn;
+  log.progress(`[Warp] Moon return: warping to ${parentBody} SOI...`);
 
-  log.progress(`[Warp] Course laid in for ${targetDesc}. ETA ${formatTime(etaToReentry)}... Engage!`);
+  // Warp to SOI transition (reuse warpToSOI logic)
+  const soiResult = await warpToSOI(conn, leadTime, timeout, logger);
 
-  // Clear any existing warp and issue WARPTO command
-  await stopWarp(conn);
-  const warpTargetUT = `TIME:SECONDS + ${etaToReentry - leadTime}`;
-  await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(${warpTargetUT}).`, 5000);
-
-  // Poll until we reach the parent body's SOI
-  let pollCount = 0;
-  const result = await pollWithBlackoutResilience<{ body: string; alt: number }>({
-    poll: async () => {
-      const r = await conn.execute('PRINT "WR|" + SHIP:BODY:NAME + "|" + ROUND(ALTITUDE).', 3000);
-      const m = r.output.match(/WR\|(\w+)\|(\d+)/);
-      return m ? { body: m[1], alt: parseInt(m[2]) } : { body: '', alt: 0 };
-    },
-    isDone: (state) => state.body.toLowerCase() === parentBody!.toLowerCase(),
-    isSuccess: (state) => state.body.toLowerCase() === parentBody!.toLowerCase(),
-    timeoutMs: timeout,
-    pollIntervalMs: POLL_INTERVAL_MS,
-    logger: log,
-    context: 'Warp to reentry',
-    connection: conn,
-    onPoll: () => {
-      pollCount++;
-      if (pollCount % 15 === 0) {  // Every ~30 seconds
-        log.progress(`[Warp] Approaching ${parentBody}...`);
-      }
-    },
-  });
-
-  if (!result.success) {
-    return { success: false, error: result.timedOut ? 'Warp to reentry timed out' : 'Warp to reentry failed' };
+  if (!soiResult.success) {
+    return soiResult;
   }
 
-  const finalAlt = result.result?.alt ?? 0;
-  log.progress(`[Warp] Arrived at ${parentBody}. Altitude: ${fmtDist(finalAlt)}`);
+  // Wait for KSP to settle after SOI transition
+  await new Promise(resolve => setTimeout(resolve, 500));
 
+  // Align to equatorial orbit for optimal reentry
+  log.progress(`[Warp] Arrived at ${parentBody}. Aligning to equatorial...`);
+  const orchestrator = new ManeuverOrchestrator(conn);
+  const incResult = await orchestrator.changeInclination(0, 'EQ_NEAREST_AD', {
+    execute: true,
+    logger,
+    callerTool: 'warp_reentry',
+  });
+
+  if (!incResult.success) {
+    // Non-fatal - continue with current inclination
+    log.warn(`[Warp] Inclination change failed: ${incResult.error}`);
+  }
+
+  // Get periapsis info for reentry advice
+  const peInfo = await conn.execute(
+    'PRINT "PE|" + ROUND(PERIAPSIS/1000, 1) + "|" + ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(ALTITUDE).',
+    3000
+  );
+  const peMatch = peInfo.output.match(/PE\|([\d.-]+)\|(\d+)\|(\d+)/);
+
+  let warning: string;
+  if (peMatch) {
+    const peKm = parseFloat(peMatch[1]);
+    const atmKm = parseInt(peMatch[2]);
+    const altitude = parseInt(peMatch[3]);
+
+    if (atmKm > 0) {
+      // Body has atmosphere - use percentage-based thresholds
+      const steepThreshold = atmKm * 0.2;   // < 20% of atm = steep
+      const shallowThreshold = atmKm * 0.7; // > 70% of atm = shallow
+
+      if (peKm >= atmKm) {
+        warning = `Periapsis ${peKm}km is above atmosphere (${atmKm}km).\n` +
+                  `Use course_correct for reentry trajectory.`;
+      } else if (peKm > shallowThreshold) {
+        warning = `Periapsis ${peKm}km - shallow reentry (>${Math.round(shallowThreshold)}km).\n` +
+                  `Use course_correct for reentry trajectory.`;
+      } else if (peKm < steepThreshold) {
+        warning = `Periapsis ${peKm}km - steep reentry (<${Math.round(steepThreshold)}km).\n` +
+                  `Use course_correct for safer reentry.`;
+      } else {
+        warning = `Periapsis ${peKm}km - good for reentry.\n` +
+                  `Ready to land or circularize.`;
+      }
+    } else {
+      // No atmosphere - use absolute thresholds
+      if (peKm < 20) {
+        warning = `Periapsis ${peKm}km - low orbit.\n` +
+                  `Correct course for a higher orbit, or land.`;
+      } else if (peKm <= 250) {
+        warning = `Periapsis ${peKm}km - good orbit.\n` +
+                  `Circularize at periapsis, or land.`;
+      } else {
+        warning = `Periapsis ${peKm}km - far orbit.\n` +
+                  `Use course_correct to lower, or land.`;
+      }
+    }
+
+    return {
+      success: true,
+      body: parentBody,
+      altitude,
+      periapsis: peKm * 1000,
+      warning,
+    };
+  }
+
+  // Fallback if periapsis query failed
   return {
-    success: true,
-    body: parentBody,
-    altitude: finalAlt,
-    warning: `Ready for reentry.\nTarget altitude was ~${Math.round(targetAlt / 1000)}km (atm×1.5 or 50km).`,
+    ...soiResult,
+    warning: `Arrived at ${parentBody}. Check periapsis for reentry planning.`,
   };
 }
 
@@ -975,7 +1012,7 @@ import type { ToolDefinition } from '../tool-types.js';
  */
 export const warpTool: ToolDefinition = {
   name: 'warp',
-  description: 'Fast-forward time to specific moment, maneuver node, or SOI transition.',
+  description: 'Time warp, fast-forward time to specific moment, maneuver node, or SOI transition.  Only affects time, not Star Trek warp.',
   inputSchema: {
     target: z.union([
       z.enum(['node', 'soi', 'periapsis', 'apoapsis', 'reentry', 'auto']),
