@@ -17,6 +17,150 @@ import { determineTransferType, executeSmartTransfer } from '../meta/transfer.js
 // Helper Functions
 // ============================================================================
 
+// ============================================================================
+// Planet Type Classification for Smart Periapsis Selection
+// ============================================================================
+
+/**
+ * Planet information for smart course correction
+ */
+interface PlanetInfo {
+  name: string;
+  hasAtmosphere: boolean;
+  atmosphereHeight: number;  // 0 if no atmosphere
+  isGasGiant: boolean;       // true if no surface accessible
+  isKerbin: boolean;
+}
+
+/**
+ * Query planet information for smart periapsis selection
+ */
+async function queryPlanetInfo(conn: KosConnection, targetName: string): Promise<PlanetInfo | null> {
+  const result = await conn.execute(
+    `IF EXISTS(BODY("${targetName}")) { ` +
+    `LOCAL b IS BODY("${targetName}"). ` +
+    `LOCAL hasAtm IS b:ATM:EXISTS. ` +
+    `LOCAL atmH IS CHOOSE b:ATM:HEIGHT IF hasAtm ELSE 0. ` +
+    // Gas giant heuristic: atmosphere extends beyond what would be surface
+    // Jool has radius 6000km, atm 200km but no surface - check if ALT:RADAR would be negative
+    `LOCAL isGas IS hasAtm AND (atmH > b:RADIUS * 0.03). ` +
+    `PRINT "PI|" + b:NAME + "|" + hasAtm + "|" + ROUND(atmH) + "|" + isGas. ` +
+    `} ELSE { PRINT "NOPLANET". }`,
+    3000
+  );
+
+  if (result.output.includes('NOPLANET')) {
+    return null;
+  }
+
+  const match = result.output.match(/PI\|([^|]+)\|(True|False)\|(\d+)\|(True|False)/i);
+  if (!match) return null;
+
+  return {
+    name: match[1].trim(),
+    hasAtmosphere: match[2].toLowerCase() === 'true',
+    atmosphereHeight: parseInt(match[3]),
+    isGasGiant: match[4].toLowerCase() === 'true',
+    isKerbin: match[1].trim().toLowerCase() === 'kerbin',
+  };
+}
+
+/**
+ * Smart periapsis selection result
+ */
+interface SmartPeriapsisResult {
+  targetPeriapsis: number;
+  idealMin: number;
+  idealMax: number;
+  advice: string;
+  planetType: 'gas-giant' | 'kerbin' | 'atmospheric' | 'airless';
+}
+
+/**
+ * Determine optimal periapsis and advice based on planet characteristics
+ *
+ * Planet types and ideal ranges:
+ * - Gas giant: atm height ± 50km, target atm - 20km (aerobrake)
+ * - Kerbin: 15-55km, target 35km (land at KSC)
+ * - Atmospheric: 50% atm to 250km, target atm - 20km (capture/land)
+ * - Airless: 35-250km, target 50km (circularize)
+ */
+function getSmartPeriapsis(planetInfo: PlanetInfo): SmartPeriapsisResult {
+  // Gas giant: aerobrake into atmosphere
+  // TODO: Expand to handle hyperbolic/crash trajectories after interplanetary transfer
+  if (planetInfo.isGasGiant) {
+    const atmH = planetInfo.atmosphereHeight;
+    return {
+      targetPeriapsis: atmH - 20_000,
+      idealMin: atmH - 50_000,
+      idealMax: atmH + 50_000,
+      advice: `Warp to ${planetInfo.name} for aerobrake`,
+      planetType: 'gas-giant',
+    };
+  }
+
+  // Kerbin: reentry for landing
+  if (planetInfo.isKerbin) {
+    return {
+      targetPeriapsis: 35_000,
+      idealMin: 15_000,
+      idealMax: 55_000,
+      advice: `Use land tool with target 'KSC'`,
+      planetType: 'kerbin',
+    };
+  }
+
+  // Atmospheric planet: capture or land
+  if (planetInfo.hasAtmosphere) {
+    const atmH = planetInfo.atmosphereHeight;
+    return {
+      targetPeriapsis: atmH - 20_000,
+      idealMin: atmH * 0.5,
+      idealMax: 250_000,
+      advice: `Use adjust_orbit for capture burn or land`,
+      planetType: 'atmospheric',
+    };
+  }
+
+  // Airless body: circularize
+  return {
+    targetPeriapsis: 50_000,
+    idealMin: 35_000,
+    idealMax: 250_000,
+    advice: `Circularize to establish orbit`,
+    planetType: 'airless',
+  };
+}
+
+/**
+ * Query current encounter periapsis from trajectory (not from a node)
+ */
+async function queryCurrentEncounterPeriapsis(conn: KosConnection): Promise<{ hasPeriapsis: boolean; periapsis: number; body: string }> {
+  const result = await conn.execute(
+    'IF SHIP:ORBIT:HASNEXTPATCH { ' +
+    'PRINT "PE|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME + "|" + ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS). ' +
+    '} ELSE { PRINT "NOPE". }',
+    3000
+  );
+
+  if (result.output.includes('NOPE')) {
+    return { hasPeriapsis: false, periapsis: 0, body: '' };
+  }
+
+  const match = result.output.match(/PE\|([^|]+)\|(-?\d+)/);
+  if (!match) {
+    return { hasPeriapsis: false, periapsis: 0, body: '' };
+  }
+
+  return {
+    hasPeriapsis: true,
+    body: match[1].trim(),
+    periapsis: parseInt(match[2]),
+  };
+}
+
+// ============================================================================
+
 /**
  * Query the periapsis that the current maneuver node would produce at the target.
  * Uses NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS to get the periapsis in the target's SOI.
@@ -575,6 +719,43 @@ export const courseCorrectTool: ToolDefinition = {
 
       let targetDistance = args.targetDistance as number;
       const shouldExecute = args.execute as boolean;
+      let smartAdvice: string | undefined;
+
+      // Smart periapsis selection for planets/moons
+      if (target) {
+        const planetInfo = await queryPlanetInfo(conn, target);
+        if (planetInfo) {
+          const smart = getSmartPeriapsis(planetInfo);
+          smartAdvice = smart.advice;
+
+          // Check current encounter periapsis
+          const currentPe = await queryCurrentEncounterPeriapsis(conn);
+
+          if (currentPe.hasPeriapsis && currentPe.body.toLowerCase() === target.toLowerCase()) {
+            const peKm = currentPe.periapsis / 1000;
+
+            // If already in ideal range, don't course correct - just give advice
+            if (currentPe.periapsis >= smart.idealMin && currentPe.periapsis <= smart.idealMax) {
+              return ctx.successResponse('course_correct',
+                `Periapsis ${peKm.toFixed(0)}km is already in ideal range ` +
+                `(${(smart.idealMin / 1000).toFixed(0)}-${(smart.idealMax / 1000).toFixed(0)}km).\n` +
+                `Next: ${smart.advice}`);
+            }
+
+            // Outside ideal range - use smart target if user didn't specify a custom distance
+            // (default is 50000, so if it's still 50000 we can override)
+            if (targetDistance === 50_000) {
+              logger.info(`[CourseCorrect] Current Pe ${peKm.toFixed(0)}km outside ideal range for ${smart.planetType}, ` +
+                         `adjusting to ${(smart.targetPeriapsis / 1000).toFixed(0)}km`);
+              targetDistance = smart.targetPeriapsis;
+            }
+          } else if (!currentPe.hasPeriapsis && targetDistance === 50_000) {
+            // No encounter yet but we have planet info - use smart default
+            logger.info(`[CourseCorrect] Using smart periapsis ${(smart.targetPeriapsis / 1000).toFixed(0)}km for ${smart.planetType} ${planetInfo.name}`);
+            targetDistance = smart.targetPeriapsis;
+          }
+        }
+      }
 
       // Validate target distance range
       const MIN_DISTANCE = 10_000;      // 10km minimum
@@ -715,7 +896,9 @@ export const courseCorrectTool: ToolDefinition = {
           text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(actualPe / 1000).toFixed(0)}km`;
           if (encounterInfo && encounterInfo.targetType === 'body') {
             text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
-            text += `\nNext: warp to SOI, then circularize`;
+            // Use smart advice if available, otherwise default
+            const nextStep = smartAdvice ?? 'Warp to SOI, then circularize';
+            text += `\nNext: ${nextStep}`;
           }
           return ctx.successResponse('course_correct', text);
         }
@@ -743,12 +926,14 @@ export const courseCorrectTool: ToolDefinition = {
       text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(actualPe / 1000).toFixed(0)}km`;
 
       if (encounterInfo && encounterInfo.targetType === 'body') {
+        // Use smart advice if available, otherwise default
+        const nextStep = smartAdvice ?? 'Warp to SOI, then circularize';
         if (finalError <= TOLERANCE) {
           text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
-          text += `\nNext: warp to SOI, then circularize`;
+          text += `\nNext: ${nextStep}`;
         } else if (actualPe >= 10_000) {
           text += `\nEncounter: ${encounterInfo.targetName} (acceptable)`;
-          text += `\nNext: warp to SOI, then circularize`;
+          text += `\nNext: ${nextStep}`;
         } else {
           text += `\nEncounter: ${encounterInfo.targetName} (needs correction)`;
         }
