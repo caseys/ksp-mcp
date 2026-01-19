@@ -327,10 +327,18 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
         `Wait for line-of-sight to Kerbin or a relay.`
       );
     }
-    // No response could also be blackout (after "Signal lost" was already shown)
-    if (healthCheck.reason === 'no_response' && options?.allowBlackout) {
+    // No response could also be blackout (after "Signal lost" was already shown once)
+    if (healthCheck.reason === 'no_response') {
       conn.setHealth('signal_lost', 'Radio blackout - no response from vessel');
-      return conn;
+      if (options?.allowBlackout) {
+        return conn;
+      }
+      // Default: throw error so tools don't hang waiting for kOS
+      const vesselName = conn.getState().vesselName || 'Unknown';
+      throw new Error(
+        `No response from vessel '${vesselName}' - possible radio blackout. ` +
+        `Wait for signal to return.`
+      );
     }
     // Other failures (crash, power loss) - disconnect and try fresh reconnect
     await forceDisconnect();

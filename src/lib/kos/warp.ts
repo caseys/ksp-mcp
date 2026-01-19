@@ -307,6 +307,13 @@ async function resolveTargetName(
     3000
   );
 
+  // Check if we got a valid response - if not, might be a communication issue
+  const hasValidResponse = bodyCheck.output.includes('BODY|') || bodyCheck.output.includes('NO');
+  if (!hasValidResponse) {
+    // kOS didn't return expected output - likely communication issue
+    return { resolved: false, error: `Unable to verify "${targetName}" - communication issue. Check vessel signal.` };
+  }
+
   const bodyMatch = bodyCheck.output.match(/BODY\|(\w+)/);
   if (bodyMatch) {
     // Valid body but no SOI encounter - provide context-aware error
@@ -314,7 +321,7 @@ async function resolveTargetName(
     return { resolved: false, error: await buildTrajectoryError(conn, canonicalName, trajInfo) };
   }
 
-  // Case 4: Not a valid body or vessel
+  // Case 4: Not a valid body or vessel (kOS responded with "NO")
   return { resolved: false, error: `"${targetName}" is not a valid body or vessel name.` };
 }
 
