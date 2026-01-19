@@ -271,6 +271,24 @@ Examples:
       const server = createServer();
       const transport = new StdioServerTransport();
       await server.connect(transport);
+
+      // Cleanup on shutdown signals or transport close
+      const cleanup = () => {
+        // Don't log to stdout/stderr - can cause issues with closed pipes
+        // Just exit cleanly
+        process.exit(0);
+      };
+
+      process.on('SIGINT', cleanup);
+      process.on('SIGTERM', cleanup);
+      process.on('SIGHUP', cleanup);
+
+      // Detect when parent process disconnects (stdin closes)
+      process.stdin.on('end', cleanup);
+      process.stdin.on('close', cleanup);
+
+      // Also listen for transport close (MCP SDK internal event)
+      transport.addEventListener('close', cleanup);
     }
   }
 
