@@ -17,6 +17,54 @@ import { formatTime, formatOrbit, fmtNum, fmtDist, fmtVel } from '../utils/forma
 // Delay between query batches - set to 0 since all telemetry queries are read-only
 const TELEMETRY_DELAY_MS = 0;
 
+/**
+ * Get smart display status for reentry/aerobraking trajectories.
+ * Replaces generic "SUB_ORBITAL" with more descriptive states.
+ *
+ * For atmospheric bodies with periapsis below atmosphere:
+ * - COASTING_TO_AEROBRAKE: Aerobraking trajectory, still above atmosphere
+ * - AEROBRAKING: In atmosphere, aerobraking
+ * - COASTING_TO_REENTRY: Reentry trajectory, still above atmosphere
+ * - REENTRY_AEROBRAKE: In upper atmosphere, slowing down before steep reentry
+ * - REENTRY: In lower atmosphere, steep reentry
+ */
+function getReentryDisplayStatus(
+  vesselStatus: string,
+  periapsis: number,
+  altitude: number,
+  atmHeight: number,
+  hasAtmosphere: boolean
+): string {
+  // Only override for sub_orbital on atmospheric bodies
+  if (vesselStatus.toLowerCase() !== 'sub_orbital' || !hasAtmosphere || atmHeight <= 0) {
+    return vesselStatus.toUpperCase();
+  }
+
+  // Calculate shallow reentry threshold (e.g., 50km for Kerbin's 70km atmosphere)
+  const shallowReentryHeight = atmHeight - 20_000;
+
+  if (periapsis < shallowReentryHeight) {
+    // Deep reentry trajectory (periapsis < 50km for Kerbin)
+    if (altitude > atmHeight) {
+      return 'COASTING_TO_REENTRY';
+    } else if (altitude > shallowReentryHeight) {
+      return 'REENTRY_AEROBRAKE';
+    } else {
+      return 'REENTRY';
+    }
+  } else if (periapsis < atmHeight) {
+    // Aerobraking trajectory (periapsis 50-70km for Kerbin)
+    if (altitude > atmHeight) {
+      return 'COASTING_TO_AEROBRAKE';
+    } else {
+      return 'AEROBRAKING';
+    }
+  }
+
+  // Shouldn't get here if vesselStatus is sub_orbital
+  return vesselStatus.toUpperCase();
+}
+
 // TypeScript-side telemetry cache
 // - Avoids kOS limitations (CONFIG: only for built-in settings, GLOBAL clears on Ctrl+C)
 // - Benefits MCP server (long-lived process) with rapid repeated status calls
@@ -450,8 +498,11 @@ export async function getShipTelemetry(
     lines.push(`${vesselType}: ${vesselName}${dvPart}`);
   } else {
     // Show TRANSFERRING when on course for SOI transition
-    const displayStatus = hasNextPatch ? 'TRANSFERRING' : vesselStatus.toUpperCase();
-    lines.push(`SOI: ${soiDisplay} (${displayStatus})`);
+    // For sub_orbital, show smarter reentry/aerobraking status
+    const baseStatus = hasNextPatch ? 'TRANSFERRING' : getReentryDisplayStatus(
+      vesselStatus, per, altitude, atmHeight, hasAtmosphere
+    );
+    lines.push(`SOI: ${soiDisplay} (${baseStatus})`);
     // Store index for "Next:" line - will be populated after G3 with encounter body name
     nextLineIndex = lines.length;
     lines.push('');  // Placeholder

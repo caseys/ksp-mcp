@@ -116,20 +116,30 @@ export async function queryWrongEncounterDetails(
 }
 
 /**
- * Parse a numeric value from kOS output
- * Looks for patterns like "23.80  m/s" or just bare numbers (including negative)
+ * Parse a numeric value from kOS/MechJeb output
+ * Handles values with units like "534.23 kN", "23.80 m/s", "150.5 km", or bare numbers
  * Returns 0 if input is undefined, null, or doesn't contain a number
  */
 export function parseNumber(output: string | undefined | null): number {
   if (!output) return 0;
 
-  // First try to find a number with units (e.g., "23.80  m/s" or "-23.80  m/s")
-  const withUnits = output.match(/(-?\d+(?:\.\d+)?)\s*m\/s/i);
-  if (withUnits) {
-    return Number.parseFloat(withUnits[1]);
+  // Try to match a number with common kOS/MechJeb units
+  // Order matters: check specific units before bare number fallback
+  const unitPatterns = [
+    /(-?\d+(?:\.\d+)?(?:E[+-]?\d+)?)\s*kN/i,   // thrust: "534.23 kN"
+    /(-?\d+(?:\.\d+)?(?:E[+-]?\d+)?)\s*m\/s/i, // velocity: "23.80 m/s"
+    /(-?\d+(?:\.\d+)?(?:E[+-]?\d+)?)\s*km/i,   // distance: "150.5 km"
+    /(-?\d+(?:\.\d+)?(?:E[+-]?\d+)?)\s*m(?!\w)/i, // meters: "500 m" (not "ms" or "min")
+  ];
+
+  for (const pattern of unitPatterns) {
+    const match = output.match(pattern);
+    if (match) {
+      return Number.parseFloat(match[1]);
+    }
   }
 
-  // Otherwise find all numbers (including negative)
+  // Fallback: find all numbers (including negative and scientific notation)
   const allNumbers = output.match(/-?\d+(?:\.\d+)?(?:E[+-]?\d+)?/gi);
   if (allNumbers && allNumbers.length > 0) {
     // Take the last number which is most likely the actual value

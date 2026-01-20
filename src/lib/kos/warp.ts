@@ -12,7 +12,7 @@ import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js'
 import { formatTime, fmtDist } from '../utils/format.js';
 import { hasTarget } from './target/shared.js';
 import { ManeuverOrchestrator } from '../mechjeb/orchestrator.js';
-import { generateArrivalAdvice } from '../mechjeb/transfer/return-from-moon.js';
+import { handlePostSOIArrival } from '../mechjeb/transfer/return-from-moon.js';
 
 const POLL_INTERVAL_MS = 2000;  // Poll every 2s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -978,54 +978,17 @@ async function warpToReentry(
   // Wait for KSP to settle after SOI transition
   await new Promise(resolve => setTimeout(resolve, 500));
 
-  // Align to equatorial orbit for optimal reentry
-  log.progress(`[Warp] Arrived at ${parentBody} SOI. Aligning to equatorial...`);
+  // Use shared post-SOI arrival handler (inclination change + advice)
   const orchestrator = new ManeuverOrchestrator(conn);
-  const incResult = await orchestrator.changeInclination(0, 'EQ_NEAREST_AD', {
-    execute: true,
-    logger,
-    callerTool: 'warp_reentry',
-  });
+  const arrivalResult = await handlePostSOIArrival(conn, orchestrator, logger, 'warp_reentry');
 
-  if (!incResult.success) {
-    // Non-fatal - continue with current inclination
-    log.warn(`[Warp] Inclination change failed: ${incResult.error}`);
-  }
-
-  // Get periapsis info for reentry advice
-  const peInfo = await conn.execute(
-    'PRINT "PE|" + ROUND(PERIAPSIS/1000, 1) + "|" + ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(ALTITUDE).',
-    3000
-  );
-  const peMatch = peInfo.output.match(/PE\|([\d.-]+)\|(\d+)\|(\d+)/);
-
-  if (peMatch) {
-    const peKm = parseFloat(peMatch[1]);
-    const atmKm = parseInt(peMatch[2]);
-    const altitude = parseInt(peMatch[3]);
-
-    // Use shared advice generation
-    const arrivalAdvice = generateArrivalAdvice({
-      bodyName: parentBody ?? 'parent body',
-      periapsisKm: peKm,
-      atmosphereKm: atmKm,
-      altitudeM: altitude,
-    });
-
-    return {
-      success: true,
-      body: parentBody,
-      altitude,
-      periapsis: peKm * 1000,
-      warning: arrivalAdvice.advice,
-      text: arrivalAdvice.text,
-    };
-  }
-
-  // Fallback if periapsis query failed
   return {
-    ...soiResult,
-    warning: `Arrived at ${parentBody} SOI. Check periapsis for reentry planning.`,
+    success: true,
+    body: arrivalResult.body,
+    altitude: arrivalResult.altitude,
+    periapsis: arrivalResult.periapsisKm * 1000,
+    warning: arrivalResult.advice,
+    text: arrivalResult.text,
   };
 }
 

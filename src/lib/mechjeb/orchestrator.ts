@@ -130,7 +130,10 @@ export async function withTargetAndExecute(
 
   // Check if a node was actually created (planning can succeed without creating nodes
   // e.g., when vessel is already on transfer trajectory)
-  if (planResult.nodesCreated === 0 || (planResult.warning && !planResult.nodesCreated)) {
+  // Note: Only skip if nodesCreated is explicitly 0. Don't skip if undefined with a warning,
+  // as warnings (e.g., reentry warning) are separate from node creation.
+  // The HASNODE check below is the definitive verification.
+  if (planResult.nodesCreated === 0) {
     // No node created - return success without execution
     return { ...planResult, executed: false };
   }
@@ -617,7 +620,7 @@ export class ManeuverOrchestrator {
    * 4. Return smart advice based on trajectory
    */
   async returnFromMoon(
-    targetPeriapsis: number,
+    targetPeriapsis: number | 'auto' = 'auto',
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
     const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};

@@ -2,6 +2,7 @@
  * Return From Moon - Transfer back to parent body
  */
 
+import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
 import { validateVesselState } from '../../kos/vessel/validate.js';
@@ -55,9 +56,9 @@ export function generateArrivalAdvice(params: ArrivalAdviceParams): ArrivalAdvic
     // Crash trajectory - same for all bodies
     advice = 'CRASH TRAJECTORY! Use crash_avoidance immediately.';
   } else if (isKerbin) {
-    // Kerbin: ideal 25-50km for reentry to KSC
-    const idealMin = 25;
-    const idealMax = 50;
+    // Kerbin: ideal 10-40km for reentry to KSC
+    const idealMin = 10;
+    const idealMax = 40;
 
     if (periapsisKm >= atmosphereKm) {
       periapsisDescriptor = 'high ';
@@ -112,6 +113,88 @@ export function generateArrivalAdvice(params: ArrivalAdviceParams): ArrivalAdvic
                `Next: ${advice}`;
 
   return { advice, periapsisDescriptor, text };
+}
+
+// ============================================================================
+// Shared Post-SOI Arrival Handling
+// ============================================================================
+
+/**
+ * Result from post-SOI arrival handling (inclination change + advice)
+ */
+export interface PostSOIArrivalResult {
+  success: boolean;
+  body: string;
+  altitude: number;
+  periapsisKm: number;
+  atmosphereKm: number;
+  advice: string;
+  text: string;
+}
+
+/**
+ * Handle post-SOI arrival: align to equatorial and generate advice.
+ *
+ * Shared between return_from_moon and warp reentry mode.
+ * Uses X_FROM_NOW (60s) for inclination change to avoid scheduling
+ * the node at a distant equatorial crossing beyond reentry.
+ *
+ * @param conn kOS connection
+ * @param orchestrator ManeuverOrchestrator instance
+ * @param logger MCP logger
+ * @param callerTool Name of calling tool for logging context
+ */
+export async function handlePostSOIArrival(
+  conn: KosConnection,
+  orchestrator: ManeuverOrchestrator,
+  logger: McpLogger = nullLogger,
+  callerTool = 'post_soi_arrival'
+): Promise<PostSOIArrivalResult> {
+  // Query current body info
+  const bodyInfo = await conn.execute(
+    'PRINT "POST|" + SHIP:BODY:NAME + "|" + ROUND(PERIAPSIS/1000, 1) + "|" + ' +
+    'ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(ALTITUDE).',
+    3000
+  );
+  const match = bodyInfo.output.match(/POST\|([^|]+)\|([\d.-]+)\|(\d+)\|(\d+)/);
+
+  const bodyName = match?.[1]?.trim() ?? 'Unknown';
+  const peKm = match ? parseFloat(match[2]) : 0;
+  const atmKm = match ? parseInt(match[3]) : 0;
+  const altitude = match ? parseInt(match[4]) : 0;
+
+  // Align to equatorial orbit - use fixed time (60s from now) to avoid scheduling
+  // the node at a distant equatorial crossing that could be beyond reentry
+  logger.progress(`Arrived at ${bodyName} SOI. Aligning to equatorial...`);
+  const incResult = await orchestrator.changeInclination(0, 'X_FROM_NOW', {
+    execute: true,
+    logger,
+    callerTool,
+    xFromNowSeconds: 60,
+  });
+
+  if (!incResult.success) {
+    // Non-fatal - continue with current inclination
+    logger.warn(`[${callerTool}] Inclination change failed: ${incResult.error}`);
+  }
+
+  // Generate arrival advice
+  const arrivalAdvice = generateArrivalAdvice({
+    bodyName,
+    periapsisKm: peKm,
+    atmosphereKm: atmKm,
+    altitudeM: altitude,
+  });
+
+  return {
+    success: true,
+    body: bodyName,
+    altitude,
+    periapsisKm: peKm,
+    atmosphereKm: atmKm,
+    advice: arrivalAdvice.advice,
+    text: arrivalAdvice.text,
+  };
 }
 
 // ============================================================================
@@ -303,58 +386,17 @@ export async function completeReturnFromMoon(
     await new Promise(resolve => setTimeout(resolve, 500));
   }
 
-  // Align to equatorial orbit for optimal reentry
-  logger.progress(`Arrived at ${currentBody} SOI. Aligning to equatorial...`);
-  const incResult = await orchestrator.changeInclination(0, 'EQ_NEAREST_AD', {
-    execute: true,
-    logger,
-    callerTool: 'ensure_prograde_return',
-  });
+  // Use shared post-SOI arrival handler
+  const arrivalResult = await handlePostSOIArrival(conn, orchestrator, logger, 'return_from_moon');
 
-  if (!incResult.success) {
-    // Non-fatal - continue with current inclination
-    logger.warn(`[return_from_moon] Inclination change failed: ${incResult.error}`);
-  }
-
-  // Get updated trajectory info
-  const postWarpInfo = await conn.execute(
-    'PRINT "POST|" + SHIP:BODY:NAME + "|" + ROUND(PERIAPSIS/1000, 1) + "|" + ' +
-    'ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(ALTITUDE).',
-    3000
-  );
-  const postMatch = postWarpInfo.output.match(/POST\|([^|]+)\|([\d.-]+)\|(\d+)\|(\d+)/);
-
-  if (postMatch) {
-    const [, currentBody, peKmStr, atmKmStr, altStr] = postMatch;
-    const peKm = parseFloat(peKmStr);
-    const atmKm = parseInt(atmKmStr);
-    const altitude = parseInt(altStr);
-
-    // Use shared advice generation
-    const arrivalAdvice = generateArrivalAdvice({
-      bodyName: currentBody,
-      periapsisKm: peKm,
-      atmosphereKm: atmKm,
-      altitudeM: altitude,
-    });
-
-    return {
-      success: true,
-      body: currentBody,
-      altitude,
-      periapsisKm: peKm,
-      atmosphereKm: atmKm,
-      advice: arrivalAdvice.advice,
-      text: arrivalAdvice.text,
-    };
-  }
-
-  // Fallback if trajectory query failed
   return {
     success: true,
-    body: currentBody,
-    altitude: 0,
-    text: `Arrived at ${currentBody} SOI. Use status to check orbit details.`,
+    body: arrivalResult.body,
+    altitude: arrivalResult.altitude,
+    periapsisKm: arrivalResult.periapsisKm,
+    atmosphereKm: arrivalResult.atmosphereKm,
+    advice: arrivalResult.advice,
+    text: arrivalResult.text,
   };
 }
 
@@ -363,11 +405,11 @@ export async function completeReturnFromMoon(
  * Only works when orbiting a moon (e.g., Mun, Minmus).
  *
  * @param conn kOS connection
- * @param targetPeriapsis Target periapsis at parent body in meters (e.g., 100000 for 100km at Kerbin)
+ * @param targetPeriapsis Target periapsis at parent body in meters, or 'auto' to calculate based on atmosphere
  */
 export async function returnFromMoon(
   conn: KosConnection,
-  targetPeriapsis: number
+  targetPeriapsis: number | 'auto' = 'auto'
 ): Promise<ManeuverResult> {
   // Validate vessel state: must be orbiting a moon
   const validation = await validateVesselState(conn, {
@@ -379,7 +421,29 @@ export async function returnFromMoon(
     return { success: false, error: validation.error };
   }
 
-  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:MOONRETURN(${targetPeriapsis}).`;
+  // Resolve 'auto' periapsis based on parent body's atmosphere
+  let resolvedPeriapsis: number;
+  if (targetPeriapsis === 'auto') {
+    const atmInfo = await conn.execute(
+      'LOCAL p IS SHIP:BODY:BODY. ' +
+      'PRINT "ATM|" + (CHOOSE p:ATM:HEIGHT IF p:ATM:EXISTS ELSE 0).',
+      3000
+    );
+    const atmMatch = atmInfo.output.match(/ATM\|(\d+)/);
+    const atmHeight = atmMatch ? parseInt(atmMatch[1]) : 0;
+
+    if (atmHeight > 0) {
+      // Atmospheric body: aim for atm - 45km (e.g., 70km - 45km = 25km for Kerbin)
+      resolvedPeriapsis = Math.max(10_000, atmHeight - 45_000);
+    } else {
+      // Airless body: safe orbit at 50km
+      resolvedPeriapsis = 50_000;
+    }
+  } else {
+    resolvedPeriapsis = targetPeriapsis;
+  }
+
+  const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:MOONRETURN(${resolvedPeriapsis}).`;
   return executeManeuverCommand(conn, cmd);
 }
 
@@ -391,7 +455,10 @@ export const returnFromMoonTool: ToolDefinition = {
   name: 'return_from_moon',
   description: 'Leave moon orbit to return to parent body SOI.',
   inputSchema: {
-    targetPeriapsis: distanceSchema.optional().default(40_000).describe('Target periapsis at parent body in meters (default: 40km)'),
+    targetPeriapsis: z.union([distanceSchema, z.literal('auto')])
+      .optional()
+      .default('auto')
+      .describe('Target periapsis at parent body in meters. "auto" calculates based on atmosphere (default: auto).'),
     execute: executeSchema,
   },
   annotations: {
@@ -406,7 +473,7 @@ export const returnFromMoonTool: ToolDefinition = {
       const conn = await ctx.ensureConnected();
       const orchestrator = new ManeuverOrchestrator(conn);
       const logger = ctx.createLogger(extra);
-      const result = await orchestrator.returnFromMoon(args.targetPeriapsis as number, {
+      const result = await orchestrator.returnFromMoon(args.targetPeriapsis as number | 'auto', {
         execute: args.execute as boolean,
         logger,
         callerTool: 'return_from_moon',

@@ -685,8 +685,8 @@ export const courseCorrectTool: ToolDefinition = {
     target: z.preprocess(parseTarget, z.union([z.string(), z.literal('auto')]))
       .optional()
       .default('auto')
-      .describe('Target name (body or vessel) set by previous tool. Use get_targets to list available names.'),
-    targetDistance: distanceSchema.optional().default(50_000).describe('Target periapsis in meters. Range: 10km-2500km. Default 50km. Use 100km for landing approach.'),
+      .describe('Moon, planet, or vessel, or name.'),
+    targetDistance: distanceSchema.optional().default(50_000).describe('Final distance from target'),
     execute: executeSchema,
   },
   annotations: {

@@ -381,6 +381,9 @@ const MODE_SWITCH_INTERVAL = 2; // switch steering mode every N poll cycles
 /** Steering mode for alignment */
 type SteeringMode = 'lock' | 'sas';
 
+// WARPALIGN stuck detection configuration
+const WARPALIGN_STUCK_THRESHOLD = 3; // Warn after 3 polls with no angle change (~6 seconds)
+
 /**
  * Align ship to maneuver node using alternating steering modes.
  *
@@ -657,8 +660,9 @@ export async function executeNode(
   // Enable MechJeb executor FIRST, before any warp
   // This ensures burn will complete even if we warp into a blackout zone
   // MechJeb runs on the vessel autonomously once enabled
+  // IMPORTANT: Unlock steering to prevent kOS steering from conflicting with MechJeb
   await stopWarp(conn);
-  await conn.execute('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+  await conn.execute('UNLOCK STEERING. SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
 
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
@@ -754,6 +758,12 @@ export async function executeNode(
     let parseFailureCount = 0;
     const MAX_PARSE_FAILURES = 10; // After this many failures, assume state is stale and check node directly
 
+    // WARPALIGN stuck detection - track when MechJeb goes back to alignment after burn started
+    let burnEverStarted = false;
+    let warpAlignStartTime: number | null = null;
+    let lastWarpAlignAngle: number | null = null;
+    let warpAlignStuckCount = 0;
+
     // Wait for burn completion using pollWithBlackoutResilience
     const result = await pollWithBlackoutResilience<BurnPollState>({
       poll: async () => {
@@ -829,23 +839,73 @@ export async function executeNode(
         const now = Date.now();
         const execState = state.executorState.toUpperCase();
 
+        // Track if burn has ever started (for WARPALIGN stuck detection)
+        if (execState === 'BURN') {
+          burnEverStarted = true;
+          warpAlignStartTime = null; // Reset WARPALIGN tracking when burning
+          warpAlignStuckCount = 0;
+        }
+
         // Space-themed status messages based on MechJeb executor state
         let statusMsg: string;
         switch (execState) {
         case 'LEAD': {
           statusMsg = `Ignition in ${formatTime(state.nodeEta)}`;
-        
-        break;
+          warpAlignStartTime = null; // Reset when in LEAD
+          break;
         }
         case 'BURN': {
           statusMsg = `Burn: ${fmtVel(state.dvRemaining)} to go`;
-        
-        break;
+          break;
         }
         case 'WARPALIGN': {
-          statusMsg = 'Final alignment check';
-        
-        break;
+          // Track WARPALIGN start time
+          if (warpAlignStartTime === null) {
+            warpAlignStartTime = now;
+            lastWarpAlignAngle = null;
+          }
+
+          // Query current heading angle for stuck detection
+          try {
+            const angleResult = await conn.execute(
+              'PRINT ROUND(VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR), 1).',
+              2000
+            );
+            const currentAngle = parseNumber(angleResult.output);
+
+            // Check if dV is dropping (burn actually happening despite WARPALIGN state)
+            const dvDropping = burnEverStarted && state.dvRemaining < dvRequired * 0.95;
+
+            if (dvDropping) {
+              // dV is dropping - burn is happening, don't interfere with stuck detection
+              // Just let the normal polling continue until burnComplete
+              statusMsg = `Burn: ${fmtVel(state.dvRemaining)} to go (realigning)`;
+              warpAlignStuckCount = 0; // Reset stuck counter
+            } else {
+              // Check for stuck alignment (angle not changing)
+              if (lastWarpAlignAngle !== null) {
+                const angleChange = Math.abs(currentAngle - lastWarpAlignAngle);
+                if (angleChange < 0.5) {
+                  warpAlignStuckCount++;
+                  if (warpAlignStuckCount >= WARPALIGN_STUCK_THRESHOLD) {
+                    log.warn(`${logPrefix} Alignment stuck at ${currentAngle.toFixed(1)}° - attempting recovery`);
+                    // Try to unstick by clearing steering and resetting
+                    try {
+                      await conn.execute('UNLOCK STEERING. SAS OFF. WAIT 0.3. SAS ON. SET SASMODE TO "MANEUVER".', 5000);
+                    } catch { /* ignore */ }
+                    warpAlignStuckCount = 0;
+                  }
+                } else {
+                  warpAlignStuckCount = 0;
+                }
+              }
+              statusMsg = `Aligning: ${currentAngle.toFixed(0)}°`;
+            }
+            lastWarpAlignAngle = currentAngle;
+          } catch {
+            statusMsg = 'Aligning...';
+          }
+          break;
         }
         default: {
           statusMsg = execState.toLowerCase();
@@ -861,12 +921,6 @@ export async function executeNode(
           log.progress(`${logPrefix} ${statusMsg}`);
           lastLogTime = now;
         }
-
-        // Disabled: using kOS WARPTO instead of kickstart pulses
-        // Kickstart warp if coasting to node (high dV = not burning yet)
-        // if (state.dvRemaining > 10) {
-        //   await kickstartWarp(conn, log);
-        // }
       },
     });
 

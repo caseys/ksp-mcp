@@ -142,7 +142,7 @@ export const nullLogger: McpLogger = {
 export const executeSchema = z.boolean()
   .optional()
   .default(true)
-  .describe('Execute the maneuver node after planning. Optional, defaults to true.');
+  .describe('Optional, default is true. advanced use ONLY');
 
 /**
  * Unit multipliers to convert to meters.

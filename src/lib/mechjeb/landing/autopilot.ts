@@ -221,7 +221,7 @@ async function scanVesselForLanding(
   if (scanMatch) {
     const taggedLander = parseInt(scanMatch[1]);
     const taggedReentry = parseInt(scanMatch[2]);
-    const heatShieldDec = parseInt(scanMatch[3]);
+    // scanMatch[3] is heatShieldDec - skipped, we don't jettison the heat shield
     const belowShieldDec = parseInt(scanMatch[4]);
     const maxDecStage = parseInt(scanMatch[5]);
 
@@ -234,11 +234,11 @@ async function scanVesselForLanding(
     }
 
     // Determine reentry stage (for atmospheric bodies) - priority order
+    // This is the stage to fire BEFORE reentry to separate transfer/service module
+    // NOT the heat shield itself (heatShieldDec) - we need that for reentry protection!
     let reentryStage: number | null = null;
     if (taggedReentry >= 0) {
       reentryStage = taggedReentry;
-    } else if (heatShieldDec >= 0) {
-      reentryStage = heatShieldDec;
     } else if (belowShieldDec >= 0) {
       reentryStage = belowShieldDec;
     }

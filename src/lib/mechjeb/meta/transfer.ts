@@ -227,7 +227,7 @@ export async function executeSmartTransfer(
       rendezvous: true,
     });
   } else if (transferType === 'return_from_moon') {
-    return orchestrator.returnFromMoon(40_000, {
+    return orchestrator.returnFromMoon('auto', {
       execute,
       logger,
       callerTool,
