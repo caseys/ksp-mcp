@@ -709,7 +709,7 @@ async function warpToSOI(
 
   if (result.success && result.result) {
     const newBody = result.result.body;
-    log.progress(`[Warp] Entering ${newBody} space. All stop. Circularize to establish standard orbit.`);
+    log.progress(`[Warp] Entering ${newBody} space. All stop.`);
 
     // Stop warp and wait for KSP to settle (500ms is sufficient for orbital recalculation)
     await stopWarp(conn);

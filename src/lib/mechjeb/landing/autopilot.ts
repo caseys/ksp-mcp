@@ -24,7 +24,8 @@ import { findLandingSite } from './find-site.js';
 import { getVesselStateInfo } from '../../kos/vessel/validate.js';
 import { circularize } from '../basic/circularize.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
-import { fmtVel, fmtDist } from '../../utils/format.js';
+import { fmtVel, fmtDist, formatTime } from '../../utils/format.js';
+import { warpForward } from '../../kos/warp.js';
 
 // ============================================================================
 // Target Validation
@@ -256,9 +257,9 @@ async function scanVesselForLanding(
 }
 
 /**
- * Jettison exactly the target decoupler stage.
- * Stages down to reach the target stage if needed, then fires it once.
- * Will not fire past the target stage (prevents dropping multiple stages).
+ * Decouple at the target stage by finding and activating the specific decoupler part.
+ * Does NOT use STAGE command - only fires the individual decoupler/separator/docking port.
+ * This prevents accidentally firing multiple stages.
  */
 async function jettisonStage(
   conn: KosConnection,
@@ -267,42 +268,51 @@ async function jettisonStage(
 ): Promise<{ success: boolean; error?: string }> {
   const log = logger ?? nullLogger;
 
-  // Stage down to reach the target decoupler, then fire it exactly once
-  // If current stage > target: stage down to reach it, then fire
-  // If current stage = target: fire it
-  // If current stage < target: already past it, do nothing
+  // Find decoupler parts in the target stage and decouple them individually
+  // Supports: ModuleDecouple, ModuleAnchoredDecoupler, ModuleDockingNode
   const script = `
-    SET startStage TO STAGE:NUMBER.
-    SET fired TO FALSE.
-    IF STAGE:NUMBER > ${targetStage} {
-      UNTIL STAGE:NUMBER <= ${targetStage} {
-        STAGE. WAIT 0.5.
+    SET WARP TO 0.
+    RCS ON.
+    SET decoupled TO 0.
+    FOR P IN SHIP:PARTS {
+      IF P:STAGE = ${targetStage} OR P:DECOUPLEDIN = ${targetStage} {
+        IF P:HASMODULE("ModuleDecouple") {
+          P:GETMODULE("ModuleDecouple"):DOEVENT("decouple").
+          SET decoupled TO decoupled + 1.
+        } ELSE IF P:HASMODULE("ModuleAnchoredDecoupler") {
+          P:GETMODULE("ModuleAnchoredDecoupler"):DOEVENT("decouple").
+          SET decoupled TO decoupled + 1.
+        } ELSE IF P:HASMODULE("ModuleDockingNode") {
+          IF P:GETMODULE("ModuleDockingNode"):HASEVENT("decouple node") {
+            P:GETMODULE("ModuleDockingNode"):DOEVENT("decouple node").
+            SET decoupled TO decoupled + 1.
+          } ELSE IF P:GETMODULE("ModuleDockingNode"):HASEVENT("undock") {
+            P:GETMODULE("ModuleDockingNode"):DOEVENT("undock").
+            SET decoupled TO decoupled + 1.
+          }
+        }
       }
     }
-    IF STAGE:NUMBER = ${targetStage} {
-      STAGE. WAIT 0.5.
-      SET fired TO TRUE.
-    }
-    PRINT "STAGED|" + startStage + "|" + STAGE:NUMBER + "|" + fired.
+    WAIT 0.5.
+    PRINT "DECOUPLED|" + decoupled.
   `.trim().replaceAll('\n', ' ');
 
   const result = await conn.execute(script, 30_000);
   const output = result.output.trim();
 
-  const match = output.match(/STAGED\|(\d+)\|(\d+)\|(True|False)/i);
+  const match = output.match(/DECOUPLED\|(\d+)/);
   if (match) {
-    const startStage = parseInt(match[1]);
-    const endStage = parseInt(match[2]);
-    const fired = match[3].toLowerCase() === 'true';
-    if (fired) {
-      log.info(`[Jettison] Fired stage ${targetStage} (was at ${startStage}, now at ${endStage})`);
+    const count = parseInt(match[1]);
+    if (count > 0) {
+      log.info(`[Jettison] Decoupled ${count} part(s) at stage ${targetStage}`);
+      return { success: true };
     } else {
-      log.info(`[Jettison] Already past stage ${targetStage} (current: ${endStage})`);
+      log.info(`[Jettison] No decoupler found at stage ${targetStage}`);
+      return { success: true }; // Not an error - might already be decoupled
     }
-    return { success: true };
   }
 
-  return { success: false, error: 'Failed to parse staging result' };
+  return { success: false, error: 'Failed to parse decoupling result' };
 }
 
 // Configuration
@@ -320,7 +330,7 @@ async function limitThrustForLanding(
 ): Promise<{ limited: boolean; originalTwr?: number; limitedTwr?: number }> {
   const log = logger ?? nullLogger;
 
-  // Calculate current TWR and limit if needed
+  // Calculate TWR at surface gravity (not current altitude) for landing assessment
   const script = `
     LOCAL totalThrust IS 0.
     LOCAL activeEngines IS 0.
@@ -330,8 +340,8 @@ async function limitThrustForLanding(
         SET activeEngines TO activeEngines + 1.
       }
     }
-    LOCAL g IS SHIP:BODY:MU / (SHIP:BODY:RADIUS + SHIP:ALTITUDE)^2.
-    LOCAL weight IS SHIP:MASS * g.
+    LOCAL surfaceG IS SHIP:BODY:MU / SHIP:BODY:RADIUS^2.
+    LOCAL weight IS SHIP:MASS * surfaceG.
     LOCAL twr IS CHOOSE 0 IF weight = 0 ELSE totalThrust / weight.
     PRINT "TWR|" + ROUND(twr, 2) + "|" + ROUND(totalThrust) + "|" + ROUND(weight) + "|" + activeEngines.
   `.trim().replaceAll('\n', ' ');
@@ -412,12 +422,17 @@ async function monitorLanding(
     timeoutMs?: number;
     pollIntervalMs?: number;
     logger?: McpLogger;
+    deferredSeparation?: {
+      stage: number;
+      fallbackAltitude: number;  // Altitude fallback if no braking burn detected
+    };
   } = {}
 ): Promise<{ success: boolean; finalStatus: LandingStatus; error?: string }> {
   const {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
     logger,
+    deferredSeparation,
   } = options;
 
   const log = logger ?? nullLogger;
@@ -426,6 +441,9 @@ async function monitorLanding(
   let lastLoggedAlt = 0;
   let descentLogCount = 0;
   let consecutiveDisabledCount = 0;
+
+  // Track deferred separation state for high-altitude reentry
+  let separationFired = false;
 
   // Check atmosphere once at start - physics warp only on vacuum bodies
   let hasAtmosphere = false;
@@ -480,6 +498,55 @@ async function monitorLanding(
 
     onPoll: async (state) => {
       const rawStatus = state.status.status;
+
+      // Handle deferred separation for high-altitude reentry
+      // Fire when MechJeb transitions to "Coasting toward deceleration burn" (deorbit burn complete)
+      if (!separationFired && deferredSeparation) {
+        const isCoasting = /Coasting toward deceleration burn/i.test(rawStatus);
+
+        if (isCoasting) {
+          // Stop warp before separation
+          try {
+            await conn.execute('SET WARP TO 0.', 3000);
+          } catch { /* ignore */ }
+
+          log.progress(`[Landing] Deorbit burn complete - firing separation...`);
+          const result = await jettisonStage(conn, deferredSeparation.stage, log);
+          if (result.success) {
+            log.progress('[Landing] Separated');
+          } else {
+            log.warn(`[Landing] Separation failed: ${result.error}`);
+          }
+          separationFired = true;
+
+          // Unlock controls and enable RCS after separation so MechJeb can take over
+          try {
+            await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE. SAS OFF. RCS ON.', 3000);
+          } catch { /* ignore */ }
+        }
+
+        // Fallback: if we're below fallback altitude and haven't separated, do it now
+        const altitude = state.status.altitude;
+        if (!separationFired && altitude !== undefined && altitude <= deferredSeparation.fallbackAltitude) {
+          try {
+            await conn.execute('SET WARP TO 0.', 3000);
+          } catch { /* ignore */ }
+
+          log.progress(`[Landing] Approaching atmosphere - firing deferred reentry separation...`);
+          const result = await jettisonStage(conn, deferredSeparation.stage, log);
+          if (result.success) {
+            log.progress('[Landing] Separated');
+          } else {
+            log.warn(`[Landing] Separation failed: ${result.error}`);
+          }
+          separationFired = true;
+
+          // Unlock controls and enable RCS after separation so MechJeb can take over
+          try {
+            await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE. SAS OFF. RCS ON.', 3000);
+          } catch { /* ignore */ }
+        }
+      }
 
       // Parse braking speed from status like "Braking: target speed = 155 m/s"
       const brakingMatch = rawStatus.match(/Braking.*?(\d+)/);
@@ -574,7 +641,11 @@ async function monitorLanding(
         } else if (/Warping to start of braking burn/.test(rawStatus)) {
           // Silent - warp in progress
         } else if (rawStatus === 'Off') {
-          statusText = 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.';
+          // Only show touchdown message if actually landed, otherwise MechJeb is just starting up
+          if (state.isLanded) {
+            statusText = 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.';
+          }
+          // Silent if not landed - MechJeb starting up
         } else if (/course correction/i.test(rawStatus)) {
           // Filter out "0 m/s" corrections
           const dvMatch = rawStatus.match(/(\d+)/);
@@ -719,6 +790,108 @@ export const landTool: ToolDefinition = {
       const isImpactTrajectory = periapsis < 0;
       const SAFE_PERIAPSIS_M = 15_000; // 15km minimum for safe circularization
 
+      // Track deferred separation for high-altitude atmospheric reentry
+      let deferSeparation = false;
+      let highAltAtmHeight = 0; // Atmosphere height for deferred separation fallback
+      let overrideTarget: string | undefined; // Override target after high-altitude reentry sequence
+
+      // Step 0.6: Check for high-altitude atmospheric reentry FIRST
+      // This applies when periapsis is below atmosphere (even if positive) and we're very far away
+      {
+        const reentryInfo = await conn.execute(
+          'LOCAL atm IS (CHOOSE SHIP:BODY:ATM:HEIGHT IF SHIP:BODY:ATM:EXISTS ELSE 0). ' +
+          'LOCAL rot IS SHIP:BODY:ROTATIONPERIOD. ' +
+          'PRINT "REENTRY|" + atm + "|" + ALTITUDE + "|" + ETA:PERIAPSIS + "|" + PERIAPSIS + "|" + rot.',
+          3000
+        );
+        const reentryMatch = reentryInfo.output.match(/REENTRY\|(\d+)\|(\d+(?:\.\d+)?)\|(\d+(?:\.\d+)?)\|([-\d.]+)\|(\d+(?:\.\d+)?)/);
+
+        if (reentryMatch) {
+          const atmHeight = parseInt(reentryMatch[1]);
+          const altitude = parseFloat(reentryMatch[2]);
+          const etaPeriapsis = parseFloat(reentryMatch[3]);
+          const pe = parseFloat(reentryMatch[4]);
+          const rotationPeriod = parseFloat(reentryMatch[5]);
+
+          // Atmospheric reentry: atmosphere exists + periapsis below atmosphere
+          const isAtmosphericReentry = atmHeight > 0 && pe < atmHeight;
+
+          // Warp to whichever is sooner: (Pe - rotation period) OR (Pe / 2)
+          const MIN_BUFFER = 600; // 10 minutes minimum
+          const optionA = etaPeriapsis - rotationPeriod; // Stop 1 rotation before Pe
+          const optionB = etaPeriapsis / 2;              // Stop halfway to Pe
+          const warpTime = Math.floor(Math.min(optionA, optionB));
+
+          if (isAtmosphericReentry && warpTime > MIN_BUFFER) {
+            logger.progress(`[Landing] High-altitude atmospheric reentry detected`);
+            logger.progress(`[Landing]   Altitude: ${fmtDist(altitude)}, Pe: ${fmtDist(pe)}, Atm: ${fmtDist(atmHeight)}`);
+            logger.progress(`[Landing]   ETA to periapsis: ${formatTime(etaPeriapsis)}, body rotation: ${formatTime(rotationPeriod)}`);
+
+            logger.progress(`[Landing] Warping ${formatTime(warpTime)} (stopping ${formatTime(etaPeriapsis - warpTime)} before Pe)...`);
+
+            const warpResult = await warpForward(conn, warpTime, 300_000, logger);
+            if (!warpResult.success) {
+              logger.warn(`[Landing] Warp failed: ${warpResult.error}, continuing`);
+            }
+
+            // Deorbit burn: point retrograde and lower periapsis to between -1km and -50km
+            const TARGET_PE_MIN = -50_000; // -50km lower bound
+            const TARGET_PE_MAX = -1000;  // -1km upper bound
+            const TARGET_PE = -5000;      // -5km target
+
+            // Check if Pe is already in acceptable range
+            const peCheckResult = await conn.execute('PRINT "PE|" + ROUND(PERIAPSIS).', 3000);
+            const peCheckMatch = peCheckResult.output.match(/PE\|([-\d]+)/);
+            const currentPe = peCheckMatch ? parseInt(peCheckMatch[1]) : 0;
+
+            if (currentPe <= TARGET_PE_MAX && currentPe >= TARGET_PE_MIN) {
+              logger.progress(`[Landing] Periapsis already at ${fmtDist(currentPe)}, skipping deorbit burn`);
+            } else {
+              logger.progress(`[Landing] Executing deorbit burn (current Pe: ${fmtDist(currentPe)}, target: ${fmtDist(TARGET_PE)})...`);
+
+              const deorbitScript = `
+                SAS OFF.
+                LOCK STEERING TO RETROGRADE.
+                LOCAL t0 IS TIME:SECONDS.
+                WAIT UNTIL VANG(SHIP:FACING:VECTOR, -SHIP:VELOCITY:ORBIT) < 10 OR (TIME:SECONDS - t0) > 30.
+                LOCK THROTTLE TO 1.
+                LOCAL burnStart IS TIME:SECONDS.
+                WAIT UNTIL PERIAPSIS < ${TARGET_PE} OR PERIAPSIS < ${TARGET_PE_MIN} OR (TIME:SECONDS - burnStart) > 120.
+                LOCK THROTTLE TO 0.
+                UNLOCK STEERING.
+                UNLOCK THROTTLE.
+                PRINT "DEORBIT|" + ROUND(PERIAPSIS).
+              `.trim().replaceAll('\n', ' ');
+
+              const deorbitResult = await conn.execute(deorbitScript, 180_000);
+              const deorbitMatch = deorbitResult.output.match(/DEORBIT\|([-\d]+)/);
+              if (deorbitMatch) {
+                const newPe = parseInt(deorbitMatch[1]);
+                logger.progress(`[Landing] Deorbit complete (Pe: ${fmtDist(newPe)})`);
+              } else {
+                logger.warn('[Landing] Deorbit burn may not have completed correctly');
+              }
+            }
+
+            // Ensure controls are fully unlocked before MechJeb takes over
+            await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE. SAS OFF. WAIT 0.5.', 5000);
+
+            // Mark that we've handled the high-altitude reentry sequence
+            // Separation deferred to onPoll - fires when MechJeb status shows "Coasting toward deceleration burn"
+            deferSeparation = true;
+            highAltAtmHeight = atmHeight;
+
+            // Check if this is Kerbin - if so, target KSC
+            const bodyCheck = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
+            const currentBody = bodyCheck.output.trim().split('\n').pop()?.trim().toLowerCase() ?? '';
+            if (currentBody === 'kerbin') {
+              overrideTarget = 'KSC';
+            }
+            // For other atmospheric bodies, let the normal target resolution handle it
+          }
+        }
+      }
+
       if (isHyperbolic) {
         if (periapsis >= SAFE_PERIAPSIS_M) {
           // Hyperbolic with safe periapsis - circularize first
@@ -751,9 +924,11 @@ export const landTool: ToolDefinition = {
           // Continue with landing - MechJeb will handle the descent
         }
       } else if (isImpactTrajectory) {
-        // Suborbital/impact - warn but proceed
-        logger.progress(`[Landing] ⚠️ WARNING: Impact trajectory detected (Pe=${fmtDist(periapsis)})`);
-        logger.progress(`[Landing] Landing without circularization - this is risky!`);
+        // Suborbital/impact trajectory (periapsis below surface)
+        // High-altitude reentry detection already handled in Step 0.6 above
+        if (!deferSeparation) {
+          logger.progress(`[Landing] Impact trajectory detected (Pe=${fmtDist(periapsis)})`);
+        }
         // Continue with landing
       } else {
         // Stable orbit - normal landing (message deferred until after orbit adjustments)
@@ -761,7 +936,8 @@ export const landTool: ToolDefinition = {
 
       // Step 0.7: Lower orbit if too high for efficient landing
       // Ideal landing orbit: 50km for vacuum bodies, 50km above atmosphere for atmospheric bodies
-      if (!isHyperbolic && !isImpactTrajectory) {
+      // Skip if we already have a reentry trajectory (deferSeparation set in Step 0.6)
+      if (!isHyperbolic && !isImpactTrajectory && !deferSeparation) {
         const bodyInfo = await conn.execute(
           'IF SHIP:BODY:ATM:EXISTS { PRINT SHIP:BODY:ATM:HEIGHT + "|" + SHIP:BODY:NAME. } ELSE { PRINT "0|" + SHIP:BODY:NAME. }',
           3000
@@ -851,7 +1027,8 @@ export const landTool: ToolDefinition = {
         ? vesselScan.reentryStage
         : vesselScan.jettisonStage;
 
-      if (separationStage !== null) {
+      if (separationStage !== null && !deferSeparation) {
+        // Fire separation immediately for normal landings (not high-altitude reentry)
         const separationType = hasAtmosphere ? 'reentry stage' : 'transfer stage';
         logger.progress(`[Landing] Separating at ${separationType}...`);
         const jettisonResult = await jettisonStage(conn, separationStage, logger);
@@ -859,6 +1036,13 @@ export const landTool: ToolDefinition = {
           logger.warn(`[Landing] Separation failed: ${jettisonResult.error}, continuing anyway`);
         } else {
           logger.progress('[Landing] Separated');
+        }
+      } else if (deferSeparation) {
+        // Log deferred separation status
+        if (separationStage !== null) {
+          logger.progress(`[Landing] Separation deferred to descent (stage ${separationStage})`);
+        } else {
+          logger.warn(`[Landing] No reentry separation stage found - vessel needs 'reentry' tagged decoupler or decoupler below heat shield`);
         }
       }
 
@@ -881,7 +1065,8 @@ export const landTool: ToolDefinition = {
       let targetLng: number | undefined;
 
       // Check if target is 'auto' or the current SOI body - if so, use auto-land
-      let effectiveTarget: string | undefined = targetArg === 'auto' ? undefined : targetArg;
+      // overrideTarget takes precedence (set by high-altitude reentry sequence)
+      let effectiveTarget: string | undefined = overrideTarget ?? (targetArg === 'auto' ? undefined : targetArg);
       if (effectiveTarget) {
         const bodyCheck = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
         const currentBody = bodyCheck.output.trim().split('\n').pop()?.trim() ?? '';
@@ -891,16 +1076,30 @@ export const landTool: ToolDefinition = {
         }
       }
 
+      // Check if effectiveTarget is a preset (like KSC) before trying vessel lookup
+      if (effectiveTarget && PRESETS[effectiveTarget.toUpperCase()]) {
+        const preset = PRESETS[effectiveTarget.toUpperCase()];
+        targetLat = preset.lat;
+        targetLng = preset.lng;
+        logger.progress(`[Landing] Using preset "${effectiveTarget}" at ${targetLat.toFixed(2)}°, ${targetLng.toFixed(2)}°`);
+        const targetResult = await setLandingPositionTarget(conn, targetLat, targetLng);
+        if (!targetResult.success) {
+          return ctx.errorResponse('land', targetResult.error ?? 'Failed to set position target');
+        }
+        effectiveTarget = undefined; // Clear so we don't try vessel lookup
+      }
+
       if (effectiveTarget) {
         // Target is a vessel name - try to find it and get its position
+        // Note: Use TGTV instead of V to avoid clobbering kOS built-in V() function
         const vesselResult = await conn.execute(
           `IF EXISTS(VESSEL("${effectiveTarget}")) { ` +
-          `  SET V TO VESSEL("${effectiveTarget}"). ` +
-          `  IF V:STATUS = "LANDED" OR V:STATUS = "SPLASHED" { ` +
-          `    IF V:BODY:NAME = SHIP:BODY:NAME { ` +
-          `      PRINT "OK|" + V:GEOPOSITION:LAT + "|" + V:GEOPOSITION:LNG. ` +
-          `    } ELSE { PRINT "WRONGBODY|" + V:BODY:NAME. } ` +
-          `  } ELSE { PRINT "NOTLANDED|" + V:STATUS. } ` +
+          `  SET TGTV TO VESSEL("${effectiveTarget}"). ` +
+          `  IF TGTV:STATUS = "LANDED" OR TGTV:STATUS = "SPLASHED" { ` +
+          `    IF TGTV:BODY:NAME = SHIP:BODY:NAME { ` +
+          `      PRINT "OK|" + TGTV:GEOPOSITION:LAT + "|" + TGTV:GEOPOSITION:LNG. ` +
+          `    } ELSE { PRINT "WRONGBODY|" + TGTV:BODY:NAME. } ` +
+          `  } ELSE { PRINT "NOTLANDED|" + TGTV:STATUS. } ` +
           `} ELSE { PRINT "NOTFOUND". }`,
           5000
         );
@@ -1023,7 +1222,13 @@ export const landTool: ToolDefinition = {
 
       // If wait=true, monitor until completion
       if (wait) {
-        const monitorResult = await monitorLanding(conn, { logger });
+        const monitorResult = await monitorLanding(conn, {
+          logger,
+          deferredSeparation: deferSeparation && separationStage !== null ? {
+            stage: separationStage,
+            fallbackAltitude: highAltAtmHeight + 20_000,  // 20km above atmosphere edge as fallback
+          } : undefined,
+        });
 
         // Warp to radio contact if we landed in blackout
         // (e.g., on far side of a moon)
