@@ -127,12 +127,11 @@ interface VesselScanResult {
  *
  * For AIRLESS bodies (hasAtmosphere=false):
  * - First looks for part tagged 'lander' (decoupler/separator/docking port)
- * - Falls back to highest-staged decoupler
+ * - Falls back to closest decoupler below landing legs
  *
  * For ATMOSPHERIC bodies (hasAtmosphere=true):
  * - First looks for part tagged 'reentry' (decoupler/separator)
- * - Then looks for heat shield decouplers (ModuleAblator + ModuleDecouple)
- * - Falls back to stage directly below heat shield parts
+ * - Falls back to closest decoupler below heat shield
  */
 async function scanVesselForLanding(
   conn: KosConnection,
@@ -146,12 +145,11 @@ async function scanVesselForLanding(
   //
   // For AIRLESS bodies - lander separation:
   // 1. Part with kOS tag "lander" that can separate (decoupler/separator/docking port)
-  // 2. Fallback: highest-staged decoupler
+  // 2. Fallback: closest decoupler below landing legs
   //
   // For ATMOSPHERIC bodies - reentry separation:
   // 1. Part with kOS tag "reentry" that can separate
-  // 2. Heat shield decoupler (ModuleAblator + ModuleDecouple)
-  // 3. Stage directly below heat shield parts
+  // 2. Closest decoupler below heat shield
   //
   // kOS script to scan vessel - no // comments allowed (flattened to single line)
   const script = `
@@ -160,10 +158,14 @@ async function scanVesselForLanding(
     LOCAL taggedReentry IS -1.
     LOCAL heatShieldDec IS -1.
     LOCAL belowShieldDec IS -1.
-    LOCAL decStages IS LIST().
+    LOCAL belowLegsDec IS -1.
+    LOCAL legStage IS -1.
     FOR p IN SHIP:PARTS {
       FOR m IN p:MODULES {
-        IF m = "ModuleLandingLeg" OR m = "ModuleWheelDeployment" OR m = "ModuleWheelBase" { SET hasLegs TO TRUE. }
+        IF m = "ModuleLandingLeg" OR m = "ModuleWheelDeployment" OR m = "ModuleWheelBase" {
+          SET hasLegs TO TRUE.
+          IF p:STAGE > legStage { SET legStage TO p:STAGE. }
+        }
       }
     }
     IF NOT hasLegs { PRINT "NOLEGS". }
@@ -182,30 +184,35 @@ async function scanVesselForLanding(
         IF p:HASMODULE("ModuleAblator") AND p:HASMODULE("ModuleDecouple") {
           IF p:STAGE >= 0 AND heatShieldDec < 0 { SET heatShieldDec TO p:STAGE. }
         }
-        IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
-          IF p:STAGE >= 0 { IF NOT decStages:CONTAINS(p:STAGE) { decStages:ADD(p:STAGE). } }
-        }
       }
       IF belowShieldDec < 0 {
+        LOCAL bestDist IS 999.
         FOR p IN SHIP:PARTS {
           IF p:HASMODULE("ModuleAblator") {
             LOCAL hsStage IS p:STAGE.
             FOR d IN SHIP:PARTS {
-              IF d:STAGE = hsStage - 1 {
-                IF d:HASMODULE("ModuleDecouple") OR d:HASMODULE("ModuleAnchoredDecoupler") {
-                  IF belowShieldDec < 0 { SET belowShieldDec TO d:STAGE. }
+              IF d:HASMODULE("ModuleDecouple") OR d:HASMODULE("ModuleAnchoredDecoupler") {
+                IF d:STAGE >= 0 AND d:STAGE < hsStage {
+                  LOCAL dist IS hsStage - d:STAGE.
+                  IF dist < bestDist { SET bestDist TO dist. SET belowShieldDec TO d:STAGE. }
                 }
               }
             }
           }
         }
       }
-      LOCAL maxDecStage IS -1.
-      IF decStages:LENGTH > 0 {
-        SET maxDecStage TO decStages[0].
-        FOR s IN decStages { IF s > maxDecStage { SET maxDecStage TO s. } }
+      IF belowLegsDec < 0 AND legStage >= 0 {
+        LOCAL bestDist IS 999.
+        FOR d IN SHIP:PARTS {
+          IF d:HASMODULE("ModuleDecouple") OR d:HASMODULE("ModuleAnchoredDecoupler") OR d:HASMODULE("ModuleDockingNode") {
+            IF d:STAGE >= 0 AND d:STAGE < legStage {
+              LOCAL dist IS legStage - d:STAGE.
+              IF dist < bestDist { SET bestDist TO dist. SET belowLegsDec TO d:STAGE. }
+            }
+          }
+        }
       }
-      PRINT "SCAN|" + taggedLander + "|" + taggedReentry + "|" + heatShieldDec + "|" + belowShieldDec + "|" + maxDecStage.
+      PRINT "SCAN|" + taggedLander + "|" + taggedReentry + "|" + heatShieldDec + "|" + belowShieldDec + "|" + belowLegsDec.
     }
   `.trim().replaceAll('\n', ' ');
 
@@ -217,21 +224,22 @@ async function scanVesselForLanding(
     return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null, reentryStage: null };
   }
 
-  // Parse SCAN result: taggedLander|taggedReentry|heatShieldDec|belowShieldDec|maxDecStage
+  // Parse SCAN result: taggedLander|taggedReentry|heatShieldDec|belowShieldDec|belowLegsDec
   const scanMatch = rawOutput.match(/SCAN\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/);
   if (scanMatch) {
     const taggedLander = parseInt(scanMatch[1]);
     const taggedReentry = parseInt(scanMatch[2]);
     // scanMatch[3] is heatShieldDec - skipped, we don't jettison the heat shield
     const belowShieldDec = parseInt(scanMatch[4]);
-    const maxDecStage = parseInt(scanMatch[5]);
+    const belowLegsDec = parseInt(scanMatch[5]);
 
     // Determine jettison stage (for airless bodies)
+    // Priority: 'lander' tagged decoupler, then decoupler below landing legs
     let jettisonStage: number | null = null;
     if (taggedLander >= 0) {
       jettisonStage = taggedLander;
-    } else if (maxDecStage >= 0) {
-      jettisonStage = maxDecStage;
+    } else if (belowLegsDec >= 0) {
+      jettisonStage = belowLegsDec;
     }
 
     // Determine reentry stage (for atmospheric bodies) - priority order
@@ -268,27 +276,33 @@ async function jettisonStage(
 ): Promise<{ success: boolean; error?: string }> {
   const log = logger ?? nullLogger;
 
-  // Find decoupler parts in the target stage and decouple them individually
+  // Find decoupler parts in the target stage and decouple ONE
+  // After decoupling, parts list becomes stale so we must stop iterating
   // Supports: ModuleDecouple, ModuleAnchoredDecoupler, ModuleDockingNode
   const script = `
     SET WARP TO 0.
     RCS ON.
     SET decoupled TO 0.
+    SET done TO FALSE.
     FOR P IN SHIP:PARTS {
-      IF P:STAGE = ${targetStage} OR P:DECOUPLEDIN = ${targetStage} {
+      IF NOT done AND (P:STAGE = ${targetStage} OR P:DECOUPLEDIN = ${targetStage}) {
         IF P:HASMODULE("ModuleDecouple") {
           P:GETMODULE("ModuleDecouple"):DOEVENT("decouple").
           SET decoupled TO decoupled + 1.
+          SET done TO TRUE.
         } ELSE IF P:HASMODULE("ModuleAnchoredDecoupler") {
           P:GETMODULE("ModuleAnchoredDecoupler"):DOEVENT("decouple").
           SET decoupled TO decoupled + 1.
+          SET done TO TRUE.
         } ELSE IF P:HASMODULE("ModuleDockingNode") {
           IF P:GETMODULE("ModuleDockingNode"):HASEVENT("decouple node") {
             P:GETMODULE("ModuleDockingNode"):DOEVENT("decouple node").
             SET decoupled TO decoupled + 1.
+            SET done TO TRUE.
           } ELSE IF P:GETMODULE("ModuleDockingNode"):HASEVENT("undock") {
             P:GETMODULE("ModuleDockingNode"):DOEVENT("undock").
             SET decoupled TO decoupled + 1.
+            SET done TO TRUE.
           }
         }
       }
@@ -363,7 +377,7 @@ async function limitThrustForLanding(
   }
 
   if (twr <= TARGET_LANDING_TWR) {
-    log.info(`[Landing] TWR ${twr.toFixed(1)} is acceptable for landing`);
+    log.progress(`[Landing] TWR ${twr.toFixed(1)} acceptable (limit is ${TARGET_LANDING_TWR})`);
     return { limited: false };
   }
 
@@ -505,12 +519,58 @@ async function monitorLanding(
         const isCoasting = /Coasting toward deceleration burn/i.test(rawStatus);
 
         if (isCoasting) {
-          // Stop warp before separation
+          // Disable MechJeb, warp to 10 minutes before periapsis, separate, re-enable
+          log.progress(`[Landing] Coasting phase - preparing for reentry separation...`);
+
+          // Step 0: Stop any active warp first - MechJeb won't respond while warping
           try {
-            await conn.execute('SET WARP TO 0.', 3000);
+            await conn.execute('SET WARP TO 0. WAIT 1.', 5000);
           } catch { /* ignore */ }
 
-          log.progress(`[Landing] Deorbit burn complete - firing separation...`);
+          // Step 1: Disable MechJeb landing autopilot
+          try {
+            const disableResult = await conn.execute(
+              'SET LAND TO ADDONS:MJ:LANDING. SET LAND:ENABLED TO FALSE. WAIT 0.5. PRINT "DISABLED|" + LAND:ENABLED.',
+              5000
+            );
+            if (disableResult.output.includes('DISABLED|False')) {
+              log.progress(`[Landing] Autopilot paused`);
+            } else {
+              log.warn(`[Landing] Failed to pause autopilot: ${disableResult.output}`);
+            }
+          } catch (e) {
+            log.warn(`[Landing] Error pausing autopilot: ${e}`);
+          }
+
+          // Step 2: Warp to 10 minutes before periapsis
+          try {
+            const etaCheck = await conn.execute('PRINT "ETA|" + ROUND(ETA:PERIAPSIS).', 3000);
+            const etaMatch = etaCheck.output.match(/ETA\|(\d+)/);
+            const currentEta = etaMatch ? parseInt(etaMatch[1]) : 0;
+
+            if (currentEta > 660) {
+              log.progress(`[Landing] Warping from ${Math.round(currentEta / 60)} min to 10 min before periapsis...`);
+              const warpTarget = currentEta - 600;
+              await conn.execute(`WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
+
+              // Wait for warp to complete
+              const warpWaitResult = await conn.execute(
+                'WAIT UNTIL ETA:PERIAPSIS < 620. SET WARP TO 0. PRINT "ARRIVED|" + ROUND(ETA:PERIAPSIS).',
+                300_000
+              );
+              const arrivedMatch = warpWaitResult.output.match(/ARRIVED\|(\d+)/);
+              if (arrivedMatch) {
+                log.progress(`[Landing] At ${Math.round(parseInt(arrivedMatch[1]) / 60)} min before periapsis`);
+              }
+            } else {
+              log.progress(`[Landing] Already at ${Math.round(currentEta / 60)} min before periapsis`);
+            }
+          } catch (e) {
+            log.warn(`[Landing] Warp failed: ${e}`);
+          }
+
+          // Step 3: Reentry separation
+          log.progress(`[Landing] Firing reentry separation...`);
           const result = await jettisonStage(conn, deferredSeparation.stage, log);
           if (result.success) {
             log.progress('[Landing] Separated');
@@ -519,10 +579,32 @@ async function monitorLanding(
           }
           separationFired = true;
 
-          // Unlock controls and enable RCS after separation so MechJeb can take over
+          // Step 4: Unlock controls, enable RCS, limit thrust, and re-enable MechJeb landing
+          // Include stabilization delay for kOS to recognize new vessel configuration
           try {
-            await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE. SAS OFF. RCS ON.', 3000);
-          } catch { /* ignore */ }
+            await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE. SAS OFF. RCS ON. WAIT 1.', 5000);
+
+            // For high-altitude reentry, limit thrust to 30% for fine course corrections
+            // Full thrust causes ship to flip during MechJeb's precision adjustments
+            log.progress(`[Landing] Limiting thrust to 30% for precision landing`);
+            await conn.execute(`
+              FOR eng IN SHIP:ENGINES {
+                IF eng:IGNITION { SET eng:THRUSTLIMIT TO 30. }
+              }
+            `.trim().replaceAll('\n', ' '), 5000);
+
+            const enableResult = await conn.execute(
+              'SET LAND TO ADDONS:MJ:LANDING. SET LAND:ENABLED TO TRUE. WAIT 2. PRINT "ENABLED|" + LAND:ENABLED.',
+              10_000
+            );
+            if (enableResult.output.includes('ENABLED|True')) {
+              log.progress(`[Landing] Autopilot resumed`);
+            } else {
+              log.warn(`[Landing] Failed to resume autopilot: ${enableResult.output}`);
+            }
+          } catch (e) {
+            log.warn(`[Landing] Error resuming autopilot: ${e}`);
+          }
         }
 
         // Fallback: if we're below fallback altitude and haven't separated, do it now
@@ -542,8 +624,9 @@ async function monitorLanding(
           separationFired = true;
 
           // Unlock controls and enable RCS after separation so MechJeb can take over
+          // Include stabilization delay for kOS to recognize new vessel configuration
           try {
-            await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE. SAS OFF. RCS ON.', 3000);
+            await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE. SAS OFF. RCS ON. WAIT 2.', 5000);
           } catch { /* ignore */ }
         }
       }
@@ -1022,10 +1105,15 @@ export const landTool: ToolDefinition = {
 
       // Choose separation stage based on body type:
       // - Atmospheric bodies: use reentry stage (heat shield, tagged 'reentry')
+      //   Falls back to jettison stage for high-altitude reentry if no reentry stage found
       // - Airless bodies: use jettison stage (lander separation, tagged 'lander')
-      const separationStage = hasAtmosphere
-        ? vesselScan.reentryStage
-        : vesselScan.jettisonStage;
+      let separationStage: number | null;
+      if (hasAtmosphere) {
+        // Prefer reentryStage, but fall back to jettisonStage for deferred separation
+        separationStage = vesselScan.reentryStage ?? (deferSeparation ? vesselScan.jettisonStage : null);
+      } else {
+        separationStage = vesselScan.jettisonStage;
+      }
 
       if (separationStage !== null && !deferSeparation) {
         // Fire separation immediately for normal landings (not high-altitude reentry)
@@ -1222,12 +1310,14 @@ export const landTool: ToolDefinition = {
 
       // If wait=true, monitor until completion
       if (wait) {
+        const deferredSepConfig = deferSeparation && separationStage !== null ? {
+          stage: separationStage,
+          fallbackAltitude: highAltAtmHeight + 20_000,
+        } : undefined;
+
         const monitorResult = await monitorLanding(conn, {
           logger,
-          deferredSeparation: deferSeparation && separationStage !== null ? {
-            stage: separationStage,
-            fallbackAltitude: highAltAtmHeight + 20_000,  // 20km above atmosphere edge as fallback
-          } : undefined,
+          deferredSeparation: deferredSepConfig,
         });
 
         // Warp to radio contact if we landed in blackout

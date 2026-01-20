@@ -202,9 +202,18 @@ export async function pollWithBlackoutResilience<T>(
         crashConfirmCount = 0;
       }
 
-      // Call custom poll handler
+      // Call custom poll handler (await if async - handlers may do work like staging)
+      // Wrap in try/catch so onPoll errors don't trigger blackout detection.
+      // Rationale: poll() succeeded, so connection was working. If onPoll fails:
+      // - Transient issue (e.g., staging): next poll() will succeed
+      // - Real blackout started during onPoll: next poll() will fail and detect it
+      // This prevents false blackout detection from operational errors.
       if (onPoll) {
-        onPoll(result);
+        try {
+          await onPoll(result);
+        } catch (onPollError) {
+          logger.debug(`[${context}] Handler error (will retry): ${onPollError instanceof Error ? onPollError.message : onPollError}`);
+        }
       }
 
       // Check if operation is complete
