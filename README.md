@@ -650,6 +650,47 @@ The archive copy will then self-install the new version.
 
 ## Development & Debugging
 
+### Logging
+
+ksp-mcp provides two logging systems for debugging:
+
+#### MCP Log File
+
+All MCP tool messages (info, warn, error, progress, debug) are written to:
+
+```
+logs/ksp-mcp-<timestamp>.log
+```
+
+Log format:
+```
+[2026-01-19T12:34:56.789Z] INFO     Mission started
+[2026-01-19T12:34:57.123Z] PROGRESS [Launch] Ascending to 80km...
+[2026-01-19T12:34:58.456Z] DEBUG    [Launch] Poll timeout (1/3), retrying...
+[2026-01-19T12:34:59.789Z] ERROR    Connection lost
+```
+
+Custom log directory:
+```bash
+KSP_MCP_LOG_DIR=/tmp/my-logs npx ksp-mcp
+```
+
+#### Transport Trace Log
+
+For low-level socket debugging (raw kOS commands/responses):
+
+```bash
+KOS_TRACE=1 npx ksp-mcp
+```
+
+Writes to `logs/kos-trace-*.log` with:
+- `SEND`: Commands sent to kOS
+- `RECV`: Responses from kOS
+- `INFO`: Connection events
+- `ERROR`: Transport errors
+
+Custom directory: `KOS_TRACE_DIR=/tmp/traces`
+
 ### Testing Blocking Operations
 
 When testing operations that may block (like time warp), run them in background processes:

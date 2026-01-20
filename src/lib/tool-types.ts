@@ -116,6 +116,8 @@ export interface McpLogger {
   error(message: string): void;
   /** Progress updates (uses progressToken if available) */
   progress(message: string): void;
+  /** Debug messages (connection issues, timeouts, internal state) */
+  debug(message: string): void;
 }
 
 /**
@@ -127,6 +129,7 @@ export const nullLogger: McpLogger = {
   warn: () => {},
   error: () => {},
   progress: () => {},
+  debug: () => {},
 };
 
 // ============================================================================

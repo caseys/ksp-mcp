@@ -13,12 +13,13 @@
 
 import type { KosConnection } from '../transport/kos-connection.js';
 
-/** Simple logger interface for progress messages */
+/** Simple logger interface for progress and debug messages */
 interface ProgressLogger {
   progress: (message: string) => void;
+  debug: (message: string) => void;
 }
 
-const nullLogger: ProgressLogger = { progress: () => {} };
+const nullLogger: ProgressLogger = { progress: () => {}, debug: () => {} };
 
 /** Reason for connection failure */
 export type DisconnectReason = 'signal_lost' | 'power_loss' | 'crashed' | 'unknown';
@@ -183,10 +184,15 @@ export async function pollWithBlackoutResilience<T>(
   let crashConfirmCount = 0;
   const CRASH_CONFIRM_THRESHOLD = 3; // Require multiple crash readings to confirm
 
+  // Lazy classification: only do expensive network classification after multiple failures
+  let consecutiveFailures = 0;
+  const CLASSIFY_AFTER_FAILURES = 3; // First 2 failures are quick retries
+
   while (Date.now() - startTime < timeoutMs) {
     try {
       const result = await poll();
       lastResult = result;
+      consecutiveFailures = 0; // Reset on success
 
       // If we were in blackout, we're back
       if (inBlackout) {
@@ -214,9 +220,23 @@ export async function pollWithBlackoutResilience<T>(
         };
       }
     } catch (error) {
-      // Connection error - classify the failure
-      const errorOutput = error instanceof Error ? error.message : String(error);
-      const reason = await classifyConnectionFailure(connection, errorOutput);
+      consecutiveFailures++;
+      const errorMsg = error instanceof Error ? error.message : String(error);
+
+      // Lazy classification: for first few failures, assume transient and retry quickly
+      // This avoids expensive network-based classification on every hiccup
+      if (consecutiveFailures < CLASSIFY_AFTER_FAILURES) {
+        logger.debug(`[${context}] Poll timeout (${consecutiveFailures}/${CLASSIFY_AFTER_FAILURES}), retrying...`);
+        await delay(200); // Quick retry
+        continue;
+      }
+
+      // After multiple failures, do full classification
+      logger.debug(`[${context}] ${consecutiveFailures} consecutive failures, classifying connection...`);
+      const classifyStart = Date.now();
+      const reason = await classifyConnectionFailure(connection, errorMsg);
+      const classifyMs = Date.now() - classifyStart;
+      logger.debug(`[${context}] Classification: ${reason} (${classifyMs}ms)`);
 
       // 'unknown' = transient error (parsing issue, timing, etc.) - just retry
       if (reason === 'unknown') {

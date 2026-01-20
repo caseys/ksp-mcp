@@ -4,13 +4,67 @@
  * Provides logging infrastructure for MCP tools. Uses a broadcast logger that
  * allows multiple MCP clients to subscribe to notifications from running operations
  * via the continue_operation tool.
+ *
+ * Also writes all messages to a log file in logs/ksp-mcp-*.log for debugging.
  */
 
+import { createWriteStream, mkdirSync, type WriteStream } from 'node:fs';
+import { join } from 'node:path';
 import type { McpLogger } from '../lib/tool-types.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
 
 type LogLevel = 'info' | 'warning' | 'error' | 'debug';
+
+// ============================================================================
+// File Logger - writes all messages to logs/ksp-mcp-*.log
+// ============================================================================
+
+/** Singleton file logger instance */
+let fileLogStream: WriteStream | null = null;
+let fileLogPath: string | null = null;
+
+/**
+ * Initialize file logging. Creates logs directory and opens log file.
+ * Called automatically when first logger is created.
+ */
+function initFileLog(): void {
+  if (fileLogStream) return; // Already initialized
+
+  const dir = process.env.KSP_MCP_LOG_DIR ?? join(process.cwd(), 'logs');
+  mkdirSync(dir, { recursive: true });
+
+  const timestamp = new Date().toISOString().replaceAll(/[:.]/g, '-');
+  fileLogPath = join(dir, `ksp-mcp-${timestamp}.log`);
+  fileLogStream = createWriteStream(fileLogPath, { flags: 'a' });
+  fileLogStream.write(`# ksp-mcp log started ${new Date().toISOString()}\n`);
+}
+
+/**
+ * Write a message to the log file.
+ */
+function writeToFile(level: LogLevel | 'progress', message: string): void {
+  if (!fileLogStream) return;
+
+  const timestamp = new Date().toISOString();
+  const levelTag = level.toUpperCase().padEnd(8);
+  fileLogStream.write(`[${timestamp}] ${levelTag} ${message}\n`);
+}
+
+/**
+ * Close the file log stream.
+ * @internal - reserved for future use (graceful shutdown)
+ */
+function closeFileLog(): void {
+  if (fileLogStream) {
+    fileLogStream.write(`# ksp-mcp log ended ${new Date().toISOString()}\n`);
+    fileLogStream.end();
+    fileLogStream = null;
+  }
+}
+
+// Ensure log is closed on process exit
+process.on('exit', closeFileLog);
 
 interface Subscriber {
   id: string;
@@ -97,20 +151,25 @@ export class BroadcastLogger implements McpLogger {
     }
   }
 
-  // McpLogger implementation - broadcast to all subscribers
+  // McpLogger implementation - broadcast to all subscribers AND write to file
   info(message: string): void {
+    writeToFile('info', message);
     this.broadcast('info', message);
   }
 
   warn(message: string): void {
+    writeToFile('warning', message);
     this.broadcast('warning', message);
   }
 
   error(message: string): void {
+    writeToFile('error', message);
     this.broadcast('error', message);
   }
 
   progress(message: string): void {
+    writeToFile('progress', message);
+
     // Send proper progress notification to initial client (if they support it)
     if (this.progressToken && this.initialExtra) {
       this.progressCount++;
@@ -128,6 +187,13 @@ export class BroadcastLogger implements McpLogger {
 
     // Also broadcast as info to all subscribers
     this.broadcast('info', message);
+  }
+
+  debug(message: string): void {
+    writeToFile('debug', message);
+    // Debug messages only go to broadcast subscribers, not progress notifications
+    // This keeps mission progress clean while still allowing debug visibility
+    this.broadcast('debug', message);
   }
 
   /**
@@ -185,12 +251,17 @@ export function addBroadcastSubscriber(
  * Uses a broadcast logger that allows multiple MCP clients to subscribe
  * to notifications from long-running operations via continue_operation.
  *
+ * Also initializes file logging to logs/ksp-mcp-*.log on first call.
+ *
  * @param extra The RequestHandlerExtra from the tool callback
  * @returns An McpLogger that broadcasts to all subscribers
  */
 export function createLogger(
   extra: RequestHandlerExtra<ServerRequest, ServerNotification>
 ): McpLogger {
+  // Initialize file logging on first logger creation
+  initFileLog();
+
   // Create the broadcast logger singleton
   const broadcastLogger = createBroadcastLogger();
 

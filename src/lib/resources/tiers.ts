@@ -9,7 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { allTools } from '../tool-registry.js';
 
 const TIER_DESCRIPTIONS: Record<number, string> = {
-  1: 'Core Mission: launch, land, transfer, circularize, warp',
+  1: 'Core Mission: launch, land, transfer, circularize, time_warp',
   2: 'Utility: status, targeting, saves, scripting, node execution',
   [-1]: 'Low-level Orbital: underlying maneuver implementations',
   [-2]: 'Landing Config: landing position and prediction tools',
