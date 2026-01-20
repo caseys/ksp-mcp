@@ -979,7 +979,7 @@ async function warpToReentry(
   await new Promise(resolve => setTimeout(resolve, 500));
 
   // Align to equatorial orbit for optimal reentry
-  log.progress(`[Warp] Arrived at ${parentBody}. Aligning to equatorial...`);
+  log.progress(`[Warp] Arrived at ${parentBody} SOI. Aligning to equatorial...`);
   const orchestrator = new ManeuverOrchestrator(conn);
   const incResult = await orchestrator.changeInclination(0, 'EQ_NEAREST_AD', {
     execute: true,
@@ -1025,7 +1025,7 @@ async function warpToReentry(
   // Fallback if periapsis query failed
   return {
     ...soiResult,
-    warning: `Arrived at ${parentBody}. Check periapsis for reentry planning.`,
+    warning: `Arrived at ${parentBody} SOI. Check periapsis for reentry planning.`,
   };
 }
 

@@ -34,15 +34,15 @@ export interface ArrivalAdvice {
 
 /**
  * Generate arrival advice based on periapsis and atmosphere.
- * Consolidates advice logic from warp.ts and return-from-moon.ts.
+ * Called after warp to SOI and inclination fix.
  *
- * Kerbin-specific advice (atmosphere ~70km):
- * - Ideal reentry: 15-55km periapsis, target 35km
- * - < 15km: steep reentry, may need heat shield
- * - > 55km: shallow, multiple passes or use course_correct
- * - > 70km: above atmosphere, use course_correct to lower
+ * Ideal periapsis ranges by body type:
+ * - Kerbin: 25-50km (reentry corridor for KSC landing)
+ * - Atmospheric: (atm - 20km) to (atm + 10km), centered at atm - 5km
+ * - Airless: 35-65km, centered at 50km
  *
- * Other atmospheric bodies use percentage-based thresholds.
+ * If in ideal range: advise to land or circularize
+ * If out of range: advise to use course_correct
  */
 export function generateArrivalAdvice(params: ArrivalAdviceParams): ArrivalAdvice {
   const { bodyName, periapsisKm, atmosphereKm, altitudeM } = params;
@@ -55,57 +55,60 @@ export function generateArrivalAdvice(params: ArrivalAdviceParams): ArrivalAdvic
     // Crash trajectory - same for all bodies
     advice = 'CRASH TRAJECTORY! Use crash_avoidance immediately.';
   } else if (isKerbin) {
-    // Kerbin-specific advice matching course_correct's smart periapsis logic
-    // Ideal range: 15-55km, target 35km for KSC landing
-    if (periapsisKm >= atmosphereKm) {
-      periapsisDescriptor = 'high ';
-      advice = `Above atmosphere (${atmosphereKm}km). Use course_correct to lower periapsis for reentry.`;
-    } else if (periapsisKm > 55) {
-      periapsisDescriptor = 'shallow ';
-      advice = `Shallow reentry (>55km). Use course_correct to lower to 30-40km, or land for aerobraking.`;
-    } else if (periapsisKm < 15) {
-      periapsisDescriptor = 'steep ';
-      advice = `Steep reentry (<15km). Use land tool, or course_correct to raise to 30-40km.`;
-    } else if (periapsisKm <= 35) {
-      // 15-35km: ideal for direct landing
-      advice = `Good reentry trajectory. Use land with target "KSC" for runway landing.`;
-    } else {
-      // 35-55km: good but slightly high
-      advice = `Good trajectory. Use land for reentry, or circularize for orbit.`;
-    }
-  } else if (atmosphereKm > 0) {
-    // Other atmospheric bodies - use percentage-based thresholds
-    const steepThreshold = atmosphereKm * 0.2;   // < 20% of atm = steep
-    const shallowThreshold = atmosphereKm * 0.7; // > 70% of atm = shallow
+    // Kerbin: ideal 25-50km for reentry to KSC
+    const idealMin = 25;
+    const idealMax = 50;
 
     if (periapsisKm >= atmosphereKm) {
       periapsisDescriptor = 'high ';
-      advice = `Above atmosphere (${atmosphereKm}km). Use course_correct to lower for aerobraking.`;
-    } else if (periapsisKm > shallowThreshold) {
+      advice = `Above atmosphere. Use course_correct to lower to ${idealMin}-${idealMax}km.`;
+    } else if (periapsisKm > idealMax) {
       periapsisDescriptor = 'shallow ';
-      advice = `Shallow approach (>${Math.round(shallowThreshold)}km). Use course_correct for steeper entry.`;
-    } else if (periapsisKm < steepThreshold) {
+      advice = `Shallow reentry. Use course_correct to lower to ${idealMin}-${idealMax}km.`;
+    } else if (periapsisKm < idealMin) {
       periapsisDescriptor = 'steep ';
-      advice = `Steep entry (<${Math.round(steepThreshold)}km). Use land, or course_correct to raise periapsis.`;
+      advice = `Steep reentry. Use course_correct to raise to ${idealMin}-${idealMax}km, or land now.`;
     } else {
-      // Good periapsis range
-      advice = `Good for aerobraking. Use land, or circularize after atmosphere pass.`;
+      // In ideal range
+      advice = `Good reentry trajectory. Use land with target "KSC".`;
+    }
+  } else if (atmosphereKm > 0) {
+    // Atmospheric body: ideal range centered at (atm - 5km), ±15km
+    const idealMin = Math.max(10, atmosphereKm - 20);  // atm - 20km, but at least 10km
+    const idealMax = atmosphereKm + 10;
+
+    if (periapsisKm >= atmosphereKm) {
+      periapsisDescriptor = 'high ';
+      advice = `Above atmosphere. Use course_correct to lower to ${idealMin}-${idealMax}km.`;
+    } else if (periapsisKm > idealMax) {
+      periapsisDescriptor = 'high ';
+      advice = `Above ideal range. Use course_correct to lower to ${idealMin}-${idealMax}km.`;
+    } else if (periapsisKm < idealMin) {
+      periapsisDescriptor = 'low ';
+      advice = `Below ideal range. Use course_correct to raise to ${idealMin}-${idealMax}km, or land now.`;
+    } else {
+      // In ideal range
+      advice = `Good trajectory. Use circularize or land.`;
     }
   } else {
-    // No atmosphere - use absolute thresholds
-    if (periapsisKm < 20) {
-      periapsisDescriptor = 'low ';
-      advice = `Low orbit (<20km). Use land, or course_correct to raise periapsis.`;
-    } else if (periapsisKm <= 250) {
-      advice = `Good orbit. Use circularize at periapsis, or land.`;
-    } else {
+    // Airless body: ideal 35-65km, centered at 50km
+    const idealMin = 35;
+    const idealMax = 65;
+
+    if (periapsisKm > idealMax) {
       periapsisDescriptor = 'high ';
-      advice = `High orbit (>${periapsisKm}km). Use course_correct to lower, or circularize here.`;
+      advice = `High orbit. Use course_correct to lower to ${idealMin}-${idealMax}km.`;
+    } else if (periapsisKm < idealMin) {
+      periapsisDescriptor = 'low ';
+      advice = `Low orbit. Use course_correct to raise to ${idealMin}-${idealMax}km, or land now.`;
+    } else {
+      // In ideal range
+      advice = `Good orbit. Use circularize or land.`;
     }
   }
 
-  const text = `Arrived at ${bodyName}\n` +
-               `Altitude: ${fmtDist(altitudeM)}, ${periapsisDescriptor}Periapsis: ${periapsisKm}km\n` +
+  const text = `Arrived at ${bodyName} SOI\n` +
+               `Altitude: ${fmtDist(altitudeM)}, ${periapsisDescriptor}Periapsis: ${Math.round(periapsisKm)}km\n` +
                `Next: ${advice}`;
 
   return { advice, periapsisDescriptor, text };
@@ -193,7 +196,7 @@ export async function completeReturnFromMoon(
     return {
       success: true,
       body: currentBodyName,
-      text: `Arrived at ${currentBodyName}. Use status for orbit details.`,
+      text: `Arrived at ${currentBodyName} SOI. Use status for orbit details.`,
     };
   }
 
@@ -301,7 +304,7 @@ export async function completeReturnFromMoon(
   }
 
   // Align to equatorial orbit for optimal reentry
-  logger.progress(`Arrived at ${currentBody}. Aligning to equatorial...`);
+  logger.progress(`Arrived at ${currentBody} SOI. Aligning to equatorial...`);
   const incResult = await orchestrator.changeInclination(0, 'EQ_NEAREST_AD', {
     execute: true,
     logger,
@@ -351,7 +354,7 @@ export async function completeReturnFromMoon(
     success: true,
     body: currentBody,
     altitude: 0,
-    text: `Arrived at ${currentBody}. Use status to check orbit details.`,
+    text: `Arrived at ${currentBody} SOI. Use status to check orbit details.`,
   };
 }
 

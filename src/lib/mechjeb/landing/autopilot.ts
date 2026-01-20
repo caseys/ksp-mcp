@@ -87,6 +87,25 @@ async function getValidLandingTarget(conn: KosConnection): Promise<{
     };
   }
 
+  // Check for body target matching current SOI - use default landing location
+  const bodyTargetCheck = await conn.execute(
+    'IF HASTARGET AND TARGET:ISTYPE("Body") { ' +
+    '  IF TARGET:NAME = SHIP:BODY:NAME { PRINT "SAMEBODY|" + TARGET:NAME. } ' +
+    '  ELSE { PRINT "OTHERBODY". } ' +
+    '} ELSE { PRINT "NOTBODY". }',
+    3000
+  );
+
+  const sameBodyMatch = bodyTargetCheck.output.match(/SAMEBODY\|(.+)/);
+  if (sameBodyMatch) {
+    const bodyName = sameBodyMatch[1].trim().toLowerCase();
+    // For Kerbin, default to KSC runway
+    if (bodyName === 'kerbin') {
+      return { valid: true, latitude: -0.0972, longitude: -74.5577, name: 'KSC (default for Kerbin)' };
+    }
+    // For other bodies, fall through to findLandingSite (returns valid: false)
+  }
+
   return { valid: false };
 }
 
@@ -97,29 +116,49 @@ async function getValidLandingTarget(conn: KosConnection): Promise<{
 interface VesselScanResult {
   hasLandingLegs: boolean;
   landingLegStage: number | null;  // Lowest stage with legs
-  jettisonStage: number | null;    // Decoupler stage to fire (null = none found)
+  jettisonStage: number | null;    // For airless: lander separation stage
+  reentryStage: number | null;     // For atmospheric: reentry separation stage
   error?: string;
 }
 
 /**
  * Scan vessel structure for landing legs and decouplers.
- * First looks for a part tagged 'lander' (decoupler/separator/docking port),
- * then falls back to finding the highest-staged decoupler.
+ *
+ * For AIRLESS bodies (hasAtmosphere=false):
+ * - First looks for part tagged 'lander' (decoupler/separator/docking port)
+ * - Falls back to highest-staged decoupler
+ *
+ * For ATMOSPHERIC bodies (hasAtmosphere=true):
+ * - First looks for part tagged 'reentry' (decoupler/separator)
+ * - Then looks for heat shield decouplers (ModuleAblator + ModuleDecouple)
+ * - Falls back to stage directly below heat shield parts
  */
-async function scanVesselForLanding(conn: KosConnection): Promise<VesselScanResult> {
+async function scanVesselForLanding(
+  conn: KosConnection,
+  _hasAtmosphere: boolean = false
+): Promise<VesselScanResult> {
   // Note: p:MODULES returns a list of module NAME STRINGS, not module objects
   // So we compare m directly (e.g., m = "ModuleWheelDeployment"), not m:NAME
   //
   // Landing legs may be at stage -1 (removed from staging) - that's fine, we just
   // need to confirm they exist. Decouplers must be in staging sequence (stage >= 0).
   //
-  // Priority for jettison:
+  // For AIRLESS bodies - lander separation:
   // 1. Part with kOS tag "lander" that can separate (decoupler/separator/docking port)
   // 2. Fallback: highest-staged decoupler
+  //
+  // For ATMOSPHERIC bodies - reentry separation:
+  // 1. Part with kOS tag "reentry" that can separate
+  // 2. Heat shield decoupler (ModuleAblator + ModuleDecouple)
+  // 3. Stage directly below heat shield parts
+  //
   // kOS script to scan vessel - no // comments allowed (flattened to single line)
   const script = `
     LOCAL hasLegs IS FALSE.
-    LOCAL taggedStage IS -1.
+    LOCAL taggedLander IS -1.
+    LOCAL taggedReentry IS -1.
+    LOCAL heatShieldDec IS -1.
+    LOCAL belowShieldDec IS -1.
     LOCAL decStages IS LIST().
     FOR p IN SHIP:PARTS {
       FOR m IN p:MODULES {
@@ -131,53 +170,89 @@ async function scanVesselForLanding(conn: KosConnection): Promise<VesselScanResu
       FOR p IN SHIP:PARTS {
         IF p:TAG = "lander" {
           IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") OR p:HASMODULE("ModuleDockingNode") {
-            IF p:STAGE >= 0 { SET taggedStage TO p:STAGE. }
+            IF p:STAGE >= 0 AND taggedLander < 0 { SET taggedLander TO p:STAGE. }
           }
         }
-      }
-      IF taggedStage >= 0 { PRINT "LEGS|TAG|" + taggedStage. }
-      ELSE {
-        FOR p IN SHIP:PARTS {
+        IF p:TAG = "reentry" {
           IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
-            IF p:STAGE >= 0 { IF NOT decStages:CONTAINS(p:STAGE) { decStages:ADD(p:STAGE). } }
+            IF p:STAGE >= 0 AND taggedReentry < 0 { SET taggedReentry TO p:STAGE. }
           }
         }
-        IF decStages:LENGTH = 0 { PRINT "LEGS|NODEC". }
-        ELSE {
-          LOCAL maxDecStage IS decStages[0].
-          FOR s IN decStages { IF s > maxDecStage { SET maxDecStage TO s. } }
-          PRINT "LEGS|DEC|" + maxDecStage.
+        IF p:HASMODULE("ModuleAblator") AND p:HASMODULE("ModuleDecouple") {
+          IF p:STAGE >= 0 AND heatShieldDec < 0 { SET heatShieldDec TO p:STAGE. }
+        }
+        IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
+          IF p:STAGE >= 0 { IF NOT decStages:CONTAINS(p:STAGE) { decStages:ADD(p:STAGE). } }
         }
       }
+      IF belowShieldDec < 0 {
+        FOR p IN SHIP:PARTS {
+          IF p:HASMODULE("ModuleAblator") {
+            LOCAL hsStage IS p:STAGE.
+            FOR d IN SHIP:PARTS {
+              IF d:STAGE = hsStage - 1 {
+                IF d:HASMODULE("ModuleDecouple") OR d:HASMODULE("ModuleAnchoredDecoupler") {
+                  IF belowShieldDec < 0 { SET belowShieldDec TO d:STAGE. }
+                }
+              }
+            }
+          }
+        }
+      }
+      LOCAL maxDecStage IS -1.
+      IF decStages:LENGTH > 0 {
+        SET maxDecStage TO decStages[0].
+        FOR s IN decStages { IF s > maxDecStage { SET maxDecStage TO s. } }
+      }
+      PRINT "SCAN|" + taggedLander + "|" + taggedReentry + "|" + heatShieldDec + "|" + belowShieldDec + "|" + maxDecStage.
     }
   `.trim().replaceAll('\n', ' ');
 
   const result = await conn.execute(script, 10_000);
-  // kOS output may be all on one line - look for our markers at the END
   const rawOutput = result.output.trim();
 
-  // Parse result - check patterns at END of output string
+  // No landing legs
   if (rawOutput.endsWith('NOLEGS')) {
-    return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null };
+    return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null, reentryStage: null };
   }
 
-  if (rawOutput.endsWith('LEGS|NODEC')) {
-    return { hasLandingLegs: true, landingLegStage: null, jettisonStage: null };
+  // Parse SCAN result: taggedLander|taggedReentry|heatShieldDec|belowShieldDec|maxDecStage
+  const scanMatch = rawOutput.match(/SCAN\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/);
+  if (scanMatch) {
+    const taggedLander = parseInt(scanMatch[1]);
+    const taggedReentry = parseInt(scanMatch[2]);
+    const heatShieldDec = parseInt(scanMatch[3]);
+    const belowShieldDec = parseInt(scanMatch[4]);
+    const maxDecStage = parseInt(scanMatch[5]);
+
+    // Determine jettison stage (for airless bodies)
+    let jettisonStage: number | null = null;
+    if (taggedLander >= 0) {
+      jettisonStage = taggedLander;
+    } else if (maxDecStage >= 0) {
+      jettisonStage = maxDecStage;
+    }
+
+    // Determine reentry stage (for atmospheric bodies) - priority order
+    let reentryStage: number | null = null;
+    if (taggedReentry >= 0) {
+      reentryStage = taggedReentry;
+    } else if (heatShieldDec >= 0) {
+      reentryStage = heatShieldDec;
+    } else if (belowShieldDec >= 0) {
+      reentryStage = belowShieldDec;
+    }
+
+    return { hasLandingLegs: true, landingLegStage: null, jettisonStage, reentryStage };
   }
 
-  // LEGS|TAG|<stage> - tagged "lander" part found
-  const tagMatch = rawOutput.match(/LEGS\|TAG\|(\d+)$/);
-  if (tagMatch) {
-    return { hasLandingLegs: true, landingLegStage: null, jettisonStage: parseInt(tagMatch[1]) };
-  }
-
-  // LEGS|DEC|<decStage> - fallback to highest staged decoupler
-  const decMatch = rawOutput.match(/LEGS\|DEC\|(\d+)$/);
-  if (decMatch) {
-    return { hasLandingLegs: true, landingLegStage: null, jettisonStage: parseInt(decMatch[1]) };
-  }
-
-  return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null, error: `Failed to parse vessel scan: ${rawOutput.slice(-50)}` };
+  return {
+    hasLandingLegs: false,
+    landingLegStage: null,
+    jettisonStage: null,
+    reentryStage: null,
+    error: `Failed to parse vessel scan: ${rawOutput.slice(-50)}`,
+  };
 }
 
 /**
@@ -749,8 +824,15 @@ export const landTool: ToolDefinition = {
         return ctx.errorResponse('land', `Cannot land: ${preJettisonRadio.error}`);
       }
 
-      // Step 0.8b: Scan vessel structure for landing legs and jettison transfer stage
-      const vesselScan = await scanVesselForLanding(conn);
+      // Check if body has atmosphere - affects separation logic
+      let hasAtmosphere = false;
+      try {
+        const atmCheck = await conn.execute('PRINT SHIP:BODY:ATM:EXISTS.', 2000);
+        hasAtmosphere = atmCheck.output.includes('True');
+      } catch { /* assume no atmosphere */ }
+
+      // Step 0.8b: Scan vessel structure for landing legs and separation stages
+      const vesselScan = await scanVesselForLanding(conn, hasAtmosphere);
 
       if (vesselScan.error) {
         return ctx.errorResponse('land', `Vessel scan failed: ${vesselScan.error}`);
@@ -762,14 +844,21 @@ export const landTool: ToolDefinition = {
           'Vessel must have parts with ModuleLandingLeg, ModuleWheelDeployment, or ModuleWheelBase.');
       }
 
-      // Jettison transfer stage below landing legs if decoupler found
-      if (vesselScan.jettisonStage !== null) {
-        logger.progress('[Landing] Separating lander from transfer stage...');
-        const jettisonResult = await jettisonStage(conn, vesselScan.jettisonStage, logger);
+      // Choose separation stage based on body type:
+      // - Atmospheric bodies: use reentry stage (heat shield, tagged 'reentry')
+      // - Airless bodies: use jettison stage (lander separation, tagged 'lander')
+      const separationStage = hasAtmosphere
+        ? vesselScan.reentryStage
+        : vesselScan.jettisonStage;
+
+      if (separationStage !== null) {
+        const separationType = hasAtmosphere ? 'reentry stage' : 'transfer stage';
+        logger.progress(`[Landing] Separating at ${separationType}...`);
+        const jettisonResult = await jettisonStage(conn, separationStage, logger);
         if (!jettisonResult.success) {
           logger.warn(`[Landing] Separation failed: ${jettisonResult.error}, continuing anyway`);
         } else {
-          logger.progress('[Landing] Lander separated');
+          logger.progress('[Landing] Separated');
         }
       }
 
