@@ -127,92 +127,92 @@ interface VesselScanResult {
  *
  * For AIRLESS bodies (hasAtmosphere=false):
  * - First looks for part tagged 'lander' (decoupler/separator/docking port)
- * - Falls back to closest decoupler below landing legs
+ * - Falls back to separator above landing legs (walking up part tree)
  *
  * For ATMOSPHERIC bodies (hasAtmosphere=true):
  * - First looks for part tagged 'reentry' (decoupler/separator)
- * - Falls back to closest decoupler below heat shield
+ * - Falls back to separator above heat shield (walking up part tree)
  */
 async function scanVesselForLanding(
   conn: KosConnection,
   _hasAtmosphere: boolean = false
 ): Promise<VesselScanResult> {
-  // Note: p:MODULES returns a list of module NAME STRINGS, not module objects
-  // So we compare m directly (e.g., m = "ModuleWheelDeployment"), not m:NAME
-  //
-  // Landing legs may be at stage -1 (removed from staging) - that's fine, we just
-  // need to confirm they exist. Decouplers must be in staging sequence (stage >= 0).
-  //
-  // For AIRLESS bodies - lander separation:
-  // 1. Part with kOS tag "lander" that can separate (decoupler/separator/docking port)
-  // 2. Fallback: closest decoupler below landing legs
-  //
-  // For ATMOSPHERIC bodies - reentry separation:
-  // 1. Part with kOS tag "reentry" that can separate
-  // 2. Closest decoupler below heat shield
-  //
-  // kOS script to scan vessel - no // comments allowed (flattened to single line)
+  // Find separators on core stack (closest to root), not radial attachments
+  // For lander: separator closest to root that has landing legs below it
+  // For reentry: separator closest to root that has heat shield below it
   const script = `
+    FUNCTION IS_LANDING_LEG {
+      PARAMETER p.
+      RETURN p:HASMODULE("ModuleLandingLeg") OR p:HASMODULE("ModuleWheelDeployment") OR p:HASMODULE("ModuleWheelBase").
+    }
+    FUNCTION IS_HEAT_SHIELD {
+      PARAMETER p.
+      RETURN p:HASMODULE("ModuleAblator").
+    }
+    FUNCTION IS_SEPARATOR {
+      PARAMETER p.
+      RETURN p:STAGE >= 0 AND (p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler")).
+    }
+    FUNCTION IS_DOCKING_PORT {
+      PARAMETER p.
+      RETURN p:STAGE >= 0 AND p:HASMODULE("ModuleDockingNode").
+    }
+    FUNCTION DEPTH_FROM_ROOT {
+      PARAMETER p.
+      LOCAL d IS 0.
+      LOCAL cur IS p.
+      UNTIL cur:PARENT:ISTYPE("String") { SET d TO d + 1. SET cur TO cur:PARENT. }
+      RETURN d.
+    }
+    FUNCTION IS_ANCESTOR_OF {
+      PARAMETER ancestor.
+      PARAMETER descendant.
+      LOCAL cur IS descendant.
+      UNTIL cur:ISTYPE("String") {
+        IF cur = ancestor { RETURN TRUE. }
+        SET cur TO cur:PARENT.
+      }
+      RETURN FALSE.
+    }
     LOCAL hasLegs IS FALSE.
     LOCAL taggedLander IS -1.
     LOCAL taggedReentry IS -1.
-    LOCAL heatShieldDec IS -1.
-    LOCAL belowShieldDec IS -1.
-    LOCAL belowLegsDec IS -1.
-    LOCAL legStage IS -1.
+    LOCAL coreLegsSep IS -1.
+    LOCAL coreLegsDepth IS 9999.
+    LOCAL coreShieldSep IS -1.
+    LOCAL coreShieldDepth IS 9999.
+    LOCAL legList IS LIST().
+    LOCAL shieldList IS LIST().
     FOR p IN SHIP:PARTS {
-      FOR m IN p:MODULES {
-        IF m = "ModuleLandingLeg" OR m = "ModuleWheelDeployment" OR m = "ModuleWheelBase" {
-          SET hasLegs TO TRUE.
-          IF p:STAGE > legStage { SET legStage TO p:STAGE. }
-        }
-      }
+      IF IS_LANDING_LEG(p) { SET hasLegs TO TRUE. legList:ADD(p). }
+      IF IS_HEAT_SHIELD(p) { shieldList:ADD(p). }
     }
     IF NOT hasLegs { PRINT "NOLEGS". }
     ELSE {
       FOR p IN SHIP:PARTS {
-        IF p:TAG = "lander" {
-          IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") OR p:HASMODULE("ModuleDockingNode") {
-            IF p:STAGE >= 0 AND taggedLander < 0 { SET taggedLander TO p:STAGE. }
+        IF p:TAG = "lander" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
+          IF taggedLander < 0 { SET taggedLander TO p:STAGE. }
+        }
+        IF p:TAG = "reentry" AND IS_SEPARATOR(p) {
+          IF taggedReentry < 0 { SET taggedReentry TO p:STAGE. }
+        }
+        IF IS_SEPARATOR(p) OR IS_DOCKING_PORT(p) {
+          LOCAL d IS DEPTH_FROM_ROOT(p).
+          FOR leg IN legList {
+            IF IS_ANCESTOR_OF(p, leg) AND d < coreLegsDepth {
+              SET coreLegsDepth TO d.
+              SET coreLegsSep TO p:STAGE.
+            }
           }
-        }
-        IF p:TAG = "reentry" {
-          IF p:HASMODULE("ModuleDecouple") OR p:HASMODULE("ModuleAnchoredDecoupler") {
-            IF p:STAGE >= 0 AND taggedReentry < 0 { SET taggedReentry TO p:STAGE. }
-          }
-        }
-        IF p:HASMODULE("ModuleAblator") AND p:HASMODULE("ModuleDecouple") {
-          IF p:STAGE >= 0 AND heatShieldDec < 0 { SET heatShieldDec TO p:STAGE. }
-        }
-      }
-      IF belowShieldDec < 0 {
-        LOCAL bestDist IS 999.
-        FOR p IN SHIP:PARTS {
-          IF p:HASMODULE("ModuleAblator") {
-            LOCAL hsStage IS p:STAGE.
-            FOR d IN SHIP:PARTS {
-              IF d:HASMODULE("ModuleDecouple") OR d:HASMODULE("ModuleAnchoredDecoupler") {
-                IF d:STAGE >= 0 AND d:STAGE < hsStage {
-                  LOCAL dist IS hsStage - d:STAGE.
-                  IF dist < bestDist { SET bestDist TO dist. SET belowShieldDec TO d:STAGE. }
-                }
-              }
+          FOR sh IN shieldList {
+            IF IS_ANCESTOR_OF(p, sh) AND d < coreShieldDepth {
+              SET coreShieldDepth TO d.
+              SET coreShieldSep TO p:STAGE.
             }
           }
         }
       }
-      IF belowLegsDec < 0 AND legStage >= 0 {
-        LOCAL bestDist IS 999.
-        FOR d IN SHIP:PARTS {
-          IF d:HASMODULE("ModuleDecouple") OR d:HASMODULE("ModuleAnchoredDecoupler") OR d:HASMODULE("ModuleDockingNode") {
-            IF d:STAGE >= 0 AND d:STAGE < legStage {
-              LOCAL dist IS legStage - d:STAGE.
-              IF dist < bestDist { SET bestDist TO dist. SET belowLegsDec TO d:STAGE. }
-            }
-          }
-        }
-      }
-      PRINT "SCAN|" + taggedLander + "|" + taggedReentry + "|" + heatShieldDec + "|" + belowShieldDec + "|" + belowLegsDec.
+      PRINT "SCAN|" + taggedLander + "|" + taggedReentry + "|" + coreLegsSep + "|" + coreShieldSep.
     }
   `.trim().replaceAll('\n', ' ');
 
@@ -224,32 +224,31 @@ async function scanVesselForLanding(
     return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null, reentryStage: null };
   }
 
-  // Parse SCAN result: taggedLander|taggedReentry|heatShieldDec|belowShieldDec|belowLegsDec
-  const scanMatch = rawOutput.match(/SCAN\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/);
+  // Parse SCAN result: taggedLander|taggedReentry|aboveLegsSep|aboveShieldSep
+  const scanMatch = rawOutput.match(/SCAN\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/);
   if (scanMatch) {
     const taggedLander = parseInt(scanMatch[1]);
     const taggedReentry = parseInt(scanMatch[2]);
-    // scanMatch[3] is heatShieldDec - skipped, we don't jettison the heat shield
-    const belowShieldDec = parseInt(scanMatch[4]);
-    const belowLegsDec = parseInt(scanMatch[5]);
+    const aboveLegsSep = parseInt(scanMatch[3]);
+    const aboveShieldSep = parseInt(scanMatch[4]);
 
     // Determine jettison stage (for airless bodies)
-    // Priority: 'lander' tagged decoupler, then decoupler below landing legs
+    // Priority: 'lander' tagged decoupler, then separator above landing legs
     let jettisonStage: number | null = null;
     if (taggedLander >= 0) {
       jettisonStage = taggedLander;
-    } else if (belowLegsDec >= 0) {
-      jettisonStage = belowLegsDec;
+    } else if (aboveLegsSep >= 0) {
+      jettisonStage = aboveLegsSep;
     }
 
     // Determine reentry stage (for atmospheric bodies) - priority order
     // This is the stage to fire BEFORE reentry to separate transfer/service module
-    // NOT the heat shield itself (heatShieldDec) - we need that for reentry protection!
+    // Priority: 'reentry' tagged decoupler, then separator above heat shield
     let reentryStage: number | null = null;
     if (taggedReentry >= 0) {
       reentryStage = taggedReentry;
-    } else if (belowShieldDec >= 0) {
-      reentryStage = belowShieldDec;
+    } else if (aboveShieldSep >= 0) {
+      reentryStage = aboveShieldSep;
     }
 
     return { hasLandingLegs: true, landingLegStage: null, jettisonStage, reentryStage };
@@ -265,9 +264,10 @@ async function scanVesselForLanding(
 }
 
 /**
- * Decouple at the target stage by finding and activating the specific decoupler part.
- * Does NOT use STAGE command - only fires the individual decoupler/separator/docking port.
- * This prevents accidentally firing multiple stages.
+ * Stage down to reach the target decoupler, then fire it exactly once.
+ * If current stage > target: stage down to reach it, then fire
+ * If current stage = target: fire it
+ * If current stage < target: already past it, do nothing
  */
 async function jettisonStage(
   conn: KosConnection,
@@ -276,57 +276,40 @@ async function jettisonStage(
 ): Promise<{ success: boolean; error?: string }> {
   const log = logger ?? nullLogger;
 
-  // Find decoupler parts in the target stage and decouple ONE
-  // After decoupling, parts list becomes stale so we must stop iterating
-  // Supports: ModuleDecouple, ModuleAnchoredDecoupler, ModuleDockingNode
   const script = `
     SET WARP TO 0.
     RCS ON.
-    SET decoupled TO 0.
-    SET done TO FALSE.
-    FOR P IN SHIP:PARTS {
-      IF NOT done AND (P:STAGE = ${targetStage} OR P:DECOUPLEDIN = ${targetStage}) {
-        IF P:HASMODULE("ModuleDecouple") {
-          P:GETMODULE("ModuleDecouple"):DOEVENT("decouple").
-          SET decoupled TO decoupled + 1.
-          SET done TO TRUE.
-        } ELSE IF P:HASMODULE("ModuleAnchoredDecoupler") {
-          P:GETMODULE("ModuleAnchoredDecoupler"):DOEVENT("decouple").
-          SET decoupled TO decoupled + 1.
-          SET done TO TRUE.
-        } ELSE IF P:HASMODULE("ModuleDockingNode") {
-          IF P:GETMODULE("ModuleDockingNode"):HASEVENT("decouple node") {
-            P:GETMODULE("ModuleDockingNode"):DOEVENT("decouple node").
-            SET decoupled TO decoupled + 1.
-            SET done TO TRUE.
-          } ELSE IF P:GETMODULE("ModuleDockingNode"):HASEVENT("undock") {
-            P:GETMODULE("ModuleDockingNode"):DOEVENT("undock").
-            SET decoupled TO decoupled + 1.
-            SET done TO TRUE.
-          }
-        }
+    SET startStage TO STAGE:NUMBER.
+    SET fired TO FALSE.
+    IF STAGE:NUMBER > ${targetStage} {
+      UNTIL STAGE:NUMBER <= ${targetStage} {
+        STAGE. WAIT 0.5.
       }
     }
-    WAIT 0.5.
-    PRINT "DECOUPLED|" + decoupled.
+    IF STAGE:NUMBER = ${targetStage} {
+      STAGE. WAIT 0.5.
+      SET fired TO TRUE.
+    }
+    PRINT "STAGED|" + startStage + "|" + STAGE:NUMBER + "|" + fired.
   `.trim().replaceAll('\n', ' ');
 
   const result = await conn.execute(script, 30_000);
   const output = result.output.trim();
 
-  const match = output.match(/DECOUPLED\|(\d+)/);
+  const match = output.match(/STAGED\|(\d+)\|(\d+)\|(True|False)/i);
   if (match) {
-    const count = parseInt(match[1]);
-    if (count > 0) {
-      log.info(`[Jettison] Decoupled ${count} part(s) at stage ${targetStage}`);
-      return { success: true };
+    const startStage = parseInt(match[1]);
+    const endStage = parseInt(match[2]);
+    const fired = match[3].toLowerCase() === 'true';
+    if (fired) {
+      log.info(`[Jettison] Fired stage ${targetStage} (was at ${startStage}, now at ${endStage})`);
     } else {
-      log.info(`[Jettison] No decoupler found at stage ${targetStage}`);
-      return { success: true }; // Not an error - might already be decoupled
+      log.info(`[Jettison] Already past stage ${targetStage} (current: ${endStage})`);
     }
+    return { success: true };
   }
 
-  return { success: false, error: 'Failed to parse decoupling result' };
+  return { success: false, error: 'Failed to parse staging result' };
 }
 
 // Configuration
