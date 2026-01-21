@@ -1220,6 +1220,10 @@ export const launchAscentTool: ToolDefinition = {
       const wait = waitArg === 'auto' ? ctx.supportsNotifications(extra) : waitArg;
 
       if (wait) {
+        // Restart daemon BEFORE entering monitor loop - it was killed by Ctrl+C when
+        // we sent commands, and won't restart until tool completes.
+        await ctx.restartDaemon();
+
         // Wait for completion (blocking call that monitors ascent)
         try {
           const result = await handle.waitForCompletion();

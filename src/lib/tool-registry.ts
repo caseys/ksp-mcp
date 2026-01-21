@@ -110,6 +110,8 @@ const GUARD_EXEMPT_TOOLS = new Set([
   'continue_operation',
   // MechJeb landing (read-only)
   'get_landing_prediction',
+  // Low-level kOS command (debugging)
+  'command',
 ]);
 
 /**

@@ -63,8 +63,13 @@ WAIT 5.
 IF SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" {
 PRINT "[mcp-landing] Touchdown - stabilizing...".
 SAS ON.
+RCS ON.
 WAIT 0.3.
 SET SASMODE TO "RADIALOUT".
+PRINT "[mcp-landing] Holding radial out for 10s...".
+WAIT 10.
+RCS OFF.
+SET SASMODE TO "STABILITYASSIST".
 SET _MCP_OP TO "".
 PRINT "[mcp-landing] Landing complete.".
 }`;

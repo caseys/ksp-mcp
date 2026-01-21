@@ -1293,6 +1293,11 @@ export const landTool: ToolDefinition = {
 
       // If wait=true, monitor until completion
       if (wait) {
+        // Restart daemon BEFORE entering monitor loop - it was killed by Ctrl+C when
+        // we sent commands, and won't restart until tool completes. The daemon runs
+        // mcp_landing.ks which handles blackout-resilient stabilization on touchdown.
+        await ctx.restartDaemon();
+
         const deferredSepConfig = deferSeparation && separationStage !== null ? {
           stage: separationStage,
           fallbackAltitude: highAltAtmHeight + 20_000,
@@ -1311,16 +1316,9 @@ export const landTool: ToolDefinition = {
         }
 
         if (monitorResult.success) {
-          // Post-landing stabilization - enable SAS radial-out and RCS
-          try {
-            logger.progress('[Landing] Stabilizing...');
-            await conn.execute('SAS ON. WAIT 0.1. SET SASMODE TO "RADIALOUT". RCS ON.', 5000);
-            // Wait 10 seconds then disable RCS and switch SAS to stability assist
-            await conn.execute('WAIT 10. RCS OFF. SET SASMODE TO "STABILITYASSIST".', 15_000);
-            logger.progress('[Landing] Stabilized');
-          } catch {
-            logger.warn('[Landing] Stabilization commands failed');
-          }
+          // Note: Post-landing stabilization (SAS radial-out, RCS, 10s hold) is
+          // handled by mcp_landing.ks which runs locally and survives blackout.
+          // By the time monitorResult.success is true, stabilization is complete.
 
           // Reset thrust limits if we modified them
           if (thrustLimit.limited) {
