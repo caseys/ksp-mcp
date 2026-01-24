@@ -628,11 +628,14 @@ export async function executeNode(
 
     // Wait for warp to complete (poll until ETA is close)
     let warpAttempts = 0;
+    let consecutiveFailures = 0;
     const maxWarpAttempts = 600; // Max 10 minutes of warp checking (1s poll interval)
+    const maxConsecutiveFailures = 30; // Exit after 30s of failures (assume warp done or connection lost)
     while (warpAttempts < maxWarpAttempts) {
       await delay(1000);
       try {
         const currentEta = await queryNumber(conn, 'NEXTNODE:ETA');
+        consecutiveFailures = 0; // Reset on successful query
         if (currentEta <= warpLeadTime + 5) {
           log.progress(`${logPrefix} Dropping out of warp. preparing for maneuver.`);
           break;
@@ -642,6 +645,12 @@ export async function executeNode(
         }
       } catch {
         // May be in blackout during warp - that's fine, MechJeb will handle it
+        consecutiveFailures++;
+        if (consecutiveFailures >= maxConsecutiveFailures) {
+          // Too many consecutive failures - assume warp complete or failed, proceed to burn phase
+          log.progress(`${logPrefix} Warp query timeout - proceeding to burn phase`);
+          break;
+        }
         if (warpAttempts % 30 === 0) {
           log.progress(`${logPrefix} Warp in progress (no signal - autopilot handling)`);
         }

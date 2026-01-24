@@ -8,7 +8,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition, ToolContext } from './tool-types.js';
 import { getKosOperation, clearKosOperation } from '../utils/kos-operation-state.js';
-import { getOperationProgress } from './mechjeb/telemetry.js';
+import { getOperationProgressFromKosOp } from './mechjeb/telemetry.js';
 import { addBroadcastSubscriber, getActiveBroadcastLogger } from '../utils/mcp-logger.js';
 
 // Import tool definitions from lib files
@@ -204,8 +204,9 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
               const isStale = activeOp.duration > 600; // 10 minutes
 
               // Check if MechJeb autopilot is actually still running
-              const progress = await getOperationProgress(conn);
-              const isRunning = progress?.running ?? false;
+              // Use getOperationProgressFromKosOp to avoid redundant status query
+              const progress = await getOperationProgressFromKosOp(conn, activeOp);
+              const isRunning = progress.running;
 
               if (!isRunning) {
                 // Operation completed or failed - clear and proceed

@@ -8,6 +8,7 @@ import type { KosConnection } from '../../transport/kos-connection.js';
 import type { VesselState, OrbitInfo, MechJebInfo } from '../types.js';
 import type { TargetEncounterInfo, BodyEncounterInfo, VesselEncounterInfo } from './shared.js';
 import type { StatusData } from '../../utils/mcp-status.js';
+import type { KosOperationState } from '../../utils/kos-operation-state.js';
 export type { StatusData } from '../../utils/mcp-status.js';
 import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
@@ -1156,6 +1157,29 @@ export async function getOperationProgress(conn: KosConnection): Promise<Operati
   }
 
   return null;
+}
+
+/**
+ * Get operation progress from a pre-fetched KosOperationState.
+ * Use this variant when you already have the operation state to avoid
+ * redundant status queries.
+ */
+export async function getOperationProgressFromKosOp(
+  conn: KosConnection,
+  kosOp: KosOperationState
+): Promise<OperationProgress> {
+  // Query MechJeb for current autopilot status (single query, no status script)
+  const mjStatus = await queryMechJebAutopilotStatus(conn, kosOp.opType);
+
+  return {
+    toolName: kosOp.toolName,
+    operationType: kosOp.opType,
+    phase: mjStatus.status,
+    detail: mjStatus.detail,
+    running: mjStatus.enabled,
+    durationSeconds: Math.round(kosOp.duration),
+    target: kosOp.target || undefined,
+  };
 }
 
 /**
