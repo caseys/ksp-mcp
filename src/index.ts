@@ -106,6 +106,10 @@ if (isMainModule) {
         type: 'boolean',
         default: false,
       },
+      'idle-timeout': {
+        type: 'string',
+        default: '0',
+      },
       help: {
         type: 'boolean',
       },
@@ -125,6 +129,7 @@ Options:
   -p, --port <port>       Port for HTTP transport (default: 3000)
   -h, --host <host>       Host for HTTP transport (default: 127.0.0.1)
   --stateless             Run HTTP in stateless mode (no sessions)
+  --idle-timeout <secs>   Exit after N seconds of no requests (HTTP only)
   --help                  Show this help
 
 Examples:
@@ -142,7 +147,7 @@ Examples:
 `);
   }
 
-  async function startHttpServer(host: string, port: number, stateless: boolean) {
+  async function startHttpServer(host: string, port: number, stateless: boolean, idleTimeoutSecs: number) {
     const http = await import('node:http');
 
     // Track sessions -> transports for stateful mode
@@ -151,7 +156,21 @@ Examples:
       server: ReturnType<typeof createServer>;
     }>();
 
+    // Idle timeout tracking (only if idleTimeoutSecs > 0)
+    let lastRequestTime = Date.now();
+    if (idleTimeoutSecs > 0) {
+      const idleTimeoutMs = idleTimeoutSecs * 1000;
+      setInterval(() => {
+        if (Date.now() - lastRequestTime > idleTimeoutMs) {
+          console.error(`[server] Idle timeout (${idleTimeoutSecs}s), shutting down`);
+          process.exit(0);
+        }
+      }, 5000);
+    }
+
     const httpServer = http.createServer(async (req, res) => {
+      // Update last request time for idle timeout
+      lastRequestTime = Date.now();
       // CORS headers for cross-origin access
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
@@ -239,6 +258,9 @@ Examples:
       console.error(`  MCP endpoint: http://${host}:${port}/mcp`);
       console.error(`  Health check: http://${host}:${port}/health`);
       console.error(`  Mode: ${stateless ? 'stateless' : 'stateful (session-based)'}`);
+      if (idleTimeoutSecs > 0) {
+        console.error(`  Idle timeout: ${idleTimeoutSecs}s`);
+      }
     });
 
     // Cleanup on shutdown
@@ -265,7 +287,8 @@ Examples:
       // Streamable HTTP transport for network access
       const port = Number.parseInt(values.port!, 10);
       const host = values.host!;
-      await startHttpServer(host, port, values.stateless ?? false);
+      const idleTimeout = Number.parseInt(values['idle-timeout']!, 10);
+      await startHttpServer(host, port, values.stateless ?? false, idleTimeout);
     } else {
       // Default: stdio transport
       const server = createServer();
