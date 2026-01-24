@@ -510,13 +510,13 @@ export async function executeNode(
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
 
-  // RCS mode for alignment:
+  // RCS mode for alignment (ascending aggressiveness: 0=none, 1=burst, 2=pulsed, 3=continuous):
   // - Tiny burns (< 1 m/s): mode 0 (no RCS) - RCS would overpower the burn
-  // - Small burns (< 10 m/s): mode 1 (RCS on) for gentle, continuous alignment
-  // - Normal burns: mode 3 (pulsed RCS) for faster alignment
+  // - Small burns (< 10 m/s): mode 2 (pulsed RCS) for gentle alignment
+  // - Normal burns: mode 3 (continuous RCS) for fastest alignment
   const isTinyBurn = dvRequired < 1;
   const isSmallBurn = dvRequired < 10;
-  const rcsMode = noRcsAlign || isTinyBurn ? 0 : (isSmallBurn ? 1 : 3);
+  const rcsMode = noRcsAlign || isTinyBurn ? 0 : (isSmallBurn ? 2 : 3);
 
   // Align to node BEFORE enabling MechJeb executor
   // MechJeb's WARPALIGN can get stuck - we want to be aligned before starting
