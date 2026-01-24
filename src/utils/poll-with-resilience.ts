@@ -84,9 +84,9 @@ async function classifyConnectionFailure(
   conn: KosConnection | undefined,
   errorOutput?: string
 ): Promise<DisconnectReason> {
-  // Check error message/output for signal loss indicators
-  // IMPORTANT: Only match the specific kOS message, not generic 'signal' which causes false positives
-  if (errorOutput && errorOutput.includes('Signal lost')) {
+  // Check error message for signal loss indicators
+  // Matches "Signal lost" from kOS or our own "Signal lost" error
+  if (errorOutput && (errorOutput.includes('Signal lost') || errorOutput.includes('blackout'))) {
     return 'signal_lost';
   }
 
@@ -95,22 +95,17 @@ async function classifyConnectionFailure(
     try {
       // Try a health check command with unique marker
       const marker = `POLL_CHECK_${Date.now()}`;
-      const result = await conn.execute(`PRINT "${marker}".`, 2000);
+      const result = await conn.queue(`PRINT "${marker}".`, 2000);
 
       // Check for signal lost message
       if (result.output.includes('Signal lost')) {
         return 'signal_lost';
       }
 
-      // If we got ANY response at all (even without marker), connection is working.
-      // This was likely a transient parsing error or timing issue, not a real disconnect.
-      // Only truly empty output suggests a real problem.
-      if (result.output.trim().length > 0) {
-        return 'unknown'; // Transient error, connection is fine
-      }
-
-      // Truly empty output - might be signal loss (commands echo but no response)
-      return 'signal_lost';
+      // Health check succeeded (no throw) - connection is working.
+      // Even empty output is just a transient issue, not real signal loss.
+      // Only the specific "Signal lost" kOS message indicates real blackout.
+      return 'unknown';
     } catch {
       // Health check threw - connection is broken
       // Try Ctrl+D to distinguish power loss from crash

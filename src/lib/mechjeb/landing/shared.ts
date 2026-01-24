@@ -100,7 +100,7 @@ function formatMechJebStatus(status: string): string {
  */
 export async function getLandingStatus(conn: KosConnection): Promise<LandingStatus> {
   // Query all landing status info in one command
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET LAND TO ADDONS:MJ:LANDING. ' +
     'PRINT "LSTAT|" + LAND:ENABLED + "|" + LAND:STATUS + "|" + LAND:LANDATTARGET + "|" + ' +
     'LAND:PREDICTIONREADY + "|" + LAND:PREDICTEDLAT + "|" + LAND:PREDICTEDLNG + "|" + ' +
@@ -174,7 +174,7 @@ export async function getLandingStatus(conn: KosConnection): Promise<LandingStat
  * Get current landing configuration
  */
 export async function getLandingConfig(conn: KosConnection): Promise<LandingConfig> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET LAND TO ADDONS:MJ:LANDING. ' +
     'PRINT "LCFG|" + LAND:TOUCHDOWNSPEED + "|" + LAND:DEPLOYGEARS + "|" + LAND:DEPLOYCHUTES + "|" + ' +
     'LAND:RCSADJUSTMENT + "|" + LAND:LIMITGEARSSTAGE + "|" + LAND:LIMITCHUTESSTAGE.',
@@ -235,7 +235,7 @@ export async function setLandingConfig(
     commands.push(`SET LAND:LIMITCHUTESSTAGE TO ${config.chuteStage}.`);
   }
 
-  await conn.execute(commands.join(' '), 5000);
+  await conn.raw(commands.join(' '), 5000);
 }
 
 // ============================================================================
@@ -257,7 +257,7 @@ export async function setLandingPositionTarget(
     return { success: false, error: 'Longitude must be between -180 and 180' };
   }
 
-  const result = await conn.execute(
+  const result = await conn.queue(
     `SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:SETTARGET(${latitude}, ${longitude}).`,
     5000
   );
@@ -274,7 +274,7 @@ export async function setLandingPositionTarget(
 export async function setLandingPositionTargetKSC(
   conn: KosConnection
 ): Promise<{ success: boolean; error?: string }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:SETTARGETKSC().',
     5000
   );
@@ -289,7 +289,7 @@ export async function setLandingPositionTargetKSC(
  * Check if a position target is currently set
  */
 export async function hasLandingPositionTarget(conn: KosConnection): Promise<boolean> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:POSITIONTARGETEXISTS.',
     3000
   );
@@ -306,7 +306,7 @@ export async function hasLandingPositionTarget(conn: KosConnection): Promise<boo
 export async function startTargetedLanding(
   conn: KosConnection
 ): Promise<{ success: boolean; error?: string }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET LAND TO ADDONS:MJ:LANDING. PRINT LAND:LANDATPOSITIONTARGET().',
     5000
   );
@@ -328,7 +328,7 @@ export async function startTargetedLanding(
 export async function startUntargetedLanding(
   conn: KosConnection
 ): Promise<{ success: boolean; error?: string }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET LAND TO ADDONS:MJ:LANDING. PRINT LAND:LANDUNTARGETED().',
     5000
   );
@@ -353,7 +353,7 @@ export async function startUntargetedLanding(
  * Get detailed landing prediction
  */
 export async function getLandingPrediction(conn: KosConnection): Promise<LandingPrediction> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET LAND TO ADDONS:MJ:LANDING. ' +
     'PRINT "LPRED|" + LAND:PREDICTIONREADY + "|" + LAND:PREDICTEDLAT + "|" + ' +
     'LAND:PREDICTEDLNG + "|" + LAND:PREDICTEDALT + "|" + LAND:PREDICTEDUT + "|" + ' +

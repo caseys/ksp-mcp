@@ -66,8 +66,8 @@ export interface ValidationResult {
  */
 export async function getTargetValidationInfo(conn: KosConnection): Promise<TargetInfo | null> {
   // Step 1: Check if target exists
-  const hasTargetResult = await conn.execute('PRINT HASTARGET.', 2000);
-  if (!hasTargetResult.output.toLowerCase().includes('true')) {
+  const hasTargetResult = await conn.queue('PRINT HASTARGET.', 2000);
+  if (!hasTargetResult.success || !hasTargetResult.output.toLowerCase().includes('true')) {
     return null;
   }
 
@@ -87,14 +87,14 @@ export async function getTargetValidationInfo(conn: KosConnection): Promise<Targ
   await conn.flushStaleData(50);
 
   // Retry once if output is empty (handles timing/buffer issues)
-  let infoResult = await conn.execute(infoCmd, 5000);
-  let infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/);
+  let infoResult = await conn.queue(infoCmd, 5000);
+  let infoMatch = infoResult.success ? infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/) : null;
 
-  if (!infoMatch && infoResult.output.trim() === '') {
+  if (!infoMatch && (!infoResult.success || infoResult.output === '')) {
     // Empty output - wait briefly and retry
     await new Promise(r => setTimeout(r, 200));
-    infoResult = await conn.execute(infoCmd, 5000);
-    infoMatch = infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/);
+    infoResult = await conn.queue(infoCmd, 5000);
+    infoMatch = infoResult.success ? infoResult.output.match(/INFO\|(\w+)\|([^|]+)\|([^|]+)\|(\w+)\|(\d+)/) : null;
   }
 
   if (!infoMatch) {
@@ -115,11 +115,11 @@ export async function getTargetValidationInfo(conn: KosConnection): Promise<Targ
   }
 
   // Step 3: Check for encounter (separate query for reliability)
-  const encResult = await conn.execute(
+  const encResult = await conn.queue(
     'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "ENC|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NOENC". }',
     2000
   );
-  const encMatch = encResult.output.match(/ENC\|(\w+)/);
+  const encMatch = encResult.success ? encResult.output.match(/ENC\|(\w+)/) : null;
 
   const radius = parseInt(radiusStr);
   return {
@@ -248,8 +248,8 @@ export async function validateTarget(
   // Check forbidden current SOI (for interplanetary - can't transfer to where you already are)
   if (forbidCurrentSOI) {
     // Get current SOI body name
-    const soiResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
-    const currentSOI = soiResult.output.trim().replace(/[>\s]+$/, '');
+    const soiResult = await conn.queue('PRINT SHIP:BODY:NAME.', 2000);
+    const currentSOI = soiResult.success ? soiResult.output.replace(/[>\s]+$/, '') : '';
 
     if (targetInfo.name.toLowerCase() === currentSOI.toLowerCase()) {
       const targets = await listTargets(conn);

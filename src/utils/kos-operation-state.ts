@@ -1,10 +1,11 @@
 /**
  * kOS Operation State Persistence
  *
- * Stores operation state in a kOS variable on the vessel.
- * This persists across service restarts as long as KSP is running.
+ * Stores operation state in a file on kOS volume 1.
+ * This persists across Ctrl+C and script restarts.
  *
- * Variable format: `<opType>|<toolName>|<target>|<startUT>`
+ * The status script handles reading/writing the operation file.
+ * We just run the status script with an operation parameter to set it.
  */
 
 import type { KosConnection } from '../transport/kos-connection.js';
@@ -20,8 +21,29 @@ export interface KosOperationState {
   duration: number;
 }
 
+// Status script paths - try local first (blackout resilient), fall back to archive
+const LOCAL_STATUS = '1:/mcp_status.ks';
+const ARCHIVE_STATUS = '0:/mcp_status.ks';
+
 /**
- * Set the operation state on the vessel via kOS.
+ * Run status script with optional parameter, trying local then archive.
+ * Single command with EXISTS check to avoid extra round-trip.
+ */
+async function runStatusScript(conn: KosConnection, param?: string): Promise<string> {
+  const paramStr = param !== undefined ? `, "${param}"` : '';
+  // Single command: check EXISTS and run appropriate path
+  // Uses queue() because we need to capture script output
+  const result = await conn.queue(
+    `IF EXISTS("${LOCAL_STATUS}") { RUNPATH("${LOCAL_STATUS}"${paramStr}). } ELSE { RUNPATH("${ARCHIVE_STATUS}"${paramStr}). }`,
+    5000
+  );
+
+  return result.output;
+}
+
+/**
+ * Set the operation state on the vessel.
+ * Runs the status script with the operation parameter.
  *
  * @param conn kOS connection
  * @param opType Operation type (ascent, landing, node, maneuver)
@@ -34,16 +56,17 @@ export async function setKosOperation(
   toolName: string,
   target: string = ''
 ): Promise<void> {
-  // Format: opType|toolName|target|startUT
-  const cmd = `SET _MCP_OP TO "${opType}|${toolName}|${target}|" + TIME:SECONDS.`;
-  await conn.execute(cmd, 3000);
+  // Format: opType:toolName:target (using : since | might conflict with kOS)
+  const opValue = `${opType}:${toolName}:${target}`;
+  await runStatusScript(conn, opValue);
 }
 
 /**
  * Clear the operation state on the vessel.
  */
 export async function clearKosOperation(conn: KosConnection): Promise<void> {
-  await conn.execute('SET _MCP_OP TO "".', 3000);
+  // Empty string clears the operation
+  await runStatusScript(conn, '');
 }
 
 /**
@@ -52,40 +75,35 @@ export async function clearKosOperation(conn: KosConnection): Promise<void> {
  */
 export async function getKosOperation(conn: KosConnection): Promise<KosOperationState | null> {
   try {
-    // Query operation state and current time for duration calc
-    // Use CHOOSE to handle undefined variable (daemon may not have run yet)
-    const result = await conn.execute(
-      'PRINT "MCPOP:" + (CHOOSE _MCP_OP IF DEFINED _MCP_OP ELSE "") + "|" + TIME:SECONDS.',
-      3000
-    );
+    // Use getStatusData to parse the JSON output properly
+    const { getStatusData } = await import('../lib/mechjeb/telemetry.js');
+    const status = await getStatusData(conn);
 
-    // Parse "MCPOP:opType|toolName|target|startUT|currentUT"
-    const match = result.output.match(/MCPOP:([^|]*)\|([^|]*)\|([^|]*)\|([\d.]*)\|([\d.]+)/);
-    if (!match) {
+    const opValue = status.op;
+    if (!opValue) {
       return null;
     }
 
-    const opType = match[1] as KosOperationType;
-    const toolName = match[2];
-    const target = match[3];
-    const startUT = parseFloat(match[4]) || 0;
-    const currentUT = parseFloat(match[5]) || 0;
+    // Parse opType:toolName:target
+    const parts = opValue.split(':');
+    const opType = (parts[0] || '') as KosOperationType;
+    const toolName = parts[1] || '';
+    const target = parts[2] || '';
 
-    // Empty opType means no operation
     if (!opType) {
       return null;
     }
 
+    // Note: We don't have duration info in file-based approach
+    // Operations that need duration should track their own start time
     return {
       opType,
       toolName,
       target,
-      startUT,
-      duration: startUT > 0 ? currentUT - startUT : 0,
+      startUT: 0,
+      duration: 0,
     };
   } catch {
-    // Variable might not exist yet (before safety monitor initializes it)
     return null;
   }
 }
-

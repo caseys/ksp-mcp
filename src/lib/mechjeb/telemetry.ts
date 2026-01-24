@@ -8,6 +8,7 @@ import type { KosConnection } from '../../transport/kos-connection.js';
 import type { VesselState, OrbitInfo, MechJebInfo } from '../types.js';
 import type { TargetEncounterInfo, BodyEncounterInfo, VesselEncounterInfo } from './shared.js';
 import type { StatusData } from '../../utils/mcp-status.js';
+export type { StatusData } from '../../utils/mcp-status.js';
 import { parseNumber } from './shared.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
@@ -65,25 +66,6 @@ function getReentryDisplayStatus(
   return vesselStatus.toUpperCase();
 }
 
-// TypeScript-side telemetry cache
-// - Avoids kOS limitations (CONFIG: only for built-in settings, GLOBAL clears on Ctrl+C)
-// - Benefits MCP server (long-lived process) with rapid repeated status calls
-// - CLI runs are separate processes, so they don't benefit from this cache
-let telemetryCache: { result: ShipTelemetry; timestamp: number } | null = null;
-const TELEMETRY_CACHE_TTL_MS = 5000; // 5 seconds
-const BLACKOUT_CACHE_TTL_MS = 120_000; // 2 minutes - longer TTL for blackout fallback
-
-/**
- * Get cached telemetry if available and within blackout TTL.
- * Used by status tool to return cached data immediately during blackout.
- */
-export function getCachedTelemetry(): { result: ShipTelemetry; timestamp: number } | null {
-  const now = Date.now();
-  if (telemetryCache && (now - telemetryCache.timestamp) < BLACKOUT_CACHE_TTL_MS) {
-    return telemetryCache;
-  }
-  return null;
-}
 
 /**
  * Query multiple values in a batch (comma-separated)
@@ -95,14 +77,16 @@ async function queryNumbers(
   timeoutMs: number = config.timeouts.command
 ): Promise<number[]> {
   const expr = suffixes.map(s => s).join(' + "," + ');
-  const result = await conn.execute(`PRINT ${expr}.`, timeoutMs);
+  // Use queue() for clean output - no echo interference with commas
+  const result = await conn.queue(`PRINT ${expr}.`, timeoutMs);
 
-  // Parse comma-separated values
-  // Note: output includes command echo which may contain commas, so take only last N values
-  const allParts = result.output.split(',');
-  const valueParts = allParts.slice(-suffixes.length);
-  const values = valueParts.map(s => parseNumber(s.trim()));
-  return values;
+  if (!result.success) {
+    return suffixes.map(() => 0);
+  }
+
+  // Parse comma-separated values - clean output from queue()
+  const parts = result.output.split(',');
+  return parts.map(s => parseNumber(s.trim()));
 }
 
 /**
@@ -188,8 +172,9 @@ export async function getOrbitInfo(conn: KosConnection): Promise<OrbitInfo> {
  */
 async function safeQueryNumber(conn: KosConnection, suffix: string): Promise<number> {
   try {
-    const result = await conn.execute(`PRINT ${suffix}.`, 2000);
-    if (result.error) return 0;
+    // Use queue() for clean output extraction
+    const result = await conn.queue(`PRINT ${suffix}.`, 2000);
+    if (!result.success) return 0;
     return parseNumber(result.output);
   } catch {
     return 0;
@@ -336,6 +321,197 @@ function formatDistance(meters: number): string {
 }
 
 /**
+ * Convert kOS JSON format to standard JSON structure.
+ *
+ * Handles both raw WRITEJSON format and stripped format:
+ *   Raw:     {"entries": [{value: "key", $type: ...}, {value: val, $type: ...}], $type: ...}
+ *   Stripped: {"entries": ["key", val, "key", val]}
+ *   Output:  {"key": val, "key": val}
+ *
+ * Also handles Lists:
+ *   Raw:     {"items": [{value: X}, ...], $type: "kOS...List"}
+ *   Output:  [X, ...]
+ */
+function convertKosJson(obj: unknown): unknown {
+  if (obj === null || obj === undefined) return obj;
+  if (typeof obj !== 'object') return obj;
+
+  const record = obj as Record<string, unknown>;
+
+  // Handle kOS value wrapper: {value: X, $type: "..."}
+  // This unwraps the inner value
+  if ('value' in record && '$type' in record && Object.keys(record).length === 2) {
+    return convertKosJson(record.value);
+  }
+
+  // Check if it's a kOS Lexicon (has entries array)
+  if ('entries' in record && Array.isArray(record.entries)) {
+    const entries = record.entries as unknown[];
+    const result: Record<string, unknown> = {};
+    // entries is [key, value, key, value, ...] where each might be wrapped
+    for (let i = 0; i < entries.length; i += 2) {
+      const key = convertKosJson(entries[i]) as string;
+      const value = convertKosJson(entries[i + 1]);
+      result[key] = value;
+    }
+    return result;
+  }
+
+  // Check if it's a kOS List (has items array)
+  if ('items' in record && Array.isArray(record.items)) {
+    return (record.items as unknown[]).map(item => convertKosJson(item));
+  }
+
+  // Regular array
+  if (Array.isArray(obj)) {
+    return obj.map(item => convertKosJson(item));
+  }
+
+  // Regular object - recurse into properties, skip $type
+  const result: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (key === '$type') continue; // Skip type annotations
+    result[key] = convertKosJson(value);
+  }
+  return result;
+}
+
+/**
+ * Get raw status data from mcp_status.ks script.
+ * Handles auto-redeploy of outdated scripts.
+ *
+ * @param conn kOS connection
+ * @param timeoutMs Timeout for status script execution
+ * @returns Raw StatusData from the status script
+ */
+export async function getStatusData(
+  conn: KosConnection,
+  timeoutMs = 5000
+): Promise<StatusData> {
+  let data: StatusData | null = null;
+  let lastError = '';
+  let needsRedeploy = false;
+
+  for (let attempt = 1; attempt <= 10; attempt++) {
+    // Small delay between retries to let connection stabilize
+    if (attempt > 1) {
+      await new Promise(r => setTimeout(r, 50));
+    }
+    // Run status script - try volume 1 first (faster, survives radio blackout)
+    // If only on volume 0 (archive), copy to volume 1 for next time, then run from volume 0
+    // Uses queue() because we need to parse the JSON output from the script
+    const statusResult = await conn.queue(
+      'IF EXISTS("1:/mcp_status.ks") { RUNPATH("1:/mcp_status.ks"). } ELSE IF EXISTS("0:/mcp_status.ks") { COPYPATH("0:/mcp_status.ks", "1:/mcp_status.ks"). RUNPATH("0:/mcp_status.ks"). }',
+      timeoutMs
+    );
+
+    // Check for radio loss - don't retry, fail immediately
+    if (statusResult.error?.includes('Radio loss detected')) {
+      throw new Error(statusResult.error);
+    }
+
+    // Check for missing script - needs deployment
+    // With the new EXISTS-guarded command, if neither volume has the script,
+    // there's no RUNPATH executed and no JSON output, just command echo
+    const fileNotFound = /File.*mcp_status\.ks.*not found/i;
+    const hasJsonOutput = statusResult.output.includes('"v"') || statusResult.output.includes('"entries"');
+    if (fileNotFound.test(statusResult.output) ||
+        fileNotFound.test(statusResult.error || '') ||
+        (!hasJsonOutput && !statusResult.output.includes('[MCP_STATUS_END]'))) {
+      needsRedeploy = true;
+      lastError = 'status script not found';
+      break; // Don't retry, need deploy
+    }
+
+    // Check for outdated script (old STATUS_COMPACT format)
+    if (statusResult.output.includes('STATUS_COMPACT:')) {
+      needsRedeploy = true;
+      lastError = 'outdated status script format';
+      break; // Don't retry, need redeploy
+    }
+
+    // Parse JSON output - handles both:
+    // 1. Raw WRITEJSON format: {"entries": [...], "$type": "..."}
+    // 2. Stripped format: {"v":"...", "soi":"...", ...}
+    const endMarkerIdx = statusResult.output.indexOf('[MCP_STATUS_END]');
+    const outputToParse = endMarkerIdx > 0
+      ? statusResult.output.slice(0, Math.max(0, endMarkerIdx))
+      : statusResult.output;
+
+    // Find the JSON object - try stripped format first (starts with {"v"), then raw kOS format
+    let firstBrace = outputToParse.indexOf('{"v"');
+    let isStripped = true;
+    if (firstBrace < 0) {
+      firstBrace = outputToParse.indexOf('{"entries"');
+      isStripped = false;
+    }
+    const lastBrace = outputToParse.lastIndexOf('}');
+
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      const jsonStr = outputToParse.slice(firstBrace, lastBrace + 1);
+      try {
+        const parsed = JSON.parse(jsonStr);
+        // Convert kOS format if needed, or use directly if already stripped
+        data = isStripped ? parsed as StatusData : convertKosJson(parsed) as StatusData;
+        break; // Success
+      } catch (e) {
+        lastError = `JSON parse error: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
+
+    // Check if kOS threw the known string index error
+    if (statusResult.output.includes('Start index cannot be')) {
+      lastError = 'kOS string handling bug - retrying';
+      continue;
+    }
+
+    if (firstBrace < 0 || lastBrace <= firstBrace) {
+      lastError = 'no JSON object in output';
+    }
+  }
+
+  // If script is outdated, redeploy and retry
+  if (needsRedeploy) {
+    const { ensureStatusScript } = await import('../../utils/deploy.js');
+    const deployed = await ensureStatusScript(conn);
+    if (deployed) {
+      // Retry with new script - try volume 1 first (faster), fall back to volume 0
+      // ensureStatusScript deploys to volume 0 and tries to copy to volume 1,
+      // but copy may fail, so we check both paths
+      // Uses queue() because we need to parse script JSON output
+      const retryResult = await conn.queue(
+        'IF EXISTS("1:/mcp_status.ks") { RUNPATH("1:/mcp_status.ks"). } ELSE IF EXISTS("0:/mcp_status.ks") { RUNPATH("0:/mcp_status.ks"). } ELSE { PRINT "ERROR: mcp_status.ks not found on any volume". }',
+        timeoutMs
+      );
+      const endIdx = retryResult.output.indexOf('[MCP_STATUS_END]');
+      const toParse = endIdx > 0 ? retryResult.output.slice(0, Math.max(0, endIdx)) : retryResult.output;
+      // Try stripped format first, then raw kOS format
+      let first = toParse.indexOf('{"v"');
+      let stripped = true;
+      if (first < 0) {
+        first = toParse.indexOf('{"entries"');
+        stripped = false;
+      }
+      const last = toParse.lastIndexOf('}');
+      if (first >= 0 && last > first) {
+        try {
+          const parsed = JSON.parse(toParse.slice(first, last + 1));
+          data = stripped ? parsed as StatusData : convertKosJson(parsed) as StatusData;
+        } catch {
+          // Fall through to error
+        }
+      }
+    }
+  }
+
+  if (!data) {
+    throw new Error(`Telemetry error: status script failed (${lastError})`);
+  }
+
+  return data;
+}
+
+/**
  * Get structured ship telemetry with formatted output.
  *
  * Returns structured data for programmatic use plus a human-readable formatted string.
@@ -344,63 +520,10 @@ export async function getShipTelemetry(
   conn: KosConnection,
   options: ShipTelemetryOptions = {}
 ): Promise<ShipTelemetry> {
-  const { timeoutMs = 2500 } = options;
+  const { timeoutMs = 5000 } = options;
   const lines: string[] = [];
 
-  // Flush any stale data - reduced from 100ms to 10ms for performance
-  await conn.flushStaleData(10);
-
-  // ============================================================================
-  // TypeScript-side caching - return cached telemetry if fresh
-  // ============================================================================
-  const now = Date.now();
-  if (telemetryCache && (now - telemetryCache.timestamp) < TELEMETRY_CACHE_TTL_MS) {
-    return telemetryCache.result;
-  }
-
-  // ============================================================================
-  // SINGLE STATUS QUERY: kOS writes JSON to file, copies to archive if connected
-  // ============================================================================
-  // Run status script from local volume (extensionless - kOS prefers .ksm, falls back to .ks)
-  // Retry up to 3 times due to intermittent kOS string handling bug
-  let data: StatusData | null = null;
-  let lastError = '';
-
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    // Run status script - kOS builds status data and prints as JSON
-    const statusResult = await conn.execute(
-      'RUNPATH("1:/boot/mcp_status").',
-      timeoutMs
-    );
-
-    // Parse STATUS_COMPACT from terminal output (standard JSON built from lexicon)
-    const compactMatch = statusResult.output.match(/STATUS_COMPACT:(\{[^}]+\})/);
-    if (compactMatch) {
-      try {
-        // kOS uses True/False, JSON requires true/false
-        const jsonStr = compactMatch[1].replaceAll(/:True([,}])/g, ':true$1').replaceAll(/:False([,}])/g, ':false$1');
-        data = JSON.parse(jsonStr) as StatusData;
-        break; // Success
-      } catch (e) {
-        lastError = `Compact JSON parse error: ${e instanceof Error ? e.message : String(e)}`;
-      }
-    }
-
-    // Check if kOS threw the known string index error
-    if (statusResult.output.includes('Start index cannot be')) {
-      lastError = 'kOS string handling bug - retrying';
-      await new Promise(r => setTimeout(r, 100)); // Brief pause before retry
-      continue;
-    }
-
-    if (!compactMatch) {
-      lastError = 'no STATUS_COMPACT in output';
-    }
-  }
-
-  if (!data) {
-    throw new Error(`Telemetry error: status script failed (${lastError})`);
-  }
+  const data = await getStatusData(conn, timeoutMs);
 
   // Map JSON fields to local variables for existing code compatibility
   const soi = data.soi;
@@ -663,31 +786,15 @@ export async function getShipTelemetry(
   }
 
   // ============================================================================
-  // AVAILABLE TARGETS (with SOI-based caching)
+  // AVAILABLE TARGETS (from status data - no separate query needed)
   // ============================================================================
   const availableTargets: AvailableTargets = { moons: [], planets: [], vessels: [] };
   try {
-    const { getCachedTargets, setCachedTargets } = await import('../cache/targets-cache.js');
-    const cachedTargets = getCachedTargets(soi);
-
-    if (cachedTargets) {
-      // Use cached data
-      availableTargets.moons = cachedTargets.moons.map(m => m.name);
-      availableTargets.planets = cachedTargets.planets
-        .map(p => p.name)
-        .filter(name => name.toLowerCase() !== soiParent.toLowerCase());
-      availableTargets.vessels = cachedTargets.vessels.map(v => v.name);
-    } else {
-      // Fresh query and cache
-      const { listTargets } = await import('../kos/target/get-targets.js');
-      const targets = await listTargets(conn);
-      setCachedTargets(soi, targets);
-
-      availableTargets.moons = targets.moons.map((m: { name: string }) => m.name);
-      availableTargets.planets = targets.planets
-        .map((p: { name: string }) => p.name)
-        .filter((name: string) => name.toLowerCase() !== soiParent.toLowerCase());
-      availableTargets.vessels = targets.vessels.map((v: { name: string }) => v.name);
+    // Use targets from status data (already fetched)
+    for (const t of data.targets || []) {
+      if (t.type === 'moon') availableTargets.moons.push(t.name);
+      else if (t.type === 'planet' && t.name.toLowerCase() !== soiParent.toLowerCase()) availableTargets.planets.push(t.name);
+      else if (t.type === 'vessel') availableTargets.vessels.push(t.name);
     }
 
     lines.push('', 'AVAILABLE TARGETS:');
@@ -709,9 +816,6 @@ export async function getShipTelemetry(
     availableTargets,
     formatted: lines.join('\n'),
   };
-
-  // Cache the result for rapid repeated calls
-  telemetryCache = { result, timestamp: Date.now() };
 
   return result;
 }
@@ -736,42 +840,6 @@ export async function getStatus(
     return await getShipTelemetry(conn, options);
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error);
-    const reasonLower = reason.toLowerCase();
-
-    // Determine error type from message content
-    const isBlackout = reasonLower.includes('blackout') || reasonLower.includes('signal');
-    const isPowerLoss = reasonLower.includes('power') || reasonLower.includes('batteries');
-    const isCrash = reasonLower.includes('crash');
-
-    // Check if we have a cached result to show
-    const now = Date.now();
-    if (telemetryCache && (now - telemetryCache.timestamp) < BLACKOUT_CACHE_TTL_MS) {
-      const ageSeconds = Math.round((now - telemetryCache.timestamp) / 1000);
-
-      // Build header based on error type
-      let header: string;
-      let displayReason: string;
-      if (isBlackout) {
-        header = '=== RADIO BLACKOUT ===';
-        displayReason = 'Radio blackout - showing cached status';
-      } else if (isPowerLoss) {
-        header = '=== NO POWER ===';
-        displayReason = 'Vessel has no power - showing cached status';
-      } else if (isCrash) {
-        header = '=== VESSEL CRASHED ===';
-        displayReason = 'Vessel crashed - showing last known status';
-      } else {
-        header = '=== CONNECTION ERROR ===';
-        displayReason = `${reason} - showing cached status`;
-      }
-
-      return {
-        ...telemetryCache.result,
-        connected: false,
-        reason: displayReason,
-        formatted: `${header}\nLast contact: ${ageSeconds}s ago\n\n${telemetryCache.result.formatted}`,
-      };
-    }
 
     return {
       connected: false,
@@ -893,59 +961,66 @@ async function queryMechJebAutopilotStatus(
   try {
     switch (opType) {
       case 'ascent': {
-        const result = await conn.execute(
+        // Use queue() for clean output extraction
+        const result = await conn.queue(
           'PRINT ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
           3000
         );
-        const match = result.output.match(/(True|False)\|([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/i);
-        if (match) {
-          const enabled = match[1].toLowerCase() === 'true';
-          const status = match[2].trim() || 'Ascending';
-          const apo = parseNumber(match[3]);
-          const alt = parseNumber(match[4]);
-          const detail = `Alt: ${(alt/1000).toFixed(1)}km, Apo: ${(apo/1000).toFixed(1)}km`;
-          return { enabled, status, detail };
+        if (result.success) {
+          const parts = result.output.split('|');
+          if (parts.length >= 4) {
+            const enabled = parts[0].toLowerCase() === 'true';
+            const status = parts[1].trim() || 'Ascending';
+            const apo = parseNumber(parts[2]);
+            const alt = parseNumber(parts[3]);
+            const detail = `Alt: ${(alt/1000).toFixed(1)}km, Apo: ${(apo/1000).toFixed(1)}km`;
+            return { enabled, status, detail };
+          }
         }
         break;
       }
       case 'landing': {
-        const result = await conn.execute(
+        // Use queue() for clean output extraction
+        const result = await conn.queue(
           'PRINT ADDONS:MJ:LANDING:ENABLED + "|" + ADDONS:MJ:LANDING:STATUS + "|" + ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
           3000
         );
-        const match = result.output.match(/(True|False)\|([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/i);
-        if (match) {
-          const enabled = match[1].toLowerCase() === 'true';
-          const mjStatus = match[2].trim();
-          const alt = parseNumber(match[3]);
-          const vspeed = parseNumber(match[4]);
-          // Use actual MechJeb status, fallback to generic if empty
-          const status = mjStatus || (enabled ? 'Landing' : 'Idle');
-          const detail = `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${fmtVel(vspeed)}`;
-          return { enabled, status, detail };
+        if (result.success) {
+          const parts = result.output.split('|');
+          if (parts.length >= 4) {
+            const enabled = parts[0].toLowerCase() === 'true';
+            const mjStatus = parts[1].trim();
+            const alt = parseNumber(parts[2]);
+            const vspeed = parseNumber(parts[3]);
+            const status = mjStatus || (enabled ? 'Landing' : 'Idle');
+            const detail = `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${fmtVel(vspeed)}`;
+            return { enabled, status, detail };
+          }
         }
         break;
       }
       case 'node': {
-        const result = await conn.execute(
+        // Use queue() for clean output extraction
+        const result = await conn.queue(
           'PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0).',
           3000
         );
-        const match = result.output.match(/(True|False)\|(\w+)\|([\d.]+)/i);
-        if (match) {
-          const enabled = match[1].toLowerCase() === 'true';
-          const state = match[2].trim();
-          const dvRemaining = parseNumber(match[3]);
-          // Translate MechJeb states to plain English
-          let status = state;
-          switch (state.toUpperCase()) {
-            case 'WARPALIGN': status = 'Aligning'; break;
-            case 'LEAD': status = 'Coasting to burn'; break;
-            case 'BURN': status = 'Burning'; break;
-            case 'IDLE': status = 'Idle'; break;
+        if (result.success) {
+          const parts = result.output.split('|');
+          if (parts.length >= 3) {
+            const enabled = parts[0].toLowerCase() === 'true';
+            const state = parts[1].trim();
+            const dvRemaining = parseNumber(parts[2]);
+            let status = state;
+            switch (state.toUpperCase()) {
+              case 'WARPALIGN': status = 'Aligning'; break;
+              case 'LEAD': status = 'Coasting to burn'; break;
+              case 'BURN': status = 'Burning'; break;
+              case 'IDLE': status = 'Idle'; break;
+            }
+            const detail = dvRemaining > 0 ? `ΔV remaining: ${fmtVel(dvRemaining)}` : undefined;
+            return { enabled, status, detail };
           }
-          const detail = dvRemaining > 0 ? `ΔV remaining: ${fmtVel(dvRemaining)}` : undefined;
-          return { enabled, status, detail };
         }
         break;
       }
@@ -967,33 +1042,37 @@ async function queryMechJebAutopilotStatus(
  */
 async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: KosOperationType; status: string; detail?: string } | null> {
   try {
-    // Single query to check all autopilot enabled states + node state
-    const result = await conn.execute(
-      'PRINT "MJ:" + ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:LANDING:ENABLED + "|" + ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0).',
+    // Use queue() for clean output - single query checks all autopilot states
+    const result = await conn.queue(
+      'PRINT ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:LANDING:ENABLED + "|" + ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0).',
       2000
     );
-    const match = result.output.match(/MJ:(True|False)\|(True|False)\|(True|False)\|(\w+)\|([\d.]+)/i);
-    if (!match) return null;
+    if (!result.success) return null;
 
-    const ascentEnabled = match[1].toLowerCase() === 'true';
-    const landingEnabled = match[2].toLowerCase() === 'true';
-    const nodeEnabled = match[3].toLowerCase() === 'true';
-    const nodeState = match[4];
-    const nodeDv = parseNumber(match[5]);
+    const parts = result.output.split('|');
+    if (parts.length < 5) return null;
+
+    const ascentEnabled = parts[0].toLowerCase() === 'true';
+    const landingEnabled = parts[1].toLowerCase() === 'true';
+    const nodeEnabled = parts[2].toLowerCase() === 'true';
+    const nodeState = parts[3];
+    const nodeDv = parseNumber(parts[4]);
 
     // Check ascent (most likely during launch)
     if (ascentEnabled) {
       // Query ascent details only when needed
-      const statusResult = await conn.execute(
+      const statusResult = await conn.queue(
         'PRINT ADDONS:MJ:ASCENT:STATUS + "|" + ROUND(APOAPSIS) + "|" + ROUND(ALTITUDE).',
         2000
       );
-      const detailMatch = statusResult.output.match(/([^|]*)\|(-?[\d.]+)\|(-?[\d.]+)/);
-      if (detailMatch) {
-        const status = detailMatch[1].trim() || 'Ascending';
-        const apo = parseNumber(detailMatch[2]);
-        const alt = parseNumber(detailMatch[3]);
-        return { opType: 'ascent', status, detail: `Alt: ${(alt/1000).toFixed(1)}km, Apo: ${(apo/1000).toFixed(1)}km` };
+      if (statusResult.success) {
+        const detailParts = statusResult.output.split('|');
+        if (detailParts.length >= 3) {
+          const status = detailParts[0].trim() || 'Ascending';
+          const apo = parseNumber(detailParts[1]);
+          const alt = parseNumber(detailParts[2]);
+          return { opType: 'ascent', status, detail: `Alt: ${(alt/1000).toFixed(1)}km, Apo: ${(apo/1000).toFixed(1)}km` };
+        }
       }
       return { opType: 'ascent', status: 'Ascending' };
     }
@@ -1001,15 +1080,17 @@ async function detectMechJebOperation(conn: KosConnection): Promise<{ opType: Ko
     // Check landing
     if (landingEnabled) {
       // Query landing details only when needed
-      const statusResult = await conn.execute(
+      const statusResult = await conn.queue(
         'PRINT ROUND(ALTITUDE) + "|" + ROUND(SHIP:VERTICALSPEED).',
         2000
       );
-      const detailMatch = statusResult.output.match(/(-?[\d.]+)\|(-?[\d.]+)/);
-      if (detailMatch) {
-        const alt = parseNumber(detailMatch[1]);
-        const vspeed = parseNumber(detailMatch[2]);
-        return { opType: 'landing', status: 'Landing', detail: `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${fmtVel(vspeed)}` };
+      if (statusResult.success) {
+        const detailParts = statusResult.output.split('|');
+        if (detailParts.length >= 2) {
+          const alt = parseNumber(detailParts[0]);
+          const vspeed = parseNumber(detailParts[1]);
+          return { opType: 'landing', status: 'Landing', detail: `Alt: ${(alt/1000).toFixed(1)}km, VSpeed: ${fmtVel(vspeed)}` };
+        }
       }
       return { opType: 'landing', status: 'Landing' };
     }
@@ -1117,45 +1198,14 @@ export const statusTool: ToolDefinition = {
   tier: 2,
   handler: async (_args, ctx) => {
     try {
-      // Status tool handles blackout specially - returns cached data
-      const conn = await ctx.ensureConnected({ allowBlackout: true });
-      const { health } = conn.getState();
-
-      // If in blackout, return cached status immediately - don't try to query kOS
-      if (health?.reason === 'signal_lost') {
-        const cached = getCachedTelemetry();
-        if (cached) {
-          const ageSeconds = Math.round((Date.now() - cached.timestamp) / 1000);
-          return ctx.successResponse('status',
-            `=== RADIO BLACKOUT ===\n` +
-            `Last contact: ${ageSeconds}s ago\n\n` +
-            cached.result.formatted);
-        }
-        // No cache - return error message
-        return ctx.errorResponse('status', health.message);
-      }
-
-      // Get ship telemetry (returns cached data if fresh)
+      const conn = await ctx.ensureConnected();
       const telemetry = await getStatus(conn);
 
       if (!telemetry.connected) {
-        // Query failed - check if we got cached data or just an error
-        const hasCachedData = telemetry.formatted.includes('Last contact:');
-        if (hasCachedData) {
-          // Showing cached data is still useful, return as success
-          return ctx.successResponse('status', telemetry.formatted);
-        }
-        // No cached data - return as error
         return ctx.errorResponse('status', telemetry.reason ?? 'Connection failed');
       }
 
-      // Connected - check for active operation
-      const opProgress = await getOperationProgress(conn);
-      let output = telemetry.formatted;
-      if (opProgress) {
-        output = formatOperationProgress(opProgress) + '\n\n' + output;
-      }
-      return ctx.successResponse('status', output);
+      return ctx.successResponse('status', telemetry.formatted);
     } catch (error) {
       return ctx.errorResponse('status', error instanceof Error ? error.message : String(error));
     }

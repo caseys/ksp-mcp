@@ -22,13 +22,12 @@ export async function clearTarget(conn: KosConnection): Promise<ClearTargetResul
   await bringKspToForeground();
 
   // Try clearing five times with delays - the kOS bug is intermittent
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. SET TARGET TO "". WAIT 0.2. PRINT "CLEARED:" + (NOT HASTARGET).',
     5000
   );
 
-  const output = result.output.trim();
-  const cleared = output.includes('CLEARED:True') || output.toLowerCase().includes('cleared:true');
+  const cleared = result.success && result.output.toLowerCase().includes('cleared:true');
 
   if (!cleared) {
     return {

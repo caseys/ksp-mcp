@@ -59,8 +59,8 @@ export const inclinationTool: ToolDefinition = {
       );
 
       // Check current inclination to see if change is needed
-      const incCheck = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2).', 2000);
-      const currentInc = Number.parseFloat(incCheck.output.match(/[\d.]+/)?.[0] ?? '0');
+      const incCheck = await conn.queue('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2).', 2000);
+      const currentInc = incCheck.success ? Number.parseFloat(incCheck.output.match(/[\d.]+/)?.[0] ?? '0') : 0;
       const INCLINATION_TOLERANCE = 0.5; // 0.5 degree tolerance
 
       let result;
@@ -69,13 +69,13 @@ export const inclinationTool: ToolDefinition = {
       if (mode === 'match_planes') {
         // For match_planes, check if already matched with target
         if (target && target !== 'auto') {
-          await conn.execute(`SET TARGET TO ${target.includes(' ') ? `"${target}"` : target}.`, 3000);
+          await conn.raw(`SET TARGET TO ${target.includes(' ') ? `"${target}"` : target}.`, 3000);
         }
-        const targetIncCheck = await conn.execute(
+        const targetIncCheck = await conn.queue(
           'IF HASTARGET { PRINT ROUND(TARGET:ORBIT:INCLINATION, 2). } ELSE { PRINT "NOTGT". }',
           2000
         );
-        if (!targetIncCheck.output.includes('NOTGT')) {
+        if (targetIncCheck.success && !targetIncCheck.output.includes('NOTGT')) {
           const targetInc = Number.parseFloat(targetIncCheck.output.match(/[\d.]+/)?.[0] ?? '-999');
           if (Math.abs(currentInc - targetInc) < INCLINATION_TOLERANCE) {
             return ctx.successResponse('inclination',
@@ -120,8 +120,8 @@ export const inclinationTool: ToolDefinition = {
           }
 
           if (result.executed) {
-            const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2) + "|" + ROUND(TARGET:ORBIT:INCLINATION, 2).', 2000);
-            const match = incInfo.output.match(/([\d.]+)\|([\d.]+)/);
+            const incInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2) + "|" + ROUND(TARGET:ORBIT:INCLINATION, 2).', 2000);
+            const match = incInfo.success ? incInfo.output.match(/([\d.]+)\|([\d.]+)/) : null;
             if (match) {
               responseText += `\nInclination: ${match[1]}° (target: ${match[2]}°)`;
             }
@@ -150,8 +150,8 @@ export const inclinationTool: ToolDefinition = {
           }
 
           if (result.executed) {
-            const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 1).', 2000);
-            const inc = incInfo.output.trim();
+            const incInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:INCLINATION, 1).', 2000);
+            const inc = incInfo.success ? incInfo.output : '?';
             responseText += `\nInclination: ${inc}°`;
           }
         } else {

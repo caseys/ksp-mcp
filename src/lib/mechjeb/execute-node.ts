@@ -15,6 +15,7 @@ import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
+import { runAlignScript } from '../../utils/kos-scripts.js';
 export interface ExecuteNodeResult {
   success: boolean;
   nodesExecuted: number;
@@ -133,7 +134,8 @@ function parseUnitValue(output: string): number | null {
 
 /** Query periapsis in target SOI (for body encounters) */
 async function queryPeriapsis(conn: KosConnection): Promise<number | null> {
-  const result = await conn.execute('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
+  const result = await conn.queue('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
+  if (!result.success) return null;
   return parseUnitValue(result.output);
 }
 
@@ -158,20 +160,21 @@ async function limitEngineThrust(
   targetPercent: number,
   logger?: McpLogger
 ): Promise<void> {
+  // Limit ALL staged engines, not just ignited ones
+  // (engines aren't running yet when this is called - MechJeb starts them later)
   const script = `
     LOCAL count IS 0.
     FOR eng IN SHIP:ENGINES {
-      IF eng:IGNITION AND NOT eng:FLAMEOUT {
+      IF NOT eng:FLAMEOUT {
         SET eng:THRUSTLIMIT TO ${targetPercent}.
         SET count TO count + 1.
       }
     }
-    PRINT "THROTTLED|" + count.
+    PRINT count.
   `.trim().replaceAll('\n', ' ');
 
-  const result = await conn.execute(script, 5000);
-  const match = result.output.match(/THROTTLED\|(\d+)/);
-  const count = match ? parseInt(match[1]) : 0;
+  const result = await conn.queue(script, 5000);
+  const count = result.success ? parseInt(result.output) || 0 : 0;
 
   if (count > 0) {
     logger?.progress(`[Maneuver] Limited ${count} engine(s) to ${targetPercent}% thrust`);
@@ -182,7 +185,7 @@ async function limitEngineThrust(
  * Restore engine thrust limits to 100%.
  */
 async function restoreEngineThrust(conn: KosConnection, logger?: McpLogger): Promise<void> {
-  await conn.execute(`
+  await conn.raw(`
     FOR eng IN SHIP:ENGINES {
       SET eng:THRUSTLIMIT TO 100.
     }
@@ -329,7 +332,7 @@ export async function rcsFineTune(
     }
 
     // Pulse RCS
-    await conn.execute(`SET SHIP:CONTROL:${controlSuffix} TO ${direction}. WAIT ${pulseDuration.toFixed(3)}. SET SHIP:CONTROL:${controlSuffix} TO 0.`);
+    await conn.raw(`SET SHIP:CONTROL:${controlSuffix} TO ${direction}. WAIT ${pulseDuration.toFixed(3)}. SET SHIP:CONTROL:${controlSuffix} TO 0.`);
     pulseCount++;
     lastValue = currentValue;
 
@@ -375,35 +378,30 @@ const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 
 // Alignment configuration
 const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
-const ALIGN_POLL_INTERVAL = 600; // ms - poll interval for alignment
-const MODE_SWITCH_INTERVAL = 2; // switch steering mode every N poll cycles
-
-/** Steering mode for alignment */
-type SteeringMode = 'lock' | 'sas';
 
 // WARPALIGN stuck detection configuration
 const WARPALIGN_STUCK_THRESHOLD = 3; // Warn after 3 polls with no angle change (~6 seconds)
 
 /**
- * Align ship to maneuver node using alternating steering modes.
+ * Align ship to maneuver node using mcp-align.ks script.
  *
- * Approach:
- * - Enable physics warp x2 at start for faster rotation
- * - Alternate between LOCK STEERING and SAS MANEUVER when stuck
- * - RCS pulses in both modes (unless noRcs)
- * - Reset to rails warp x1 at end
+ * The script handles:
+ * - SAS MANEUVER detection and fallback to kOS steering
+ * - Physics warp for faster rotation
+ * - RCS assist modes
+ * - Watchdog for stuck steering
  *
  * @param conn kOS connection
  * @param logger Optional MCP logger for progress updates
  * @param logPrefix Prefix for log messages (e.g., '[Maneuver]')
- * @param noRcs If true, don't use RCS during alignment (for small burns)
+ * @param rcsMode RCS mode for alignment (0=off, 1=on, 2=burst, 3=pulse)
  */
-async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]', noRcs = false): Promise<boolean> {
+async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]', rcsMode = 1): Promise<boolean> {
   const log = logger ?? nullLogger;
 
   // Verify node exists before trying to align
-  const nodeCheck = await conn.execute('PRINT HASNODE.');
-  if (!nodeCheck.output.includes('True')) {
+  const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
+  if (!nodeCheck.success || !nodeCheck.output.includes('True')) {
     log.error(`${logPrefix} No maneuver node exists!`);
     return false;
   }
@@ -412,144 +410,19 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
   log.progress(`${logPrefix} Aligning to burn vector (${fmtNum(initialAngle)}°)...`);
 
-  // Check if vessel supports SAS MANEUVER mode
-  const sasCapabilityCheck = await conn.execute(`
-    LOCAL has_sas3 IS FALSE.
-    FOR c IN SHIP:CREW {
-      IF c:TRAIT = "Pilot" AND c:EXPERIENCE >= 3 { SET has_sas3 TO TRUE. BREAK. }
+  // Run alignment script
+  const result = await runAlignScript(conn, rcsMode, true);
+
+  if (result.success) {
+    log.progress(`${logPrefix} Aligned via ${result.method} (${fmtNum(result.errorAngle)}°)`);
+    return result.errorAngle < ALIGN_THRESHOLD;
+  } else {
+    log.error(`${logPrefix} Alignment failed`);
+    // Log any output for debugging
+    if (result.output) {
+      log.debug(`${logPrefix} Script output: ${result.output.slice(0, 200)}`);
     }
-    IF NOT has_sas3 {
-      FOR p IN SHIP:PARTS {
-        IF p:HASMODULE("ModuleCommand") {
-          LOCAL m IS p:GETMODULE("ModuleCommand").
-          IF m:HASFIELD("minimumCrew") AND m:GETFIELD("minimumCrew") = 0 {
-            IF p:NAME:CONTAINS("hecs2") OR p:NAME:CONTAINS("HECS2") OR
-               p:NAME:CONTAINS("rc001") OR p:NAME:CONTAINS("RC-001") OR
-               p:NAME:CONTAINS("rc-l01") OR p:NAME:CONTAINS("RC-L01") OR
-               p:NAME:CONTAINS("droneCore") OR p:NAME:CONTAINS("mk2") OR p:NAME:CONTAINS("mk3") {
-              SET has_sas3 TO TRUE. BREAK.
-            }
-          }
-        }
-      }
-    }
-    PRINT "SAS3:" + has_sas3.
-  `.replaceAll('\n', ' '), 5000);
-
-  const supportsSasManeuver = sasCapabilityCheck.output.includes('SAS3:True');
-
-  // ========== ENABLE PHYSICS WARP AT START ==========
-  try {
-    await conn.execute('SAS OFF. UNLOCK STEERING. SET WARPMODE TO "PHYSICS". SET WARP TO 1.');
-  } catch { /* ignore warp errors */ }
-
-  // Start with LOCK STEERING mode
-  // Use object to avoid TypeScript control flow narrowing issues with async callbacks
-  const state = { currentMode: 'lock' as SteeringMode, pollCount: 0 };
-  let lastAngle = initialAngle;
-
-  /** Switch to LOCK STEERING mode */
-  async function switchToLock(): Promise<void> {
-    const script = `
-      SAS OFF. WAIT 0.1.
-      LOCAL frozenTop IS SHIP:FACING:TOPVECTOR.
-      LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, frozenTop).
-    `.trim().replaceAll('\n', ' ');
-    await conn.execute(script, 3000);
-    state.currentMode = 'lock';
-  }
-
-  /** Switch to SAS MANEUVER mode */
-  async function switchToSas(): Promise<void> {
-    await conn.execute('UNLOCK STEERING. SAS ON. WAIT 0.2. SET SASMODE TO "MANEUVER".', 3000);
-    state.currentMode = 'sas';
-  }
-
-  // Initialize LOCK STEERING
-  const initScript = `
-    SAS OFF. WAIT 0.1.
-    LOCAL frozenTop IS SHIP:FACING:TOPVECTOR.
-    LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, frozenTop).
-  `.trim().replaceAll('\n', ' ');
-  await conn.execute(initScript, 3000);
-
-  interface AlignState {
-    angle: number;
-    aligned: boolean;
-  }
-
-  const alignResult = await pollWithBlackoutResilience<AlignState>({
-    poll: async () => {
-      const result = await conn.execute('PRINT VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR).', 2000);
-      const angle = parseNumber(result.output);
-      // Protect against spurious 0 readings
-      const effectiveAngle = (angle === 0 && lastAngle > 10) ? lastAngle : angle;
-      return { angle: effectiveAngle, aligned: effectiveAngle < ALIGN_THRESHOLD };
-    },
-    isDone: (s) => s.aligned,
-    isSuccess: (s) => s.aligned,
-    timeoutMs: 60_000,  // 60 seconds max
-    pollIntervalMs: ALIGN_POLL_INTERVAL,
-    logger: log,
-    context: 'Align',
-    connection: conn,
-    onPoll: async (s) => {
-      state.pollCount++;
-
-      if (s.aligned) {
-        log.progress(`${logPrefix} Aligned (${fmtNum(s.angle)}°)`);
-        return;
-      }
-
-      // Log progress periodically (every ~15° or every 5 polls)
-      const angleChanged = lastAngle - s.angle >= 15;
-      if (angleChanged || state.pollCount % 5 === 0) {
-        log.progress(`${logPrefix} Aligning: ${fmtNum(s.angle)}° (${state.currentMode})`);
-      }
-
-      lastAngle = s.angle;
-
-      // RCS pulse to help rotation (in both modes, unless noRcs)
-      if (!noRcs) {
-        try { await conn.execute('RCS ON. WAIT 0.12. RCS OFF.'); } catch { /* ignore */ }
-      }
-
-      // Switch steering mode every MODE_SWITCH_INTERVAL polls
-      if (state.pollCount % MODE_SWITCH_INTERVAL === 0) {
-        if (state.currentMode === 'lock' && supportsSasManeuver) {
-          await switchToSas();
-        } else {
-          await switchToLock();
-        }
-      }
-    },
-  });
-
-  // ========== CLEANUP: RESET TO RAILS WARP ==========
-  try {
-    await conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".');
-  } catch { /* ignore warp errors */ }
-
-  // Clean up steering
-  try {
-    if (state.currentMode === 'sas') {
-      await conn.execute('SAS OFF.');
-    } else {
-      await conn.execute('UNLOCK STEERING. SAS OFF.');
-    }
-  } catch { /* ignore */ }
-
-  // Ensure RCS is off
-  try {
-    await conn.execute('RCS OFF.');
-  } catch { /* ignore */ }
-
-  // Final verification
-  try {
-    const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-    return finalAngle < ALIGN_THRESHOLD;
-  } catch {
-    return alignResult.success;
+    return false;
   }
 }
 
@@ -593,14 +466,16 @@ export async function executeNode(
   const log = logger ?? nullLogger;
   const logPrefix = callerTool ? `[${callerTool} Maneuver]` : '[Maneuver]';
   // Check if a node exists
-  const nodeCheck = await conn.execute('PRINT HASNODE.', 2000);
-  if (!nodeCheck.output.includes('True')) {
+  const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
+  if (!nodeCheck.success || !nodeCheck.output.includes('True')) {
     return { success: false, nodesExecuted: 0, error: 'No maneuver node found' };
   }
 
   // Get initial node count
-  const initialCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-  const initialNodeCount = Number.parseInt(initialCountResult.output.match(/\d+/)?.[0] || '1');
+  const initialCountResult = await conn.queue('PRINT ALLNODES:LENGTH.', 2000);
+  const initialNodeCount = initialCountResult.success
+    ? Number.parseInt(initialCountResult.output.match(/\d+/)?.[0] || '1')
+    : 1;
 
   // Delta-v validation - use total ship delta-v for reliability
   const dvRequired = await queryNumber(conn, 'NEXTNODE:DELTAV:MAG');
@@ -628,26 +503,100 @@ export async function executeNode(
   const needsStaging = dvCurrentStage < dvRequired && dvShipTotal >= dvRequired;
   if (needsStaging) {
     log.progress(`${logPrefix} Multi-stage burn (staging automated)`);
-    await conn.execute('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
+    await conn.raw('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
   }
 
   // Get estimated burn duration from MechJeb INFO wrapper
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
 
-  // For small burns (< 10 m/s), skip RCS during alignment as it would affect trajectory more than the burn
-  const skipRcsForSmallBurn = dvRequired < 10;
-  const useNoRcs = noRcsAlign || skipRcsForSmallBurn;
+  // RCS mode for alignment:
+  // - Tiny burns (< 1 m/s): mode 0 (no RCS) - RCS would overpower the burn
+  // - Small burns (< 10 m/s): mode 1 (RCS on) for gentle, continuous alignment
+  // - Normal burns: mode 3 (pulsed RCS) for faster alignment
+  const isTinyBurn = dvRequired < 1;
+  const isSmallBurn = dvRequired < 10;
+  const rcsMode = noRcsAlign || isTinyBurn ? 0 : (isSmallBurn ? 1 : 3);
 
-  // Best-effort alignment before warp - MechJeb will handle final alignment
-  // We don't fail on alignment issues since MechJeb's executor has its own alignment phase
-  await alignToNode(conn, logger, logPrefix, useNoRcs).catch(() => {
-    log.warn(`${logPrefix} Pre-alignment failed, MechJeb will align during execution`);
-  });
+  // Align to node BEFORE enabling MechJeb executor
+  // MechJeb's WARPALIGN can get stuck - we want to be aligned before starting
+  const MAX_ALIGN_ATTEMPTS = 3;
+  let aligned = false;
+
+  for (let alignAttempt = 1; alignAttempt <= MAX_ALIGN_ATTEMPTS; alignAttempt++) {
+    const alignResult = await alignToNode(conn, logger, logPrefix, rcsMode);
+
+    if (alignResult) {
+      aligned = true;
+      break;
+    }
+
+    // Verify actual angle - script may have failed but vessel might be aligned
+    const actualAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+    if (actualAngle < ALIGN_THRESHOLD) {
+      log.progress(`${logPrefix} Aligned (${fmtNum(actualAngle)}°)`);
+      aligned = true;
+      break;
+    }
+
+    if (alignAttempt < MAX_ALIGN_ATTEMPTS) {
+      log.warn(`${logPrefix} Alignment incomplete (${fmtNum(actualAngle)}°), retrying...`);
+      await delay(1000);
+    } else {
+      log.warn(`${logPrefix} Alignment failed after ${MAX_ALIGN_ATTEMPTS} attempts (${fmtNum(actualAngle)}°)`);
+    }
+  }
+
+  // Final alignment gate - don't proceed until aligned
+  if (!aligned) {
+    const finalAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
+    if (finalAngle >= ALIGN_THRESHOLD) {
+      // Query diagnostics to help understand why alignment failed
+      let diagnostics = '';
+      try {
+        const diagResult = await conn.queue(
+          'PRINT ROUND(SHIP:ANGULARVEL:MAG, 3) + "|" + SAS + "|" + RCS + "|" + ' +
+          'ROUND(SHIP:ELECTRICCHARGE, 0) + "|" + SHIP:CONTROL:NEUTRAL.',
+          3000
+        );
+        // Parse "angVel|sas|rcs|charge|neutral" format
+        const diagMatch = diagResult.success
+          ? diagResult.output.match(/([\d.]+)\|(True|False)\|(True|False)\|(\d+)\|(True|False)/i)
+          : null;
+        if (diagMatch) {
+          const angVel = parseFloat(diagMatch[1]);
+          const sasOn = diagMatch[2].toLowerCase() === 'true';
+          const rcsOn = diagMatch[3].toLowerCase() === 'true';
+          const elecCharge = parseInt(diagMatch[4]);
+          const controlNeutral = diagMatch[5].toLowerCase() === 'true';
+
+          const issues: string[] = [];
+          if (angVel < 0.001 && finalAngle > 10) issues.push('not rotating (stuck?)');
+          if (angVel > 0.5) issues.push(`spinning (${angVel.toFixed(2)} rad/s)`);
+          if (!sasOn && !rcsOn) issues.push('no SAS or RCS');
+          if (elecCharge < 5) issues.push('no electric charge');
+          if (!controlNeutral) issues.push('controls not neutral');
+
+          if (issues.length > 0) {
+            diagnostics = ` [${issues.join(', ')}]`;
+          }
+        }
+      } catch { /* ignore diagnostic failures */ }
+
+      log.error(`${logPrefix} Cannot proceed - not aligned (${fmtNum(finalAngle)}°)${diagnostics}`);
+      await clearKosOperation(conn);
+      return {
+        success: false,
+        nodesExecuted: 0,
+        error: `Alignment failed: ${fmtNum(finalAngle)}° off target (need < ${ALIGN_THRESHOLD}°)${diagnostics}`,
+        deltaV: { required: dvRequired, available: dvShipTotal }
+      };
+    }
+  }
 
   // Check for encounter (kept for future RCS refinement re-enablement)
-  const _hasEncounter = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000)
-    .then(r => r.output.includes('True'))
+  const _hasEncounter = await conn.queue('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000)
+    .then(r => r.success && r.output.includes('True'))
     .catch(() => false);
 
   // For small burns, limit engine thrust to prevent overshooting
@@ -662,7 +611,7 @@ export async function executeNode(
   // MechJeb runs on the vessel autonomously once enabled
   // IMPORTANT: Unlock steering to prevent kOS steering from conflicting with MechJeb
   await stopWarp(conn);
-  await conn.execute('UNLOCK STEERING. SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+  await conn.raw('UNLOCK STEERING. SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
 
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
@@ -675,7 +624,7 @@ export async function executeNode(
     log.progress(`${logPrefix} Helm, course set for maneuver. Ignition in ${formatTime(nodeEta)}... Engage!`);
 
     const warpTargetSeconds = nodeEta - warpLeadTime;
-    await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
+    await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
 
     // Wait for warp to complete (poll until ETA is close)
     let warpAttempts = 0;
@@ -726,7 +675,7 @@ export async function executeNode(
       log.progress(`${logPrefix} Retry attempt ${attempt}/${MAX_RETRIES}`);
       try {
         await stopWarp(conn);
-        await conn.execute('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+        await conn.raw('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
       } catch {
         // May be in blackout - MechJeb will continue executing autonomously
         log.progress(`${logPrefix} No signal - executing autonomously`);
@@ -735,7 +684,7 @@ export async function executeNode(
 
     // Disabled: using kOS WARPTO instead of kickstart pulses
     // Warp assist: if node > 15s away, kickstart MechJeb warp handling
-    // const warpCheckResult = await conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 1500);
+    // const warpCheckResult = await conn.raw('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 1500);
     // const nodeEtaForWarp = Number.parseFloat(warpCheckResult.output.match(/\d[\d.]*/)?.[0] || '0');
     // if (nodeEtaForWarp > 15) {
     //   await delay(3000); // Let MechJeb take over steering first
@@ -769,10 +718,17 @@ export async function executeNode(
       poll: async () => {
         // Query MechJeb state first - this is most reliable for completion detection
         // Then query node if it exists. Split into two parts to handle node removal gracefully.
-        const progressResult = await conn.execute(
+        // Using queue() for clean output extraction (no echo stripping issues)
+        const progressResult = await conn.queue(
           'PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + HASNODE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0) + "|" + (CHOOSE ROUND(NEXTNODE:ETA) IF HASNODE ELSE 0).',
           3000
         );
+
+        if (!progressResult.success) {
+          parseFailureCount++;
+          if (lastValidState) return lastValidState;
+          return { noNode: false, dvRemaining: 999, executorEnabled: true, executorState: 'WARPALIGN', burnComplete: false, executorStopped: false, nodeEta: 0 };
+        }
 
         // Check for no node - either HASNODE returned False or node was removed
         // Format: enabled|state|hasNode|dv|eta
@@ -791,8 +747,8 @@ export async function executeNode(
           if (parseFailureCount >= MAX_PARSE_FAILURES) {
             log.warn(`${logPrefix} Parse failures detected, checking node directly...`);
             try {
-              const directCheck = await conn.execute('PRINT HASNODE.', 2000);
-              if (!directCheck.output.includes('True')) {
+              const directCheck = await conn.queue('PRINT HASNODE.', 2000);
+              if (directCheck.success && !directCheck.output.includes('True')) {
                 return { noNode: true, dvRemaining: 0, executorEnabled: false, executorState: 'IDLE', burnComplete: true, executorStopped: false, nodeEta: 0 };
               }
             } catch { /* ignore */ }
@@ -867,11 +823,11 @@ export async function executeNode(
 
           // Query current heading angle for stuck detection
           try {
-            const angleResult = await conn.execute(
+            const angleResult = await conn.queue(
               'PRINT ROUND(VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR), 1).',
               2000
             );
-            const currentAngle = parseNumber(angleResult.output);
+            const currentAngle = angleResult.success ? parseNumber(angleResult.output) : 0;
 
             // Check if dV is dropping (burn actually happening despite WARPALIGN state)
             const dvDropping = burnEverStarted && state.dvRemaining < dvRequired * 0.95;
@@ -891,7 +847,7 @@ export async function executeNode(
                     log.warn(`${logPrefix} Alignment stuck at ${currentAngle.toFixed(1)}° - attempting recovery`);
                     // Try to unstick by clearing steering and resetting
                     try {
-                      await conn.execute('UNLOCK STEERING. SAS OFF. WAIT 0.3. SAS ON. SET SASMODE TO "MANEUVER".', 5000);
+                      await conn.raw('UNLOCK STEERING. SAS OFF. WAIT 0.3. SAS ON. SET SASMODE TO "MANEUVER".', 5000);
                     } catch { /* ignore */ }
                     warpAlignStuckCount = 0;
                   }
@@ -940,7 +896,7 @@ export async function executeNode(
         }
 
         // Clear any residual node to avoid "No maneuver nodes present!" errors
-        try { await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 3000); } catch { /* ignore */ }
+        try { await conn.raw('IF HASNODE { REMOVE NEXTNODE. }', 3000); } catch { /* ignore */ }
 
         // Restore thrust if it was limited for small burns
         if (thrustWasLimited) {
@@ -955,7 +911,7 @@ export async function executeNode(
 
         // Enable SAS prograde to maintain heading and avoid RCS drift affecting trajectory
         try {
-          await conn.execute('SAS ON. WAIT 0.1. SET SASMODE TO "PROGRADE".');
+          await conn.raw('SAS ON. WAIT 0.1. SET SASMODE TO "PROGRADE".');
         } catch { /* ignore SAS errors */ }
         // Clear operation state on success (safety monitor may have already cleared)
         try { await clearKosOperation(conn); } catch { /* ignore */ }
@@ -996,7 +952,7 @@ export async function executeNode(
     if (result.timedOut) {
       if (attempt === MAX_RETRIES) {
         // Disable executor on final timeout
-        await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
+        await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
         // Restore thrust before returning failure
         if (thrustWasLimited) {
           try { await restoreEngineThrust(conn, log); } catch { /* ignore */ }
@@ -1042,16 +998,19 @@ export async function executeNode(
  */
 export async function getNodeProgress(conn: KosConnection): Promise<ExecuteNodeProgress> {
   // Single atomic query for all progress values including MechJeb state
-  const result = await conn.execute(
-    'PRINT "NODEPROG|" + ALLNODES:LENGTH + "|" + ' +
+  // Using queue() for clean output extraction
+  const result = await conn.queue(
+    'PRINT ALLNODES:LENGTH + "|" + ' +
     '(CHOOSE ROUND(NEXTNODE:ETA) IF HASNODE ELSE 0) + "|" + ' +
     'ROUND(THROTTLE * 100) + "|" + ' +
     'ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE.',
     3000
   );
 
-  // Parse "NODEPROG|count|eta|throttle|enabled|state" format
-  const match = result.output.match(/NODEPROG\|(\d+)\|(-?\d+)\|(\d+)\|(True|False)\|(\w+)/i);
+  // Parse "count|eta|throttle|enabled|state" format
+  const match = result.success
+    ? result.output.match(/(\d+)\|(-?\d+)\|(\d+)\|(True|False)\|(\w+)/i)
+    : null;
 
   if (!match) {
     // Fallback if parsing fails
@@ -1091,8 +1050,8 @@ export async function getNodeProgress(conn: KosConnection): Promise<ExecuteNodeP
  * @returns true if executor is enabled
  */
 export async function isNodeExecutorEnabled(conn: KosConnection): Promise<boolean> {
-  const result = await conn.execute('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
-  return result.output.includes('True');
+  const result = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
+  return result.success && result.output.includes('True');
 }
 
 /**
@@ -1101,7 +1060,7 @@ export async function isNodeExecutorEnabled(conn: KosConnection): Promise<boolea
  * @param conn kOS connection
  */
 export async function disableNodeExecutor(conn: KosConnection): Promise<void> {
-  await conn.execute('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
+  await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO FALSE.', 2000);
 }
 
 // ============================================================================

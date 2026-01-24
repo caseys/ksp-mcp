@@ -139,8 +139,8 @@ export async function withTargetAndExecute(
   }
 
   // Verify node exists before executing (safety check)
-  const hasNode = await conn.execute('PRINT HASNODE.', 2000);
-  if (!hasNode.output.includes('True')) {
+  const hasNode = await conn.queue('PRINT HASNODE.', 2000);
+  if (!hasNode.success || !hasNode.output.includes('True')) {
     // No node to execute - return success with planning result
     return { ...planResult, executed: false };
   }
@@ -189,11 +189,11 @@ async function checkPostBurnTrajectory(
 
   try {
     // First check if we have an encounter
-    const encounterCheck = await conn.execute(
+    const encounterCheck = await conn.queue(
       'IF SHIP:ORBIT:HASNEXTPATCH { PRINT SHIP:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NO_ENCOUNTER". }',
       3000
     );
-    const encounterBody = encounterCheck.output.trim();
+    const encounterBody = encounterCheck.success ? encounterCheck.output.trim() : 'NO_ENCOUNTER';
 
     if (encounterBody !== 'NO_ENCOUNTER') {
       // We have an encounter - check if it's with the correct target
@@ -202,13 +202,15 @@ async function checkPostBurnTrajectory(
       // Query the encounter periapsis to check for crash trajectory
       let encounterPeriapsis: number | undefined;
       try {
-        const peCheck = await conn.execute(
+        const peCheck = await conn.queue(
           'PRINT SHIP:ORBIT:NEXTPATCH:PERIAPSIS.',
           3000
         );
-        encounterPeriapsis = parseFloat(peCheck.output.trim());
-        if (isNaN(encounterPeriapsis)) {
-          encounterPeriapsis = undefined;
+        if (peCheck.success) {
+          encounterPeriapsis = parseFloat(peCheck.output.trim());
+          if (isNaN(encounterPeriapsis)) {
+            encounterPeriapsis = undefined;
+          }
         }
       } catch {
         // Periapsis query failed - continue without it
@@ -234,24 +236,32 @@ async function checkPostBurnTrajectory(
       SET predictedDist TO (futurePosShip - futurePosTgt):MAG.
       SET targetPe TO TARGET:ORBIT:PERIAPSIS.
       SET targetAp TO TARGET:ORBIT:APOAPSIS.
-      PRINT "DIST:" + ROUND(predictedDist) + "|PE:" + ROUND(targetPe) + "|AP:" + ROUND(targetAp).
+      PRINT ROUND(predictedDist) + "|" + ROUND(targetPe) + "|" + ROUND(targetAp).
     `.trim().replaceAll('\n', ' ');
 
-    const result = await conn.execute(checkScript, 5000);
+    const result = await conn.queue(checkScript, 5000);
 
-    // Parse output: "DIST:12345|PE:67890|AP:111213"
-    const distMatch = result.output.match(/DIST:(-?\d+)/);
-    const peMatch = result.output.match(/PE:(-?\d+)/);
-    const apMatch = result.output.match(/AP:(-?\d+)/);
+    if (!result.success) {
+      logger?.warn(`[checkPostBurnTrajectory] Failed to query close approach`);
+      return { hasEncounter: false, isCloseApproach: false, separation: 0, targetOrbitRadius: 0 };
+    }
 
-    if (!distMatch || !peMatch || !apMatch) {
+    // Parse output: "dist|pe|ap" format
+    const parts = result.output.split('|');
+    if (parts.length !== 3) {
       logger?.warn(`[checkPostBurnTrajectory] Failed to parse kOS output: ${result.output}`);
       return { hasEncounter: false, isCloseApproach: false, separation: 0, targetOrbitRadius: 0 };
     }
 
-    const separation = Math.abs(Number.parseInt(distMatch[1]));
-    const targetPe = Number.parseInt(peMatch[1]);
-    const targetAp = Number.parseInt(apMatch[1]);
+    const separation = Math.abs(Number.parseInt(parts[0]));
+    const targetPe = Number.parseInt(parts[1]);
+    const targetAp = Number.parseInt(parts[2]);
+
+    if (isNaN(separation) || isNaN(targetPe) || isNaN(targetAp)) {
+      logger?.warn(`[checkPostBurnTrajectory] Failed to parse values: ${result.output}`);
+      return { hasEncounter: false, isCloseApproach: false, separation: 0, targetOrbitRadius: 0 };
+    }
+
     const targetOrbitRadius = (targetPe + targetAp) / 2;
 
     // Check if separation is within threshold
@@ -382,8 +392,8 @@ export class ManeuverOrchestrator {
     let targetName = target;
     if (!targetName) {
       // Query current target name
-      const targetResult = await this.conn.execute('PRINT TARGET:NAME.', 2000);
-      targetName = targetResult.output.trim();
+      const targetResult = await this.conn.queue('PRINT TARGET:NAME.', 2000);
+      targetName = targetResult.success ? targetResult.output.trim() : '';
     }
 
     // Plan and optionally execute via standard flow
@@ -648,8 +658,8 @@ export class ManeuverOrchestrator {
     }
 
     // Check if a node was created
-    const hasNode = await this.conn.execute('PRINT HASNODE.', 2000);
-    if (!hasNode.output.includes('True')) {
+    const hasNode = await this.conn.queue('PRINT HASNODE.', 2000);
+    if (!hasNode.success || !hasNode.output.includes('True')) {
       return { ...planResult, executed: false };
     }
 
@@ -697,8 +707,8 @@ export class ManeuverOrchestrator {
     // Get the target name for post-execution validation
     let targetName = target;
     if (!targetName) {
-      const targetResult = await this.conn.execute('PRINT TARGET:NAME.', 2000);
-      targetName = targetResult.output.trim();
+      const targetResult = await this.conn.queue('PRINT TARGET:NAME.', 2000);
+      targetName = targetResult.success ? targetResult.output.trim() : '';
     }
 
     // Plan and optionally execute via standard flow

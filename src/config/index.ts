@@ -84,6 +84,18 @@ export const config = Object.freeze({
     notifyConfigured: process.env.MCP_NOTIFY !== undefined,
   },
 
+  // Debug options
+  debug: {
+    /**
+     * Log all terminal TX/RX to /tmp/kos-terminal.log
+     * Enable via KOS_DEBUG=1 env var or KOS_DEBUG=1 in .env file
+     * Use: tail -f /tmp/kos-terminal.log
+     */
+    terminalLog: process.env.KOS_DEBUG === '1' || process.env.KOS_DEBUG === 'true',
+    /** Path for terminal debug log */
+    terminalLogPath: process.env.KOS_DEBUG_PATH ?? '/tmp/kos-terminal.log',
+  },
+
   // Timeout defaults (milliseconds)
   timeouts: {
     /** Timeout for initial socket connection */
@@ -100,6 +112,8 @@ export const config = Object.freeze({
     connectDelay: Number.parseInt(process.env.KOS_DELAY_CONNECT ?? '0', 10),
     /** Delay after disconnect */
     disconnectDelay: Number.parseInt(process.env.KOS_DELAY_DISCONNECT ?? '200', 10),
+    /** Maximum timeout for coms test (ceiling, allows for slow drive spin-up) */
+    comsTestMax: Number.parseInt(process.env.KOS_TIMEOUT_COMS_TEST_MAX ?? '15000', 10),
   },
 });
 

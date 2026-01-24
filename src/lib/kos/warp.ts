@@ -58,7 +58,7 @@ interface TrajectoryInfo {
  */
 async function getTrajectoryInfo(conn: KosConnection): Promise<TrajectoryInfo> {
   // Query node and SOI info (close approach checked separately for vessels)
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET _hasNode TO HASNODE. ' +
     'SET _nodeEta TO CHOOSE NEXTNODE:ETA IF _hasNode ELSE 0. ' +
     'SET _hasPatch TO SHIP:ORBIT:HASNEXTPATCH. ' +
@@ -69,7 +69,7 @@ async function getTrajectoryInfo(conn: KosConnection): Promise<TrajectoryInfo> {
   );
 
   // Parse: hasNode|nodeEta|hasPatch|patchBody|patchEta
-  const match = result.output.match(/(True|False)\|(-?\d+)\|(True|False)\|([^|]*)\|(-?\d+)/i);
+  const match = result.success ? result.output.match(/(True|False)\|(-?\d+)\|(True|False)\|([^|]*)\|(-?\d+)/i) : null;
 
   if (!match) {
     return { hasNode: false, hasSOIChange: false };
@@ -110,8 +110,8 @@ async function detectMoonReturn(conn: KosConnection, targetName?: string): Promi
     'PRINT "MR|" + _curParent + "|" + _nextBody + "|" + _nextAtm + "|" + _nextPeTime.',
   ].join(' ');
 
-  const result = await conn.execute(cmd, 5000);
-  const match = result.output.match(/MR\|([^|]*)\|([^|]*)\|(\d+)\|(\d+)/);
+  const result = await conn.queue(cmd, 5000);
+  const match = result.success ? result.output.match(/MR\|([^|]*)\|([^|]*)\|(\d+)\|(\d+)/) : null;
 
   if (!match) return { isMoonReturn: false };
 
@@ -157,7 +157,7 @@ interface OrbitContext {
  * Get orbit context for error messages
  */
 async function getOrbitContext(conn: KosConnection): Promise<OrbitContext> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'LOCAL cb IS SHIP:BODY. ' +
     'LOCAL pb IS cb:BODY:NAME. ' +
     'LOCAL ecc IS SHIP:ORBIT:ECCENTRICITY. ' +
@@ -166,7 +166,7 @@ async function getOrbitContext(conn: KosConnection): Promise<OrbitContext> {
     3000
   );
 
-  const match = result.output.match(/CTX\|([^|]+)\|([^|]+)\|([\d.]+)\|(True|False)/i);
+  const match = result.success ? result.output.match(/CTX\|([^|]+)\|([^|]+)\|([\d.]+)\|(True|False)/i) : null;
   if (!match) {
     return { currentBody: '?', parentBody: '?', orbitType: 'elliptical', eccentricity: 0, isAtMoon: false };
   }
@@ -272,7 +272,7 @@ async function resolveTargetName(
 
   // Case 2: Check if it's a vessel with close approach
   // Search through targets list (EXISTS() is for files, not vessels)
-  const vesselCheck = await conn.execute(
+  const vesselCheck = await conn.queue(
     `LOCAL _vfound IS FALSE. LIST TARGETS IN _tlist. ` +
     `FOR _t IN _tlist { IF _t:NAME = "${targetName}" { SET TARGET TO _t. SET _vfound TO TRUE. BREAK. } } ` +
     `IF _vfound { WAIT 0.1. ` +
@@ -282,7 +282,7 @@ async function resolveTargetName(
     5000
   );
 
-  const vesselMatch = vesselCheck.output.match(/OK\|(-?\d+)\|(-?\d+)/);
+  const vesselMatch = vesselCheck.success ? vesselCheck.output.match(/OK\|(-?\d+)\|(-?\d+)/) : null;
   if (vesselMatch) {
     const caTime = Number.parseInt(vesselMatch[1]);
     const caDist = Number.parseInt(vesselMatch[2]);
@@ -302,7 +302,7 @@ async function resolveTargetName(
 
   // Case 3: Check if it's a valid body but no encounter
   // Search BODIES list (EXISTS() is for files, not bodies)
-  const bodyCheck = await conn.execute(
+  const bodyCheck = await conn.queue(
     `LOCAL _found IS "NO". LIST BODIES IN _blist. ` +
     `FOR _b IN _blist { IF _b:NAME:TOLOWER = "${lowerTarget}" { SET _found TO "BODY|" + _b:NAME. BREAK. } } ` +
     `PRINT _found.`,
@@ -310,7 +310,7 @@ async function resolveTargetName(
   );
 
   // Check if we got a valid response - if not, might be a communication issue
-  const hasValidResponse = bodyCheck.output.includes('BODY|') || bodyCheck.output.includes('NO');
+  const hasValidResponse = bodyCheck.success && (bodyCheck.output.includes('BODY|') || bodyCheck.output.includes('NO'));
   if (!hasValidResponse) {
     // kOS didn't return expected output - likely communication issue
     return { resolved: false, error: `Unable to verify "${targetName}" - communication issue. Check vessel signal.` };
@@ -339,7 +339,7 @@ async function _kickstartWarp(conn: KosConnection, logger: McpLogger, _state?: u
   // Check warp and pulse in one kOS command to reduce round trips
   // IF WARP = 0: pulse to 1 (2x), wait 200ms, back to 0
   /*
-  const result = await conn.execute(
+  const result = await conn.raw(
     'IF WARP = 0 { SET WARP TO 1. WAIT 0.3. SET WARP TO 0. PRINT "KICKED". } ELSE { PRINT "WARP KICK SKIP". }',
     3000
   );
@@ -352,7 +352,7 @@ async function _kickstartWarp(conn: KosConnection, logger: McpLogger, _state?: u
 
   // Try to increase warp speed, respecting physics vs rails mode limits
   // Physics warp max is 4x (index 2), rails warp max is much higher (index 6+)
-  await conn.execute(
+  await conn.raw(
     'SET maxWarp TO CHOOSE 2 IF KUNIVERSE:TIMEWARP:MODE = "PHYSICS" ELSE 6. ' +
     //'IF WARP > 0 AND WARP < maxWarp { SET WARP TO WARP + 1. }',
     'IF WARP < maxWarp { SET WARP TO WARP + 1. }',
@@ -367,7 +367,7 @@ async function _kickstartWarp(conn: KosConnection, logger: McpLogger, _state?: u
  * Stop time warp by setting warp level to 0.
  */
 export async function stopWarp(conn: KosConnection): Promise<void> {
-  await conn.execute('SET WARP TO 0.', 3000);
+  await conn.raw('SET WARP TO 0.', 3000);
 }
 
 /**
@@ -379,7 +379,7 @@ async function checkCrashTrajectory(
   etaToTarget: number
 ): Promise<CrashCheck> {
   // Query: current periapsis, ETA to periapsis, SOI ETA, and encounter info
-  const result = await conn.execute(
+  const result = await conn.queue(
     'PRINT ROUND(PERIAPSIS) + "|" + ROUND(ETA:PERIAPSIS) + "|" + ' +
     '(CHOOSE "NONE|0|0" IF NOT SHIP:ORBIT:HASNEXTPATCH ELSE ' +
     'SHIP:ORBIT:NEXTPATCH:BODY:NAME + "|" + ROUND(SHIP:ORBIT:NEXTPATCHETA) + "|" + ' +
@@ -388,7 +388,7 @@ async function checkCrashTrajectory(
   );
 
   // Parse values: pe|etaPe|encounterBody|etaToSOI|encounterPe
-  const parts = result.output.split('|');
+  const parts = result.success ? result.output.split('|') : [];
   const periapsis = Number.parseInt(parts[0]) || 0;
   const etaToPe = Number.parseInt(parts[1]) || 0;
 
@@ -447,8 +447,8 @@ export interface WarpResult {
  * Helper to query a value from kOS
  */
 async function queryValue(conn: KosConnection, expr: string): Promise<string> {
-  const result = await conn.execute(`PRINT ${expr}.`, 3000);
-  return result.output.trim();
+  const result = await conn.queue(`PRINT ${expr}.`, 3000);
+  return result.success ? result.output : '';
 }
 
 /**
@@ -461,11 +461,11 @@ async function queryValue(conn: KosConnection, expr: string): Promise<string> {
  */
 async function getPostWarpAdvice(conn: KosConnection): Promise<string | null> {
   try {
-    const result = await conn.execute(
+    const result = await conn.queue(
       'PRINT "ADV|" + ROUND(PERIAPSIS/1000, 1) + "|" + ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(SHIP:ORBIT:ECCENTRICITY, 3).',
       3000
     );
-    const match = result.output.match(/ADV\|([\d.-]+)\|(\d+)\|([\d.]+)/);
+    const match = result.success ? result.output.match(/ADV\|([\d.-]+)\|(\d+)\|([\d.]+)/) : null;
     if (!match) return 'circularize to establish stable orbit';
 
     const peKm = parseFloat(match[1]);
@@ -545,11 +545,11 @@ async function warpToNode(
   const log = logger ?? nullLogger;
 
   // Check if node exists
-  const nodeCheck = await conn.execute('PRINT HASNODE.');
-  if (!nodeCheck.output.toLowerCase().includes('true')) {
+  const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
+  if (!nodeCheck.success || !nodeCheck.output.toLowerCase().includes('true')) {
     // Check if SOI change exists to provide helpful suggestion
-    const soiCheck = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000);
-    if (soiCheck.output.toLowerCase().includes('true')) {
+    const soiCheck = await conn.queue('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000);
+    if (soiCheck.success && soiCheck.output.toLowerCase().includes('true')) {
       return { success: false, error: 'No maneuver node found. Use warp with target:"soi" to warp to upcoming SOI change.' };
     }
     return { success: false, error: 'No maneuver node found' };
@@ -588,7 +588,7 @@ async function warpToNode(
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
-  await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(NEXTNODE:TIME - ${leadTime}).`, 5000);
+  await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(NEXTNODE:TIME - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close to target
   const result = await pollWithBlackoutResilience<number>({
@@ -623,8 +623,8 @@ async function warpToSOI(
   const log = logger ?? nullLogger;
 
   // Check for SOI transition
-  const soiCheck = await conn.execute('PRINT SHIP:ORBIT:HASNEXTPATCH.');
-  if (!soiCheck.output.toLowerCase().includes('true')) {
+  const soiCheck = await conn.queue('PRINT SHIP:ORBIT:HASNEXTPATCH.', 2000);
+  if (!soiCheck.success || !soiCheck.output.toLowerCase().includes('true')) {
     const targetSet = await hasTarget(conn);
     if (!targetSet) {
       return {
@@ -633,11 +633,12 @@ async function warpToSOI(
       };
     }
     // Get target info to provide helpful error message
-    const targetInfo = await conn.execute(
+    const targetInfo = await conn.queue(
       'PRINT TARGET:NAME + "|" + (CHOOSE "planet" IF TARGET:BODY:NAME = "Sun" ELSE "moon").',
       3000
     );
-    const [targetName, targetType] = targetInfo.output.trim().split('|');
+    const parts = targetInfo.success ? targetInfo.output.split('|') : ['Unknown', 'moon'];
+    const [targetName, targetType] = parts;
     const transferTool = targetType === 'planet' ? 'interplanetary_transfer' : 'hohmann_transfer';
     return {
       success: false,
@@ -655,7 +656,7 @@ async function warpToSOI(
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
-  await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + SHIP:ORBIT:NEXTPATCHETA - ${leadTime}).`, 5000);
+  await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + SHIP:ORBIT:NEXTPATCHETA - ${leadTime}).`, 5000);
 
   // Poll body name until it changes (SOI crossed)
   interface SOIPollState {
@@ -670,11 +671,11 @@ async function warpToSOI(
       let eta: number | null = null;
       let nextBody: string | null = null;
       try {
-        const patchInfo = await conn.execute(
+        const patchInfo = await conn.queue(
           'IF SHIP:ORBIT:HASNEXTPATCH { PRINT ROUND(SHIP:ORBIT:NEXTPATCHETA) + "|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NONE". }',
           3000
         );
-        const match = patchInfo.output.match(/(\d+)\|(.+)/);
+        const match = patchInfo.success ? patchInfo.output.match(/(\d+)\|(.+)/) : null;
         if (match) {
           eta = Number.parseInt(match[1]);
           nextBody = match[2].trim();
@@ -736,8 +737,8 @@ async function warpToOrbitalPoint(
 
   // Periapsis warp - block if negative periapsis (would warp to impact point)
   if (point === 'PERIAPSIS') {
-    const peResult = await conn.execute('PRINT PERIAPSIS.', 2000);
-    const periapsis = Number.parseFloat(peResult.output.match(/-?\d+/)?.[0] || '0');
+    const peResult = await conn.queue('PRINT PERIAPSIS.', 2000);
+    const periapsis = peResult.success ? Number.parseFloat(peResult.output.match(/-?\d+/)?.[0] || '0') : 0;
     if (periapsis < 0) {
       return {
         success: false,
@@ -782,7 +783,7 @@ async function warpToOrbitalPoint(
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
-  await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ETA:${point} - ${leadTime}).`, 5000);
+  await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ETA:${point} - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close
   const result = await pollWithBlackoutResilience<number>({
@@ -809,12 +810,12 @@ async function warpToOrbitalPoint(
  * Get basic status (body and altitude)
  */
 async function getBasicStatus(conn: KosConnection): Promise<WarpResult> {
-  const statusResult = await conn.execute('PRINT SHIP:BODY:NAME + "," + ROUND(ALTITUDE).');
-  const parts = statusResult.output.split(',');
+  const statusResult = await conn.queue('PRINT SHIP:BODY:NAME + "," + ROUND(ALTITUDE).', 3000);
+  const parts = statusResult.success ? statusResult.output.split(',') : [];
   return {
     success: true,
-    body: parts[0]?.trim(),
-    altitude: Number.parseInt(parts[1]?.trim() || '0'),
+    body: parts[0] || 'Unknown',
+    altitude: Number.parseInt(parts[1] || '0'),
   };
 }
 
@@ -824,13 +825,13 @@ async function getBasicStatus(conn: KosConnection): Promise<WarpResult> {
 async function getSOIStatus(conn: KosConnection, body: string, logger?: McpLogger): Promise<WarpResult> {
   const log = logger ?? nullLogger;
 
-  const soiInfo = await conn.execute(
+  const soiInfo = await conn.queue(
     'PRINT "SOI:" + SHIP:BODY:NAME + "|" + ROUND(ALTITUDE) + "|" + ROUND(PERIAPSIS) + "|" + ROUND(SHIP:BODY:RADIUS) + "|" + ROUND(SHIP:ORBIT:ECCENTRICITY, 3).',
     5000
   );
 
   // Parse structured output
-  const soiMatch = soiInfo.output.match(/SOI:([^|]+)\|(-?\d+)\|(-?\d+)\|(\d+)\|([\d.]+)/);
+  const soiMatch = soiInfo.success ? soiInfo.output.match(/SOI:([^|]+)\|(-?\d+)\|(-?\d+)\|(\d+)\|([\d.]+)/) : null;
   if (!soiMatch) {
     log.warn(`[Warp] SOI info parse failed: ${soiInfo.output}`);
     return { success: true, body, altitude: 0 };
@@ -919,13 +920,13 @@ export async function warpForward(
 
   // Clear any existing warp state before starting new warp
   await stopWarp(conn);
-  await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
+  await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
 
   // Poll WARP status until it's 0 (warp complete)
   const result = await pollWithBlackoutResilience<number>({
     poll: async () => {
-      const warpResult = await conn.execute('PRINT WARP.', 3000);
-      const warpMatch = warpResult.output.match(/^(\d+)/);
+      const warpResult = await conn.queue('PRINT WARP.', 3000);
+      const warpMatch = warpResult.success ? warpResult.output.match(/^(\d+)/) : null;
       return warpMatch ? Number.parseInt(warpMatch[1], 10) : -1;
     },
     isDone: (warpLevel) => warpLevel === 0,
@@ -1058,11 +1059,12 @@ export const warpTool: ToolDefinition = {
         // Check if already in target body's SOI
         const currentBody = await queryValue(conn, 'SHIP:BODY:NAME');
         if (currentBody.toLowerCase().includes(target.toLowerCase())) {
-          const orbitInfo = await conn.execute(
+          const orbitInfo = await conn.queue(
             'PRINT ROUND(PERIAPSIS/1000) + "|" + ROUND(APOAPSIS/1000).',
             2000
           );
-          const [pe, ap] = orbitInfo.output.split('|').map(s => s.trim());
+          const parts = orbitInfo.success ? orbitInfo.output.split('|') : [];
+          const [pe, ap] = parts.map(s => s || '?');
           return ctx.successResponse('warp',
             `Already at ${currentBody}! No warp needed.\n` +
             `Orbit: Pe=${pe}km, Ap=${ap}km`);

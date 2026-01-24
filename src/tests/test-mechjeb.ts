@@ -25,35 +25,35 @@ async function main() {
 
     // Check if MechJeb addon is available
     console.log('--- Checking MechJeb availability ---');
-    let result = await conn.execute('PRINT ADDONS:MJ:AVAILABLE.');
+    let result = await conn.raw('PRINT ADDONS:MJ:AVAILABLE.');
     console.log('ADDONS:MJ:AVAILABLE:', result.output);
 
     await delay(300);
 
     // Try to access MechJeb core
     console.log('\n--- Checking MechJeb core ---');
-    result = await conn.execute('PRINT ADDONS:MJ:CORE.');
+    result = await conn.raw('PRINT ADDONS:MJ:CORE.');
     console.log('ADDONS:MJ:CORE:', result.output);
 
     await delay(300);
 
     // Get vessel info from MechJeb
     console.log('\n--- MechJeb Vessel Info ---');
-    result = await conn.execute('PRINT ADDONS:MJ:VESSEL:SPEEDSURFACE.');
+    result = await conn.raw('PRINT ADDONS:MJ:VESSEL:SPEEDSURFACE.');
     console.log('Surface Speed:', result.output);
 
-    result = await conn.execute('PRINT ADDONS:MJ:VESSEL:ALTITUDETRUE.');
+    result = await conn.raw('PRINT ADDONS:MJ:VESSEL:ALTITUDETRUE.');
     console.log('Altitude:', result.output);
 
     await delay(300);
 
     // Check ascent guidance
     console.log('\n--- Checking Ascent Module ---');
-    result = await conn.execute('PRINT ADDONS:MJ:ASCENT.');
+    result = await conn.raw('PRINT ADDONS:MJ:ASCENT.');
     console.log('ASCENT:', result.output);
 
     // Try to get ascent settings
-    result = await conn.execute('PRINT ADDONS:MJ:ASCENT:DESIREDORBITALTITUDE.');
+    result = await conn.raw('PRINT ADDONS:MJ:ASCENT:DESIREDORBITALTITUDE.');
     console.log('Target Altitude:', result.output);
 
     console.log('\n--- Disconnecting ---');

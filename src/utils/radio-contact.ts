@@ -31,8 +31,8 @@ export interface WarpToRadioResult {
  * Check if currently in radio blackout.
  */
 export async function isInRadioBlackout(conn: KosConnection): Promise<boolean> {
-  const result = await conn.execute('PRINT HOMECONNECTION:ISCONNECTED.', 3000);
-  return !result.output.includes('True');
+  const result = await conn.queue('PRINT HOMECONNECTION:ISCONNECTED.', 3000);
+  return !result.success || !result.output.includes('True');
 }
 
 /**
@@ -49,8 +49,8 @@ export async function predictRadioContact(
   conn: KosConnection
 ): Promise<RadioContactPrediction> {
   // Check current status first
-  const currentResult = await conn.execute('PRINT HOMECONNECTION:ISCONNECTED.', 3000);
-  if (currentResult.output.includes('True')) {
+  const currentResult = await conn.queue('PRINT HOMECONNECTION:ISCONNECTED.', 3000);
+  if (currentResult.success && currentResult.output.includes('True')) {
     return { hasContactNow: true, secondsUntilContact: 0 };
   }
 
@@ -84,10 +84,10 @@ IF is_tidal AND (SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED") {
 }
 `.trim().replaceAll('\n', ' ');
 
-  const result = await conn.execute(script, 30_000);
+  const result = await conn.queue(script, 30_000);
 
   // Parse result: RADIO|seconds|reason
-  const match = result.output.match(/RADIO\|(-?\d+)\|(\w+)/);
+  const match = result.success ? result.output.match(/RADIO\|(-?\d+)\|(\w+)/) : null;
   if (!match) {
     // Failed to parse - assume we're connected (conservative)
     return { hasContactNow: false, secondsUntilContact: -1 };
@@ -161,7 +161,7 @@ export async function warpToRadioContact(
   const warpSeconds = prediction.secondsUntilContact;
   logger?.progress(`[${context}] No radio - warping ${formatTime(warpSeconds)} to contact...`);
 
-  await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpSeconds}).`, 5000);
+  await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpSeconds}).`, 5000);
 
   // Wait for warp to complete
   let waitCount = 0;
@@ -170,8 +170,8 @@ export async function warpToRadioContact(
     await new Promise(resolve => setTimeout(resolve, 1000));
     waitCount++;
 
-    const warpCheck = await conn.execute('PRINT KUNIVERSE:TIMEWARP:RATE.', 2000);
-    const rate = parseFloat(warpCheck.output.match(/[\d.]+/)?.[0] || '1');
+    const warpCheck = await conn.queue('PRINT KUNIVERSE:TIMEWARP:RATE.', 2000);
+    const rate = warpCheck.success ? parseFloat(warpCheck.output.match(/[\d.]+/)?.[0] || '1') : 1;
     if (rate <= 1) break;
   }
 

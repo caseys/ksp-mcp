@@ -93,7 +93,7 @@ export class MechJebClient {
    * Execute a raw MechJeb command (for advanced use)
    */
   async raw(command: string): Promise<string> {
-    const result = await this.conn.execute(command);
+    const result = await this.conn.raw(command);
     return result.output;
   }
 }

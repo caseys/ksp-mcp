@@ -57,13 +57,14 @@ export async function optimizeCircularizationTiming(
   const log = logger ?? { info: () => {} };
 
   // Query initial state
-  const initialResult = await conn.execute(
+  const initialResult = await conn.queue(
     'IF HASNODE { ' +
     'PRINT "NODE|" + ROUND(NEXTNODE:ETA) + "|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(NEXTNODE:ORBIT:APOAPSIS). ' +
-    '} ELSE { PRINT "NONODE". }'
+    '} ELSE { PRINT "NONODE". }',
+    3000
   );
 
-  if (initialResult.output.includes('NONODE')) {
+  if (!initialResult.success || initialResult.output.includes('NONODE')) {
     return { success: false, adjustment: 0, finalGap: 0 };
   }
 
@@ -105,12 +106,13 @@ export async function optimizeCircularizationTiming(
       if (tryEta < 30) break;
 
       // Adjust node and check result
-      const checkResult = await conn.execute(
+      const checkResult = await conn.queue(
         `SET NEXTNODE:ETA TO ${tryEta}. WAIT 0.1. ` +
-        'PRINT "CHECK|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(NEXTNODE:ORBIT:APOAPSIS).'
+        'PRINT "CHECK|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(NEXTNODE:ORBIT:APOAPSIS).',
+        3000
       );
 
-      const checkMatch = checkResult.output.match(/CHECK\|(-?\d+)\|(-?\d+)/);
+      const checkMatch = checkResult.success ? checkResult.output.match(/CHECK\|(-?\d+)\|(-?\d+)/) : null;
       if (!checkMatch) {
         improved = false;
         break;
@@ -126,7 +128,7 @@ export async function optimizeCircularizationTiming(
         totalAdjustment = originalEta - tryEta;
       } else {
         // Went too far, restore best and try smaller step
-        await conn.execute(`SET NEXTNODE:ETA TO ${bestEta}.`);
+        await conn.raw(`SET NEXTNODE:ETA TO ${bestEta}.`);
         improved = false;
       }
     }
@@ -134,7 +136,7 @@ export async function optimizeCircularizationTiming(
 
   // Ensure we're at the best ETA
   if (bestEta !== originalEta) {
-    await conn.execute(`SET NEXTNODE:ETA TO ${bestEta}.`);
+    await conn.raw(`SET NEXTNODE:ETA TO ${bestEta}.`);
   }
 
   log.info(`[OptimizeNode] Optimized: shifted ${totalAdjustment}s earlier, gap now ${Math.round(bestGap/1000)}km`);
@@ -173,10 +175,11 @@ export const circularizeTool: ToolDefinition = {
 
       // Check if already circular - return early to prevent loop
       // Use both eccentricity AND altitude ratio to determine if circular
-      const orbitCheck = await conn.execute(
-        'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000).'
+      const orbitCheck = await conn.queue(
+        'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000).',
+        2000
       );
-      const parts = orbitCheck.output.split('|').map(s => s.trim());
+      const parts = orbitCheck.success ? orbitCheck.output.split('|').map(s => s.trim()) : [];
       const currentEcc = Number.parseFloat(parts[0]?.match(/[\d.]+/)?.[0] ?? '1');
       const apoKm = Number.parseFloat(parts[1] ?? '0');
       const peKm = Number.parseFloat(parts[2] ?? '0');
@@ -195,10 +198,11 @@ export const circularizeTool: ToolDefinition = {
       // Auto-detect best timeRef if 'auto'
       let timeRef = args.timeRef as string;
       if (timeRef === 'auto') {
-        const orbitInfo = await conn.execute(
-          'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS + "|" + ROUND(PERIAPSIS).'
+        const orbitInfo = await conn.queue(
+          'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS + "|" + ROUND(PERIAPSIS).',
+          2000
         );
-        const parts = orbitInfo.output.split('|').map(s => s.trim());
+        const parts = orbitInfo.success ? orbitInfo.output.split('|').map(s => s.trim()) : [];
         const ecc = Number.parseFloat(parts[0] ?? '0');
         const etaApo = Number.parseFloat(parts[1] ?? '0');
         const etaPe = Number.parseFloat(parts[2] ?? '0');
@@ -245,10 +249,11 @@ export const circularizeTool: ToolDefinition = {
           text += await formatResultingOrbit(conn);
 
           // Check if orbit is now circular enough - tell LLM explicitly
-          const orbitCheck = await conn.execute(
-            'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000).'
+          const orbitCheck = await conn.queue(
+            'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000).',
+            2000
           );
-          const parts = orbitCheck.output.split('|').map(s => s.trim());
+          const parts = orbitCheck.success ? orbitCheck.output.split('|').map(s => s.trim()) : [];
           const ecc = Number.parseFloat(parts[0]?.match(/[\d.]+/)?.[0] ?? '1');
           const apoKm = Number.parseFloat(parts[1] ?? '0');
           const peKm = Number.parseFloat(parts[2] ?? '0');

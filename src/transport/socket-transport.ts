@@ -11,9 +11,13 @@
  */
 
 import * as net from 'node:net';
+import { appendFileSync, writeFileSync } from 'node:fs';
 import { BaseTransport } from './transport.js';
 import { config } from '../config/index.js';
 import { TransportTraceLogger } from './trace-logger.js';
+
+// Track if we've cleared the debug log this session
+let debugLogCleared = false;
 
 export class SocketTransport extends BaseTransport {
   private host: string;
@@ -33,6 +37,25 @@ export class SocketTransport extends BaseTransport {
     this.port = port;
     this.connectTimeout = options.connectTimeout ?? config.timeouts.connect;
     this.trace = new TransportTraceLogger(`socket-${host}-${port}`);
+  }
+
+  /**
+   * Simple debug logging to /tmp/kos-terminal.log when KOS_DEBUG=1
+   * Use: tail -f /tmp/kos-terminal.log to monitor in real-time
+   * Enable via KOS_DEBUG=1 in environment or .env file
+   */
+  private logDebug(dir: 'TX' | 'RX', data: string): void {
+    if (!config.debug.terminalLog) return;
+
+    // Clear log on first write this session
+    if (!debugLogCleared) {
+      writeFileSync(config.debug.terminalLogPath, `# kOS Terminal Debug Log - ${new Date().toISOString()}\n`);
+      debugLogCleared = true;
+    }
+
+    const timestamp = new Date().toISOString();
+    const escaped = data.replaceAll('\n', String.raw`\n`).replaceAll('\r', String.raw`\r`);
+    appendFileSync(config.debug.terminalLogPath, `[${timestamp}] ${dir}: ${escaped}\n`);
   }
 
   async init(): Promise<void> {
@@ -65,6 +88,7 @@ export class SocketTransport extends BaseTransport {
         const str = data.toString('utf-8');
         this.outputBuffer += str;
         this.trace.logReceive(data);
+        this.logDebug('RX', str);
       });
 
       this.socket.on('error', (err: Error) => {
@@ -88,27 +112,15 @@ export class SocketTransport extends BaseTransport {
     });
   }
 
-  async send(data: string, clear: boolean = false): Promise<void> {
+  async send(data: string): Promise<void> {
     if (!this.socket || !this._isOpen) {
       throw new Error('Transport not initialized');
-    }
-
-    // If clear requested, send Ctrl+C first and wait for daemon to stop
-    if (clear) {
-      await new Promise<void>((resolve, reject) => {
-        this.trace.logSend('\u0003');
-        this.socket!.write('\u0003', 'utf-8', (err) => {
-          if (err) reject(new Error(`Send Ctrl+C error: ${err.message}`));
-          else resolve();
-        });
-      });
-      // Brief wait for Ctrl+C to process
-      await new Promise(resolve => setTimeout(resolve, 50));
     }
 
     return new Promise((resolve, reject) => {
       const payload = data + '\r\n';
       this.trace.logSend(payload);
+      this.logDebug('TX', data);
       this.socket!.write(payload, 'utf-8', (err) => {
         if (err) {
           reject(new Error(`Send error: ${err.message}`));
@@ -128,6 +140,7 @@ export class SocketTransport extends BaseTransport {
     const keyMap: { [key: string]: string } = {
       'C-c': '\u0003',  // Ctrl+C
       'C-d': '\u0004',  // Ctrl+D
+      'C-k': '\u000B',  // Ctrl+K (clear terminal)
       'C-z': '\u001A',  // Ctrl+Z
       'Enter': '\r\n',
       'Escape': '\u001B',
@@ -137,6 +150,7 @@ export class SocketTransport extends BaseTransport {
 
     return new Promise((resolve, reject) => {
       this.trace.logSend(bytes);
+      this.logDebug('TX', `[keys:${keys}]`);
       this.socket!.write(bytes, 'utf-8', (err) => {
         if (err) {
           reject(new Error(`SendKeys error: ${err.message}`));

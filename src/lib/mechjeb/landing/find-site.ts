@@ -131,7 +131,7 @@ async function runSiteSearch(
   const { maxAltitude, searchWindow: _searchWindow, searchStep, requireSun, requireRadio } = options;
 
   // Check if we're in Kerbin SOI (for radio contact check)
-  const soiCheck = await conn.execute(
+  const soiCheck = await conn.queue(
     'IF SHIP:BODY:BODY:NAME = "Kerbin" OR SHIP:BODY:NAME = "Kerbin" { PRINT "KERBIN_SOI". } ELSE { PRINT "OTHER_SOI". }',
     3000
   );
@@ -195,7 +195,7 @@ IF found {
 }
 `.trim().replaceAll('\n', ' ');
 
-  const result = await conn.execute(script, 30_000);
+  const result = await conn.queue(script, 30_000);
 
   // Parse result
   const match = result.output.match(/SITE\|([-\d.]+)\|([-\d.]+)\|([-\d]+)\|([-\d]+)\|(True|False)\|(True|False)/i);
@@ -209,7 +209,7 @@ IF found {
     const radioContact = match[6].toLowerCase() === 'true';
 
     // Get current time to calculate timeFromNow
-    const timeResult = await conn.execute('PRINT ROUND(TIME:SECONDS).', 3000);
+    const timeResult = await conn.queue('PRINT ROUND(TIME:SECONDS).', 3000);
     const currentTime = Number.parseInt(timeResult.output.match(/(\d+)/)?.[1] ?? '0');
     const timeFromNow = ut - currentTime;
 

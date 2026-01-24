@@ -94,8 +94,8 @@ export const resonantOrbitTool: ToolDefinition = {
           ? 'Burn complete'
           : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
-          const orbitInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:PERIOD, 1) + "|" + ROUND(APOAPSIS/1000, 1).', 2000);
-          const match = orbitInfo.output.match(/([\d.]+)\|([\d.]+)/);
+          const orbitInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:PERIOD, 1) + "|" + ROUND(APOAPSIS/1000, 1).', 2000);
+          const match = orbitInfo.success ? orbitInfo.output.match(/([\d.]+)\|([\d.]+)/) : null;
           if (match) {
             text += `\nNew orbit: period ${match[1]}s, apoapsis ${match[2]}km`;
           }

@@ -30,24 +30,20 @@ export interface ListSavesResult {
  * List available quicksaves
  */
 export async function listQuicksaves(conn: KosConnection): Promise<ListSavesResult> {
-  try {
-    const result = await conn.execute('PRINT KUNIVERSE:QUICKSAVELIST.');
+  const result = await conn.queue('PRINT KUNIVERSE:QUICKSAVELIST.', 5000);
 
-    // Parse the list output - format is like: ["value"] = "save-name"
-    const saves: string[] = [];
-    const matches = result.output.matchAll(/\["value"\]\s*=\s*"([^"]+)"/g);
-    for (const match of matches) {
-      saves.push(match[1]);
-    }
-
-    return { success: true, saves };
-  } catch (error) {
-    return {
-      success: false,
-      saves: [],
-      error: error instanceof Error ? error.message : String(error),
-    };
+  if (!result.success) {
+    return { success: false, saves: [], error: result.error };
   }
+
+  // Parse the list output - format is like: ["value"] = "save-name"
+  const saves: string[] = [];
+  const matches = result.output.matchAll(/\["value"\]\s*=\s*"([^"]+)"/g);
+  for (const match of matches) {
+    saves.push(match[1]);
+  }
+
+  return { success: true, saves };
 }
 
 /**
@@ -55,7 +51,7 @@ export async function listQuicksaves(conn: KosConnection): Promise<ListSavesResu
  */
 export async function quicksave(conn: KosConnection, saveName: string): Promise<QuicksaveResult> {
   try {
-    await conn.execute(`KUNIVERSE:QUICKSAVETO("${saveName}").`);
+    await conn.raw(`KUNIVERSE:QUICKSAVETO("${saveName}").`);
     return { success: true, saveName };
   } catch (error) {
     return {
@@ -71,7 +67,7 @@ export async function quicksave(conn: KosConnection, saveName: string): Promise<
  */
 export async function quickload(conn: KosConnection, saveName: string): Promise<QuickloadResult> {
   try {
-    await conn.execute(`KUNIVERSE:QUICKLOADFROM("${saveName}").`, config.timeouts.command, { fireAndForget: true });
+    await conn.raw(`KUNIVERSE:QUICKLOADFROM("${saveName}").`, config.timeouts.command, { fireAndForget: true });
     return { success: true, saveName };
   } catch (error) {
     return {
@@ -86,12 +82,8 @@ export async function quickload(conn: KosConnection, saveName: string): Promise<
  * Check if quicksave is available (game must be in a valid state)
  */
 export async function canQuicksave(conn: KosConnection): Promise<boolean> {
-  try {
-    const result = await conn.execute('PRINT KUNIVERSE:CANQUICKSAVE.');
-    return result.output.includes('True');
-  } catch {
-    return false;
-  }
+  const result = await conn.queue('PRINT KUNIVERSE:CANQUICKSAVE.', 3000);
+  return result.success && result.output.includes('True');
 }
 
 // ============================================================================

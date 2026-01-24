@@ -87,6 +87,7 @@ const TOOL_ALIASES: Record<string, string> = {
 // Maps: tool_name -> [arg1Name, arg2Name, ...]
 // Tools where first positional can be either number->paramA or string->paramB
 const SMART_FIRST_POSITIONAL: Record<string, { number: string; string: string }> = {
+  'launch': { number: 'altitude', string: 'target' },
   'inclination': { number: 'angle', string: 'target' },
 };
 

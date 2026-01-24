@@ -48,9 +48,9 @@ export async function killRelativeVelocity(
   } else {
     cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:KILLRELVEL("${timeRef}").`;
   }
-  const result = await conn.execute(cmd, 10_000);
+  const result = await conn.queue(cmd, 10_000);
 
-  const success = result.output.includes('True');
+  const success = result.success && result.output.includes('True');
   if (!success) {
     return { success: false, error: sanitizeError(result.output, 'Match velocities') };
   }
@@ -112,8 +112,8 @@ export const matchVelocitiesTool: ToolDefinition = {
           ? 'Burn complete'
           : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
-          const relVelInfo = await conn.execute('PRINT ROUND((TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT):MAG, 1).', 2000);
-          const relVel = parseFloat(relVelInfo.output.trim()) || 0;
+          const relVelInfo = await conn.queue('PRINT ROUND((TARGET:VELOCITY:ORBIT - SHIP:VELOCITY:ORBIT):MAG, 1).', 2000);
+          const relVel = relVelInfo.success ? parseFloat(relVelInfo.output) || 0 : 0;
           text += `\nRelative velocity: ${fmtVel(relVel)}`;
         }
         return ctx.successResponse('match_velocities', text);

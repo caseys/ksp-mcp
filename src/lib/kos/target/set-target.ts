@@ -34,8 +34,8 @@ async function setTargetInternal(
     'ELSE { PRINT "TARGET_FAILED". }',
   ].join(' ');
 
-  const result = await conn.execute(atomicCmd, 5000);
-  const output = result.output?.trim() ?? '';
+  const result = await conn.queue(atomicCmd, 5000);
+  const output = result.success ? result.output : '';
 
   // Only success case: explicit TARGET_OK marker
   const okMatch = output.match(/TARGET_OK\|([^|]+)\|(\w+)/);

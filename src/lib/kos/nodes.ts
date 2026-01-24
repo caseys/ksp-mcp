@@ -19,23 +19,19 @@ export interface ClearNodesResult {
  * @returns Result with count of nodes cleared
  */
 export async function clearNodes(conn: KosConnection): Promise<ClearNodesResult> {
-  try {
-    const result = await conn.execute(
-      'SET _N TO ALLNODES:LENGTH. UNTIL NOT HASNODE { REMOVE NEXTNODE. } PRINT "CLEARED|" + _N.',
-      5000
-    );
+  const result = await conn.queue(
+    'SET _N TO ALLNODES:LENGTH. UNTIL NOT HASNODE { REMOVE NEXTNODE. } PRINT "CLEARED|" + _N.',
+    5000
+  );
 
-    const match = result.output.match(/CLEARED\|(\d+)/);
-    const nodesCleared = match ? Number.parseInt(match[1], 10) : 0;
-
-    return { success: true, nodesCleared };
-  } catch (error) {
-    return {
-      success: false,
-      nodesCleared: 0,
-      error: error instanceof Error ? error.message : String(error),
-    };
+  if (!result.success) {
+    return { success: false, nodesCleared: 0, error: result.error };
   }
+
+  const match = result.output.match(/CLEARED\|(\d+)/);
+  const nodesCleared = match ? Number.parseInt(match[1], 10) : 0;
+
+  return { success: true, nodesCleared };
 }
 
 // ============================================================================

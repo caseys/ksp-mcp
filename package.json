@@ -61,7 +61,7 @@
   "scripts": {
     "prepare": "tsc && chmod +x dist/index.js dist/cli/index.js dist/utils/check-setup.js",
     "postinstall": "node dist/utils/check-setup.js",
-    "build": "tsc && chmod +x dist/index.js dist/cli/index.js dist/utils/check-setup.js",
+    "build": "tsc && chmod +x dist/index.js dist/cli/index.js dist/utils/check-setup.js && (pkill -f 'node.*ksp-mcp.*dist/index' 2>/dev/null || true)",
     "check": "node dist/utils/check-setup.js",
     "knip": "knip",
     "semgrep": "semgrep --config p/typescript src/",
@@ -75,7 +75,6 @@
     "test:mechjeb": "tsx src/tests/test-mechjeb.ts",
     "test:mj-client": "tsx src/tests/test-mechjeb-client.ts",
     "test:targeting": "tsx src/tests/test-targeting.ts",
-    "repl": "tsx src/repl.ts",
     "tool-catalog": "node dist/utils/tool-catalog.js"
   },
   "dependencies": {

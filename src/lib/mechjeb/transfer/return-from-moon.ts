@@ -151,12 +151,12 @@ export async function handlePostSOIArrival(
   callerTool = 'post_soi_arrival'
 ): Promise<PostSOIArrivalResult> {
   // Query current body info
-  const bodyInfo = await conn.execute(
+  const bodyInfo = await conn.queue(
     'PRINT "POST|" + SHIP:BODY:NAME + "|" + ROUND(PERIAPSIS/1000, 1) + "|" + ' +
     'ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(ALTITUDE).',
     3000
   );
-  const match = bodyInfo.output.match(/POST\|([^|]+)\|([\d.-]+)\|(\d+)\|(\d+)/);
+  const match = bodyInfo.success ? bodyInfo.output.match(/POST\|([^|]+)\|([\d.-]+)\|(\d+)\|(\d+)/) : null;
 
   const bodyName = match?.[1]?.trim() ?? 'Unknown';
   const peKm = match ? parseFloat(match[2]) : 0;
@@ -235,11 +235,11 @@ export async function completeReturnFromMoon(
   // Check if we're still at a moon or already at a planet
   // If parent body is Sun, we're at a planet (already transitioned successfully)
   // If parent body is a planet (like Kerbin), we're at a moon (need to check escape)
-  const bodyCheck = await conn.execute(
+  const bodyCheck = await conn.queue(
     'PRINT SHIP:BODY:NAME + "|" + SHIP:BODY:BODY:NAME.',
     3000
   );
-  const bodyMatch = bodyCheck.output.match(/([^|]+)\|([^|]+)/);
+  const bodyMatch = bodyCheck.success ? bodyCheck.output.match(/([^|]+)\|([^|]+)/) : null;
   const currentBodyName = bodyMatch?.[1]?.trim() ?? 'Unknown';
   const parentBodyName = bodyMatch?.[2]?.trim() ?? 'Sun';
 
@@ -248,12 +248,12 @@ export async function completeReturnFromMoon(
   if (alreadyAtPlanet) {
     logger.info(`[return_from_moon] Already at planet ${currentBodyName} - escape successful, skipping validation`);
     // Jump directly to post-arrival handling
-    const postWarpInfo = await conn.execute(
+    const postWarpInfo = await conn.queue(
       'PRINT "POST|" + SHIP:BODY:NAME + "|" + ROUND(PERIAPSIS/1000, 1) + "|" + ' +
       'ROUND(SHIP:BODY:ATM:HEIGHT/1000) + "|" + ROUND(ALTITUDE).',
       3000
     );
-    const postMatch = postWarpInfo.output.match(/POST\|([^|]+)\|([\d.-]+)\|(\d+)\|(\d+)/);
+    const postMatch = postWarpInfo.success ? postWarpInfo.output.match(/POST\|([^|]+)\|([\d.-]+)\|(\d+)\|(\d+)/) : null;
     if (postMatch) {
       const [, body, peKmStr, atmKmStr, altStr] = postMatch;
       const peKm = parseFloat(peKmStr);
@@ -297,7 +297,7 @@ export async function completeReturnFromMoon(
     await new Promise(resolve => setTimeout(resolve, RETRY_DELAYS[attempt]));
 
     // Get current body, escape trajectory info, and next body
-    const trajInfo = await conn.execute(
+    const trajInfo = await conn.queue(
       'LOCAL _ecc IS SHIP:ORBIT:ECCENTRICITY. ' +
       'LOCAL _hasPatch IS SHIP:ORBIT:HASNEXTPATCH. ' +
       'LOCAL _nextBody IS CHOOSE SHIP:ORBIT:NEXTPATCH:BODY:NAME IF _hasPatch ELSE "?". ' +
@@ -306,7 +306,7 @@ export async function completeReturnFromMoon(
       'PRINT "RET|" + SHIP:BODY:NAME + "|" + _nextBody + "|" + _nextPeKm + "|" + ROUND(_ecc, 3) + "|" + _patchEta.',
       3000
     );
-    const match = trajInfo.output.match(/RET\|([^|]+)\|([^|]+)\|([\d.-]+)\|([\d.]+)\|(\d+)/);
+    const match = trajInfo.success ? trajInfo.output.match(/RET\|([^|]+)\|([^|]+)\|([\d.-]+)\|([\d.]+)\|(\d+)/) : null;
 
     if (match) {
       [, currentBody, parentBody] = match;
@@ -354,11 +354,11 @@ export async function completeReturnFromMoon(
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       // Retry the patch check
-      const retryCheck = await conn.execute(
+      const retryCheck = await conn.queue(
         'PRINT (CHOOSE SHIP:ORBIT:NEXTPATCHETA IF SHIP:ORBIT:HASNEXTPATCH ELSE 0).',
         3000
       );
-      const retryEta = parseInt(retryCheck.output.match(/(\d+)/)?.[1] || '0');
+      const retryEta = retryCheck.success ? parseInt(retryCheck.output.match(/(\d+)/)?.[1] || '0') : 0;
 
       if (retryEta > 0) {
         warpResult = await warpTo(conn, 'soi', {
@@ -424,12 +424,12 @@ export async function returnFromMoon(
   // Resolve 'auto' periapsis based on parent body's atmosphere
   let resolvedPeriapsis: number;
   if (targetPeriapsis === 'auto') {
-    const atmInfo = await conn.execute(
+    const atmInfo = await conn.queue(
       'LOCAL p IS SHIP:BODY:BODY. ' +
       'PRINT "ATM|" + (CHOOSE p:ATM:HEIGHT IF p:ATM:EXISTS ELSE 0).',
       3000
     );
-    const atmMatch = atmInfo.output.match(/ATM\|(\d+)/);
+    const atmMatch = atmInfo.success ? atmInfo.output.match(/ATM\|(\d+)/) : null;
     const atmHeight = atmMatch ? parseInt(atmMatch[1]) : 0;
 
     if (atmHeight > 0) {

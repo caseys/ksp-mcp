@@ -2,33 +2,7 @@ import { Transport } from './transport.js';
 import { TmuxTransport } from './tmux-transport.js';
 import { SocketTransport } from './socket-transport.js';
 import { config } from '../config/index.js';
-import { globalKosMonitor } from '../utils/kos-monitor.js';
 import { createHash } from 'node:crypto';
-
-/**
- * Health reason codes for connection issues.
- * These map to the nuanced detection in connection-tools.ts.
- */
-export type HealthReason = 'signal_lost' | 'power_loss' | 'crashed' | 'no_response' | 'error';
-
-/**
- * Health status for connection issues.
- * Undefined means healthy, present means there's an issue.
- */
-export interface HealthStatus {
-  reason: HealthReason;
-  message: string;
-  timestamp: number;
-}
-
-/** Default messages for each health reason */
-const HEALTH_MESSAGES: Record<HealthReason, string> = {
-  signal_lost: 'Radio blackout - vessel has no signal',
-  power_loss: 'Vessel has no power - waiting for batteries',
-  crashed: 'Vessel appears to have crashed',
-  no_response: 'No response from kOS',
-  error: 'Connection error',
-};
 
 export interface ConnectionState {
   connected: boolean;
@@ -36,13 +10,22 @@ export interface ConnectionState {
   vesselName: string | null;
   cpuTag: string | null;
   lastError: string | null;
-  /** Health status from last check (undefined = healthy) */
-  health?: HealthStatus;
 }
 
 export interface CommandResult {
   success: boolean;
   output: string;
+  error?: string;
+}
+
+/**
+ * Internal result from executeRaw() - includes raw output before cleaning
+ */
+interface RawExecuteResult {
+  success: boolean;
+  rawOutput: string;
+  sentinelToken: string;
+  sentinelCommand: string;
   error?: string;
 }
 
@@ -76,17 +59,6 @@ export interface ExecuteOptions {
    * tear down the session (e.g., quickload) where no response will arrive.
    */
   fireAndForget?: boolean;
-  /**
-   * If false, skip prepending Ctrl+C to clear stray input. Default is true.
-   * The Ctrl+C also breaks any running daemon loop, allowing the command to execute.
-   */
-  clear?: boolean;
-  /**
-   * If true, restart the MCP daemon after command execution.
-   * The daemon provides blackout auto-warp when vessel is idle.
-   * Since Ctrl+C breaks the daemon, this restores it after the command.
-   */
-  restartDaemon?: boolean;
 }
 
 /**
@@ -107,6 +79,7 @@ export class KosConnection {
     lastError: null,
   };
   private commandSequence = 0;
+  private lastComsTestPass = 0; // Timestamp of last successful coms test
   private options: Required<Omit<KosConnectionOptions, 'transport' | 'transportType' | 'cpuLabel'>> & { cpuLabel?: string };
 
   // Command serialization lock to prevent interleaved commands
@@ -181,7 +154,7 @@ export class KosConnection {
     }
 
     // Try Enter to wake up idle menu (no delay needed)
-    await this.transport.send('\r\n', false);
+    await this.transport.send('\r\n');
 
     // Final try
     try {
@@ -258,23 +231,38 @@ export class KosConnection {
         targetCpu = found;
       }
 
+      // Menu should already include the "> " prompt
+      // Only wait if it wasn't captured in menuOutput
+      if (!menuOutput.includes('> ')) {
+        try {
+          await this.transport.waitFor(/>\s*$/, 500);
+        } catch {
+          // Prompt may have been missed, continue anyway
+        }
+      }
+
       // Select CPU
       await this.transport.send(String(targetCpu!));
 
-      // Wait for kOS to be ready
-      // - Fresh connection shows "Proceed."
-      // - Reconnection to existing session shows prompt ">" with scrollback
-      // Wait for either pattern with short timeout (both appear quickly if they're coming)
-      try {
-        await this.transport.waitFor(/Proceed|>\s*$/, 500);
-      } catch {
-        // Neither appeared - might be slow or have scrollback without prompt
-        // Clear buffer and continue - health check will verify
-        await this.transport.read();
+      // Brief settling time, then clear terminal to discard stale output
+      await new Promise(r => setTimeout(r, 50));
+      if (this.transport.sendKeys) {
+        await this.transport.sendKeys('C-k');
       }
+      await this.transport.read(); // Discard any remaining buffer
 
       // Parse connection info from menu output
       this.state = this.parseConnectionInfo(menuOutput, targetCpu!);
+
+      // Verify connection with coms test (may be in radio blackout)
+      const comsOk = await this.comsTest(config.timeouts.command);
+      if (!comsOk) {
+        this.state.lastError = 'Radio blackout - no response from kOS';
+        // Still mark as connected - caller can retry when in range
+      } else {
+        // Print installed script versions
+        await this.printInstalledVersions();
+      }
 
       return this.state;
     } catch (error) {
@@ -300,8 +288,9 @@ export class KosConnection {
       this.transport = null;
     }
 
-    // Clear the lock
+    // Clear the lock and caches
     this.commandLock = Promise.resolve();
+    this.lastComsTestPass = 0;
 
     // Reset state - next command will trigger reconnect
     this.state = {
@@ -351,10 +340,10 @@ export class KosConnection {
   }
 
   /**
-   * Execute a kOS command and return the result.
-   * Commands are serialized to prevent interleaving.
+   * Execute a kOS command (fire-and-forget pattern).
+   * Sends command, discards all output. Use queue() if you need output.
    */
-  async execute(command: string, timeoutMs = config.timeouts.command, options?: ExecuteOptions): Promise<CommandResult> {
+  async raw(command: string, timeoutMs = config.timeouts.command, _options?: ExecuteOptions): Promise<CommandResult> {
     if (!this.state.connected || !this.transport) {
       return { success: false, output: '', error: 'Not connected to kOS' };
     }
@@ -364,75 +353,46 @@ export class KosConnection {
     try {
       releaseLock = await this.acquireCommandLock(timeoutMs);
     } catch (error) {
-      // Lock acquisition failed (timeout) - reset connection to clear stuck state
-      // This closes the transport, killing any pending I/O, so subsequent
-      // commands will trigger a fresh reconnect without garbled output.
       this.resetConnection();
       return { success: false, output: '', error: error instanceof Error ? error.message : 'Lock acquisition failed' };
     }
 
     try {
-      // Clear any pending output
+      // Clear any pending output from transport buffer
       await this.transport.read();
 
-      // Determine if we should clear stray input
-      // Default: true for regular commands, false for health checks (which set clear: false explicitly)
-      const clearInput = options?.clear !== false;
-
-      if (options?.fireAndForget) {
-        await this.transport.send(command, clearInput);
-        return { success: true, output: '' };
+      // Coms test: verify radio contact before sending real command
+      const hasRadio = await this.comsTest(timeoutMs);
+      if (!hasRadio) {
+        // Reset connection so next call does fresh connect with boot wait
+        this.resetConnection();
+        const maxTimeout = config.timeouts.comsTestMax;
+        const effectiveTimeout = Math.min(timeoutMs, maxTimeout);
+        return {
+          success: false,
+          output: '',
+          error: `Radio loss detected - coms test timed out after ${effectiveTimeout}ms (2 attempts)`,
+        };
       }
 
-      // Send command followed by sentinel as a single line to avoid kOS buffer race condition
-      const { token: sentinelToken, command: sentinelCommand } = this.createSentinel(command);
-      const sentinelPattern = this.buildSentinelPattern(sentinelToken);
-      // Combine into single line: "command. PRINT sentinel." - kOS parses as two statements
-      await this.transport.send(`${command} ${sentinelCommand}`, clearInput);
+      // Clear buffer after coms test
+      await this.transport.read();
 
-      // Wait for sentinel - this is our only reliable completion signal
-      // The kOS prompt '>' only appears at CPU menu, not after commands
-      let output: string;
-      try {
-        output = await this.transport.waitFor(sentinelPattern, timeoutMs);
-      } catch {
-        // Sentinel didn't appear - command completion unknown
-        // Clear buffer to prevent pollution of next command
-        await this.transport.read();
-        throw new Error(`Command timed out (no sentinel after ${timeoutMs}ms): ${command.slice(0, 50)}...`);
-      }
+      // Send command (no sentinel, output discarded)
+      // Prepend Ctrl+K to clear kOS terminal
+      await this.transport.send(`\u000B${command}`);
 
-      // Clean up output (remove the command echo, sentinel, and prompt)
-      // Combined command is echoed as single line
-      const combinedCommand = `${command} ${sentinelCommand}`;
-      const cleanOutput = this.cleanOutput([combinedCommand], output, sentinelToken);
+      // Wait for echo + additional output, then drain buffer
+      // This prevents leftover output from contaminating subsequent queue() calls
+      // Output is logged automatically by transport.read() when KOS_DEBUG=1
+      await new Promise(resolve => setTimeout(resolve, 100));
+      await this.transport.read();
 
-      // Track output in global monitor for kos://terminal/recent resource
-      if (cleanOutput) {
-        globalKosMonitor.trackLines(cleanOutput.split('\n'));
-      }
-
-      // Check for errors in output
-      const error = this.detectError(cleanOutput);
-      if (error) {
-        // Still restart daemon even on error if requested
-        if (options?.restartDaemon) {
-          await this.restartDaemon();
-        }
-        return { success: false, output: cleanOutput, error };
-      }
-
-      // Restart daemon if requested (Ctrl+C killed it, bring it back)
-      if (options?.restartDaemon) {
-        await this.restartDaemon();
-      }
-
-      return { success: true, output: cleanOutput };
+      return { success: true, output: '' };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
       this.state.lastError = errorMsg;
 
-      // Mark as disconnected on transport errors to enable auto-reconnect
       if (errorMsg.includes('EPIPE') || errorMsg.includes('ECONNRESET') ||
           errorMsg.includes('ECONNREFUSED') || errorMsg.includes('Connection refused') ||
           errorMsg.includes('closed') || errorMsg.includes('Socket closed')) {
@@ -442,12 +402,10 @@ export class KosConnection {
 
       return { success: false, output: '', error: errorMsg };
     } finally {
-      // Always release lock, even if something unexpected happened
       if (releaseLock) {
         try {
           releaseLock();
         } catch {
-          // Release failed - reset lock to prevent permanent deadlock
           this.commandLock = Promise.resolve();
         }
       }
@@ -455,24 +413,182 @@ export class KosConnection {
   }
 
   /**
-   * Restart the MCP daemon after a command killed it (via Ctrl+C).
-   * The daemon provides auto-warp to radio contact during idle blackout.
-   * Fire-and-forget: we don't wait for daemon output to avoid blocking.
+   * Execute command with automatic output markers.
+   * Returns only the content printed between markers, cleanly separated from echo.
+   *
+   * This method wraps the command with unique markers and extracts the output
+   * between them, bypassing the fragile cleanOutput() echo stripping entirely.
+   *
+   * @param command - kOS command(s) to execute (should PRINT output)
+   * @param timeoutMs - Timeout for command execution
+   * @returns CommandResult with extracted output between markers
    */
-  async restartDaemon(): Promise<void> {
-    if (!this.transport) return;
+  async queue(command: string, timeoutMs = config.timeouts.command): Promise<CommandResult> {
+    // Generate unique marker pair using hash
+    const hash = createHash('sha1')
+      .update(command)
+      .update(String(Date.now()))
+      .update(String(this.commandSequence))
+      .digest('hex')
+      .slice(0, 8)
+      .toUpperCase();
+
+    const startMarker = `[MCP_OUT_${hash}_START]`;
+    const endMarker = `[MCP_OUT_${hash}_END]`;
+
+    // Wrap command: print start marker, execute command, print end marker
+    // Markers are concatenated ("["+"MCP_OUT_...") so they don't appear complete in the echo
+    const wrappedCommand =
+      `PRINT "["+"MCP_OUT_${hash}_START"+"]". ${command} PRINT "["+"MCP_OUT_${hash}_END"+"]".`;
+
+    // Execute and get raw output
+    const result = await this.executeRaw(wrappedCommand, timeoutMs);
+
+    if (!result.success) {
+      return { success: false, output: '', error: result.error };
+    }
+
+    // Extract content between markers from raw output
+    const startIdx = result.rawOutput.indexOf(startMarker);
+    const endIdx = result.rawOutput.indexOf(endMarker);
+
+    if (startIdx === -1 || endIdx === -1 || startIdx >= endIdx) {
+      // Markers not found - could be kOS error or timeout
+      // Check for errors in the raw output
+      const error = this.detectError(result.rawOutput);
+      if (error) {
+        return { success: false, output: '', error };
+      }
+      return { success: false, output: '', error: 'Output markers not found' };
+    }
+
+    // Extract content between markers and clean it
+    let extracted = result.rawOutput.slice(startIdx + startMarker.length, endIdx);
+    // Strip kOS terminal control sequences (PUA characters)
+    extracted = this.stripUnicodeCommands(extracted);
+    // Normalize line endings and strip control chars
+    extracted = extracted
+      .replaceAll('\r\n', '\n')
+      .replaceAll('\r', '\n')
+      // eslint-disable-next-line no-control-regex -- stripping terminal control chars
+      .replaceAll(/[\u0000-\u0009\u000B-\u001F]/g, '')
+      .trim();
+
+    // Check for kOS errors in extracted content
+    const error = this.detectError(extracted);
+    if (error) {
+      return { success: false, output: extracted, error };
+    }
+
+    return { success: true, output: extracted };
+  }
+
+  /**
+   * Execute command and return raw output before cleanOutput() processing.
+   * This is an internal method used by both execute() and queue().
+   *
+   * @param command - kOS command to execute
+   * @param timeoutMs - Timeout for command execution
+   * @param options - Execution options (fireAndForget not supported here)
+   * @returns Raw execution result with unprocessed output
+   */
+  private async executeRaw(command: string, timeoutMs: number): Promise<RawExecuteResult> {
+    if (!this.state.connected || !this.transport) {
+      return { success: false, rawOutput: '', sentinelToken: '', sentinelCommand: '', error: 'Not connected to kOS' };
+    }
+
+    // Serialize commands to prevent interleaving
+    let releaseLock: (() => void) | null = null;
+    try {
+      releaseLock = await this.acquireCommandLock(timeoutMs);
+    } catch (error) {
+      this.resetConnection();
+      return {
+        success: false,
+        rawOutput: '',
+        sentinelToken: '',
+        sentinelCommand: '',
+        error: error instanceof Error ? error.message : 'Lock acquisition failed',
+      };
+    }
 
     try {
-      // Clear the running flag first - the old daemon loop is dead (we Ctrl+C'd it)
-      // Without this, boot file sees "Already running" and doesn't start a new loop
-      await this.transport.send('SET MCP_DAEMON_RUNNING TO FALSE.', false);
-      await new Promise(resolve => setTimeout(resolve, 100));
-      // Now run from local volume (faster, works during blackout)
-      await this.transport.send('RUNPATH("1:/boot/mcp_daemon").', false);
-      // Brief pause to let daemon start before next command
-      await new Promise(resolve => setTimeout(resolve, 100));
-    } catch {
-      // Daemon restart is best-effort, don't fail the command
+      // Clear any pending output from transport buffer
+      await this.transport.read();
+
+      // Coms test: verify radio contact before sending real command
+      const hasRadio = await this.comsTest(timeoutMs);
+      if (!hasRadio) {
+        // Reset connection so next call does fresh connect with boot wait
+        this.resetConnection();
+        const maxTimeout = config.timeouts.comsTestMax;
+        const effectiveTimeout = Math.min(timeoutMs, maxTimeout);
+        return {
+          success: false,
+          rawOutput: '',
+          sentinelToken: '',
+          sentinelCommand: '',
+          error: `Radio loss detected - coms test timed out after ${effectiveTimeout}ms (2 attempts)`,
+        };
+      }
+
+      // Clear buffer after coms test
+      await this.transport.read();
+
+      // Send command followed by sentinel
+      const { token: sentinelToken, command: sentinelCommand } = this.createSentinel(command);
+      const sentinelPattern = this.buildSentinelPattern(sentinelToken);
+
+      // Prepend Ctrl+K to clear kOS terminal, then command + sentinel
+      await this.transport.send(`\u000B${command} ${sentinelCommand}`);
+
+      // Wait for sentinel
+      let rawOutput: string;
+      try {
+        rawOutput = await this.transport.waitFor(sentinelPattern, timeoutMs);
+      } catch {
+        // Sentinel didn't appear - check if stuck at CPU menu
+        const buffer = await this.transport.read();
+        if (buffer.includes('Choose a CPU') || buffer.includes('kOS Terminal Server')) {
+          this.resetConnection();
+          throw new Error(`Connection stuck at CPU menu - reset triggered. Retry command.`);
+        }
+        return {
+          success: false,
+          rawOutput: buffer,
+          sentinelToken,
+          sentinelCommand,
+          error: `Command timed out (no sentinel after ${timeoutMs}ms)`,
+        };
+      }
+
+      return { success: true, rawOutput, sentinelToken, sentinelCommand };
+    } catch (error) {
+      const errorMsg = error instanceof Error ? error.message : String(error);
+      this.state.lastError = errorMsg;
+
+      // Mark as disconnected on transport errors
+      if (
+        errorMsg.includes('EPIPE') ||
+        errorMsg.includes('ECONNRESET') ||
+        errorMsg.includes('ECONNREFUSED') ||
+        errorMsg.includes('Connection refused') ||
+        errorMsg.includes('closed') ||
+        errorMsg.includes('Socket closed')
+      ) {
+        this.state.connected = false;
+        this.transport = null;
+      }
+
+      return { success: false, rawOutput: '', sentinelToken: '', sentinelCommand: '', error: errorMsg };
+    } finally {
+      if (releaseLock) {
+        try {
+          releaseLock();
+        } catch {
+          this.commandLock = Promise.resolve();
+        }
+      }
     }
   }
 
@@ -543,37 +659,6 @@ export class KosConnection {
   }
 
   /**
-   * Set health status to indicate a connection issue.
-   * @param reason - Health reason code, or null to clear
-   * @param customMessage - Optional custom message (uses default if not provided)
-   */
-  setHealth(reason: HealthReason | null, customMessage?: string): void {
-    if (reason === null) {
-      this.state.health = undefined;
-    } else {
-      this.state.health = {
-        reason,
-        message: customMessage ?? HEALTH_MESSAGES[reason],
-        timestamp: Date.now(),
-      };
-    }
-  }
-
-  /**
-   * Clear health status (marks connection as healthy).
-   */
-  clearHealth(): void {
-    this.state.health = undefined;
-  }
-
-  /**
-   * Check if connection is in radio blackout.
-   */
-  isBlackout(): boolean {
-    return this.state.health?.reason === 'signal_lost';
-  }
-
-  /**
    * Check if connected
    */
   isConnected(): boolean {
@@ -603,6 +688,99 @@ export class KosConnection {
       // Fallback: just read and discard
       await new Promise(r => setTimeout(r, waitMs));
       await this.transport.read();
+    }
+  }
+
+  /**
+   * Lightweight connectivity test before real commands.
+   * Sends PRINT and verifies output appears (not just echo).
+   * Retries once on failure to handle transient issues.
+   * @param timeoutMs - Timeout for coms test (capped at config.timeouts.comsTestMax)
+   * @returns true if radio contact confirmed, false if likely radio loss
+   */
+  private async comsTest(timeoutMs: number): Promise<boolean> {
+    if (!this.transport) return false;
+
+    // Skip if we passed a coms test recently (within 1 second)
+    // This avoids redundant tests during rapid command sequences
+    const now = Date.now();
+    if (now - this.lastComsTestPass < 1000) {
+      return true;
+    }
+
+    // Use passed timeout, but ensure minimum of 10s and cap at comsTestMax
+    // Minimum is needed because hard drive spin-up and buffered data may delay response
+    const minTimeout = 10_000;
+    const maxTimeout = config.timeouts.comsTestMax;
+    const effectiveTimeout = Math.min(Math.max(timeoutMs, minTimeout), maxTimeout);
+
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const startTime = Date.now();
+      const marker = `MCP_COMS_TEST-${startTime}`;
+
+      // Clear buffer first
+      await this.transport.read();
+
+      // Send Ctrl+K to clear terminal, then test PRINT
+      await this.transport.send(`\u000BPRINT "${marker}".`);
+
+      // Wait for marker in output, not echo - use negative lookbehind to skip quoted echo
+      const markerPattern = new RegExp(`(?<!")${marker}`);
+      try {
+        await this.transport.waitFor(markerPattern, effectiveTimeout);
+        // Marker appeared → radio contact confirmed
+        this.lastComsTestPass = Date.now();
+        return true;
+      } catch {
+        const elapsed = Date.now() - startTime;
+        console.error(`[kos-connection] TIMEOUT: comsTest attempt ${attempt} timed out after ${elapsed}ms (limit: ${effectiveTimeout}ms)`);
+        // First attempt failed - wait and retry
+        if (attempt === 1) {
+          await new Promise(r => setTimeout(r, 500));
+          continue;
+        }
+        // Both attempts failed
+        console.error(`[kos-connection] TIMEOUT: comsTest failed after 2 attempts - radio loss likely`);
+        return false;
+      }
+    }
+    return false;
+  }
+
+  /**
+   * Print installed script versions to console.
+   * Called after successful connection to show what's on the vessel.
+   */
+  private async printInstalledVersions(): Promise<void> {
+    const statusVer = await this.getInstalledVersion('1:/mcp_status.ks');
+    const alignVer = await this.getInstalledVersion('1:/mcp_align.ks');
+    console.error(`[kos-connection] Installed: mcp_status=${statusVer}, mcp_align=${alignVer}`);
+  }
+
+  /**
+   * Get the installed version of a script by reading its first line.
+   * Returns the version hash, 'none' if file doesn't exist, or 'error' on failure.
+   */
+  private async getInstalledVersion(path: string): Promise<string> {
+    try {
+      const result = await this.queue(
+        `IF EXISTS("${path}") { LOCAL lines IS OPEN("${path}"):READALL. LOCAL iter IS lines:ITERATOR. IF iter:NEXT { PRINT iter:VALUE. } ELSE { PRINT "[EMPTY]". } } ELSE { PRINT "[NO_FILE]". }`,
+        2000
+      );
+      if (result.success) {
+        const output = result.output.trim();
+        if (output === '[NO_FILE]') {
+          return 'none';
+        }
+        if (output === '[EMPTY]') {
+          return 'empty';
+        }
+        const match = output.match(/version:\s*(\w+)/);
+        return match?.[1] ?? 'unknown';
+      }
+      return 'error';
+    } catch {
+      return 'error';
     }
   }
 
@@ -689,102 +867,7 @@ export class KosConnection {
     return cpus.length > 0 ? cpus.join('\n') : '  (no CPUs found)';
   }
 
-  /**
-   * Clean up command output (remove echo, prompts, kOS terminal control chars)
-   *
-   * kOS uses Unicode Private Use Area (U+E000-U+F8FF) for terminal control.
-   * See /docs/kos-protocol-analysis.md for full protocol documentation.
-   *
-   * Key UnicodeCommand values:
-   * - TELEPORTCURSOR (0xE006): followed by 2 bytes (col, row)
-   * - RESIZESCREEN (0xE016): followed by 2 bytes (width, height)
-   * - TITLEBEGIN (0xE004): followed by chars until TITLEEND (0xE005)
-   * - All others: single character commands
-   */
-  private cleanOutput(commands: string[], output: string, sentinelToken?: string): string {
-    // Step 1: Strip kOS UnicodeCommand sequences (PUA characters + their parameters)
-    // These are terminal control commands, not actual output data
-    const stripped = this.stripUnicodeCommands(output);
 
-    // Step 2: Normalize line endings and strip remaining control chars
-    // Keep \r\n and \n for line structure, strip other C0 control codes
-    const normalized = stripped
-      .replaceAll('\r\n', '\n')           // Normalize CRLF to LF
-      .replaceAll('\r', '\n')             // Normalize lone CR to LF
-      // eslint-disable-next-line no-control-regex -- intentionally stripping terminal control chars
-      .replaceAll(/[\u0000-\u0009\u000B-\u001F]/g, ''); // Strip other control chars (keep \n)
-
-    // Step 3: Process lines
-    const lines = normalized.split('\n');
-
-    // Normalize commands for comparison (kOS normalizes whitespace in echo)
-    const normalizedCommands = commands
-      .filter(cmd => !!cmd && cmd.trim().length > 0)
-      .map(cmd => ({
-        raw: cmd,
-        normalized: cmd.replaceAll(/\s+/g, ' ').trim(),
-      }));
-
-    const noisePatterns = [
-      /^\{.*detaching.*\}$/i,
-      /^detaching from/i,
-      /^connecting to cpu/i,
-      /^choose a cpu/i,
-      /^selecting cpu/i,
-    ];
-
-    const cleaned = lines
-      .map(line => {
-        let trimmed = line.trim();
-        if (!trimmed) {
-          return '';
-        }
-
-        let normalizedLine = trimmed.replaceAll(/\s+/g, ' ');
-
-        // Remove command echoes, handling cases where multiple commands are concatenated
-        let strippedCommand = true;
-        while (strippedCommand && trimmed.length > 0) {
-          strippedCommand = false;
-          for (const cmd of normalizedCommands) {
-            if (normalizedLine.startsWith(cmd.normalized)) {
-              const remainder = normalizedLine.slice(cmd.normalized.length).trim();
-              trimmed = remainder;
-              normalizedLine = remainder.replaceAll(/\s+/g, ' ');
-              strippedCommand = true;
-              break;
-            }
-            if (trimmed.startsWith(cmd.raw)) {
-              const remainder = trimmed.slice(cmd.raw.length).trim();
-              trimmed = remainder;
-              normalizedLine = remainder.replaceAll(/\s+/g, ' ');
-              strippedCommand = true;
-              break;
-            }
-          }
-        }
-
-        if (sentinelToken && trimmed.includes(sentinelToken)) {
-          trimmed = trimmed.split(sentinelToken).join('').trim();
-        }
-
-        return trimmed;
-      })
-      .filter(line => {
-        if (!line) return false;
-        if (line === '>') return false;  // kOS prompt
-        if (noisePatterns.some(pattern => pattern.test(line))) return false;
-        return true;
-      })
-      .join('\n')
-      .trim();
-
-    if (sentinelToken && cleaned.includes(sentinelToken)) {
-      return cleaned.split(sentinelToken).join('').trim();
-    }
-
-    return cleaned;
-  }
 
   /**
    * Strip kOS UnicodeCommand sequences from output.
@@ -859,6 +942,7 @@ export class KosConnection {
       { pattern: /No target/i, message: 'No target set' },
       { pattern: /Connection refused/i, message: 'Connection refused - is KSP running?' },
       { pattern: /Unable to connect/i, message: 'Unable to connect to kOS server' },
+      { pattern: /File ['"].*['"] not found/i, message: 'File not found' },
     ];
 
     for (const { pattern, message } of errorPatterns) {

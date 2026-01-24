@@ -89,8 +89,8 @@ export const changeInclinationTool: ToolDefinition = {
           text += `\n${result.warning}`;
         }
         if (result.executed) {
-          const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 1).', 2000);
-          const inc = incInfo.output.trim();
+          const incInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:INCLINATION, 1).', 2000);
+          const inc = incInfo.success ? incInfo.output : '?';
           text += `\nInclination: ${inc}°`;
         }
         return ctx.successResponse('change_inclination', text);

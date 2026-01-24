@@ -73,8 +73,8 @@ export const changeSemiMajorAxisTool: ToolDefinition = {
           ? 'Burn complete'
           : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
-          const periodInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:PERIOD, 1).', 2000);
-          const period = periodInfo.output.trim();
+          const periodInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:PERIOD, 1).', 2000);
+          const period = periodInfo.success ? periodInfo.output : '?';
           text += `\nOrbital period: ${period}s`;
         }
         return ctx.successResponse('change_semi_major_axis', text);

@@ -25,26 +25,26 @@ async function main() {
     await delay(500);
 
     console.log('\n--- Test 1: Simple print ---');
-    const result = await conn.execute('PRINT "Hello from ksp-mcp!".');
+    const result = await conn.raw('PRINT "Hello from ksp-mcp!".');
     console.log('Output:', result.output);
     console.log('Success:', result.success);
 
     await delay(300);
 
     console.log('\n--- Test 2: Get ship name ---');
-    const shipResult = await conn.execute('PRINT SHIP:NAME.');
+    const shipResult = await conn.raw('PRINT SHIP:NAME.');
     console.log('Output:', shipResult.output);
 
     await delay(300);
 
     console.log('\n--- Test 3: Get altitude ---');
-    const altResult = await conn.execute('PRINT "ALT: " + ROUND(ALTITUDE).');
+    const altResult = await conn.raw('PRINT "ALT: " + ROUND(ALTITUDE).');
     console.log('Output:', altResult.output);
 
     await delay(300);
 
     console.log('\n--- Test 4: Get orbit info ---');
-    const orbitResult = await conn.execute('PRINT "APO: " + ROUND(APOAPSIS) + " PER: " + ROUND(PERIAPSIS).');
+    const orbitResult = await conn.raw('PRINT "APO: " + ROUND(APOAPSIS) + " PER: " + ROUND(PERIAPSIS).');
     console.log('Output:', orbitResult.output);
 
     console.log('\n--- Disconnecting ---');

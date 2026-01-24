@@ -100,8 +100,8 @@ export const matchPlanesTool: ToolDefinition = {
         }
         if (result.executed) {
           // Show both inclinations - relative inc is complex to calculate
-          const incInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2) + "|" + ROUND(TARGET:ORBIT:INCLINATION, 2).', 2000);
-          const match = incInfo.output.match(/([\d.]+)\|([\d.]+)/);
+          const incInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:INCLINATION, 2) + "|" + ROUND(TARGET:ORBIT:INCLINATION, 2).', 2000);
+          const match = incInfo.success ? incInfo.output.match(/([\d.]+)\|([\d.]+)/) : null;
           if (match) {
             text += `\nInclination: ${match[1]}° (target: ${match[2]}°)`;
           }

@@ -239,10 +239,6 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
         // Execute tool handler
         const result = await tool.handler(args as Record<string, unknown>, context, extra);
 
-        // Auto-restart daemon after tool execution (keeps daemon running for blackout recovery)
-        // Fire-and-forget: don't block response to user
-        context.restartDaemon();
-
         return result;
       }
     );

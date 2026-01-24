@@ -138,11 +138,11 @@ export const adjustOrbitTool: ToolDefinition = {
       const currentPe = orbitInfo?.periapsis ?? 0;
 
       // Query body info for validation
-      const bodyResult = await conn.execute(
+      const bodyResult = await conn.queue(
         'IF SHIP:BODY:ATM:EXISTS { PRINT SHIP:BODY:ATM:HEIGHT + "|" + SHIP:BODY:NAME. } ELSE { PRINT "0|" + SHIP:BODY:NAME. }',
         3000
       );
-      const bodyMatch = bodyResult.output.match(/(\d+)\|(.+)/);
+      const bodyMatch = bodyResult.success ? bodyResult.output.match(/(\d+)\|(.+)/) : null;
       const atmHeight = bodyMatch ? Number.parseInt(bodyMatch[1]) : 0;
       const bodyName = bodyMatch ? bodyMatch[2].trim() : 'body';
 

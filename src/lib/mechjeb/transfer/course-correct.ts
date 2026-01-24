@@ -36,7 +36,7 @@ interface PlanetInfo {
  * Query planet information for smart periapsis selection
  */
 async function queryPlanetInfo(conn: KosConnection, targetName: string): Promise<PlanetInfo | null> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     `IF EXISTS(BODY("${targetName}")) { ` +
     `LOCAL b IS BODY("${targetName}"). ` +
     `LOCAL hasAtm IS b:ATM:EXISTS. ` +
@@ -49,7 +49,7 @@ async function queryPlanetInfo(conn: KosConnection, targetName: string): Promise
     3000
   );
 
-  if (result.output.includes('NOPLANET')) {
+  if (!result.success || result.output.includes('NOPLANET')) {
     return null;
   }
 
@@ -136,14 +136,14 @@ function getSmartPeriapsis(planetInfo: PlanetInfo): SmartPeriapsisResult {
  * Query current encounter periapsis from trajectory (not from a node)
  */
 async function queryCurrentEncounterPeriapsis(conn: KosConnection): Promise<{ hasPeriapsis: boolean; periapsis: number; body: string }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'IF SHIP:ORBIT:HASNEXTPATCH { ' +
     'PRINT "PE|" + SHIP:ORBIT:NEXTPATCH:BODY:NAME + "|" + ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS). ' +
     '} ELSE { PRINT "NOPE". }',
     3000
   );
 
-  if (result.output.includes('NOPE')) {
+  if (!result.success || result.output.includes('NOPE')) {
     return { hasPeriapsis: false, periapsis: 0, body: '' };
   }
 
@@ -166,14 +166,14 @@ async function queryCurrentEncounterPeriapsis(conn: KosConnection): Promise<{ ha
  * Uses NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS to get the periapsis in the target's SOI.
  */
 async function queryNodePeriapsis(conn: KosConnection): Promise<{ hasEncounter: boolean; periapsis: number }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { ' +
     'PRINT "ENC|" + ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). ' +
     '} ELSE IF HASNODE { PRINT "NOENC". } ELSE { PRINT "NONODE". }',
     3000
   );
 
-  if (result.output.includes('NONODE') || result.output.includes('NOENC')) {
+  if (!result.success || result.output.includes('NONODE') || result.output.includes('NOENC')) {
     return { hasEncounter: false, periapsis: 0 };
   }
 
@@ -186,7 +186,7 @@ async function queryNodePeriapsis(conn: KosConnection): Promise<{ hasEncounter: 
  * Returns encounter info from the node's predicted orbit.
  */
 async function queryNodeEncounter(conn: KosConnection): Promise<{ hasNode: boolean; hasEncounter: boolean; encounterBody?: string }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'IF HASNODE { ' +
     'IF NEXTNODE:ORBIT:HASNEXTPATCH { ' +
     'PRINT "NODE_ENC|" + NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. ' +
@@ -195,7 +195,7 @@ async function queryNodeEncounter(conn: KosConnection): Promise<{ hasNode: boole
     3000
   );
 
-  if (result.output.includes('NONODE')) {
+  if (!result.success || result.output.includes('NONODE')) {
     return { hasNode: false, hasEncounter: false };
   }
   if (result.output.includes('NODE_NOENC')) {
@@ -223,12 +223,12 @@ async function queryActualPeriapsis(conn: KosConnection, retries = 3): Promise<{
     }
 
     // Use MechJeb INFO accessor - TPERI gives periapsis in target SOI
-    const result = await conn.execute(
+    const result = await conn.queue(
       'IF HASTARGET { PRINT "ENC|" + ADDONS:MJ:INFO:TPERI. } ELSE { PRINT "NOTGT". }',
       3000
     );
 
-    if (result.output.includes('NOTGT')) {
+    if (!result.success || result.output.includes('NOTGT')) {
       return { hasEncounter: false, periapsis: 0 };
     }
 
@@ -286,7 +286,7 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
   // Split into multiple simpler queries for reliability
 
   // Check 1: SOI encounter (pure kOS, most reliable)
-  const encResult = await conn.execute(
+  const encResult = await conn.queue(
     'IF SHIP:ORBIT:HASNEXTPATCH AND HASTARGET { ' +
     'LOCAL nb IS SHIP:ORBIT:NEXTPATCH:BODY:NAME. ' +
     'IF nb = TARGET:NAME { PRINT "ENC|" + nb. } ELSE { PRINT "INT|" + nb. } ' +
@@ -295,16 +295,16 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
   );
 
   let intermediateBody: string | undefined;
-  if (encResult.output.includes('ENC|')) {
+  if (encResult.success && encResult.output.includes('ENC|')) {
     // We have a direct encounter - use that
     const encMatch = encResult.output.match(/ENC\|(\w+)/);
     if (encMatch) {
       // Query encounter details
-      const detailResult = await conn.execute(
+      const detailResult = await conn.queue(
         'PRINT "DET|" + ROUND(SHIP:ORBIT:NEXTPATCHETA) + "|" + TARGET:NAME.',
         3000
       );
-      const detMatch = detailResult.output.match(/DET\|(\d+)\|(\w+)/);
+      const detMatch = detailResult.success ? detailResult.output.match(/DET\|(\d+)\|(\w+)/) : null;
       if (detMatch) {
         return {
           hasApproach: true,
@@ -314,13 +314,13 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
         };
       }
     }
-  } else if (encResult.output.includes('INT|')) {
+  } else if (encResult.success && encResult.output.includes('INT|')) {
     const intMatch = encResult.output.match(/INT\|(\w+)/);
     intermediateBody = intMatch?.[1];
   }
 
   // Check 2: Geometric check - does orbit reach target's orbital plane? (pure kOS)
-  const geoResult = await conn.execute(
+  const geoResult = await conn.queue(
     'IF HASTARGET AND TARGET:TYPENAME = "Body" { ' +
     'LOCAL tgtSma IS TARGET:ORBIT:SEMIMAJORAXIS. ' +
     'LOCAL shipApo IS APOAPSIS + SHIP:BODY:RADIUS. ' +
@@ -331,7 +331,7 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
     3000
   );
 
-  const geoMatch = geoResult.output.match(/GEO\|(\d+)\|(\d+)\|(\d+)/);
+  const geoMatch = geoResult.success ? geoResult.output.match(/GEO\|(\d+)\|(\d+)\|(\d+)/) : null;
   if (geoMatch) {
     return {
       hasApproach: true,
@@ -344,7 +344,7 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
 
   // Check 3: Try MechJeb target module (may not always work)
   try {
-    const mjResult = await conn.execute(
+    const mjResult = await conn.queue(
       'IF HASTARGET { SET MJTGT TO ADDONS:MJ:TARGET. ' +
       'LOCAL d IS MJTGT:CLOSESTAPPROACHDISTANCE. LOCAL t IS MJTGT:CLOSESTAPPROACHTIME. ' +
       'IF d > 0 AND t > 0 { PRINT "MJ|" + ROUND(d) + "|" + ROUND(t). } ELSE { PRINT "NOMJ". } ' +
@@ -352,7 +352,7 @@ async function queryClosestApproach(conn: KosConnection): Promise<ClosestApproac
       3000
     );
 
-    const mjMatch = mjResult.output.match(/MJ\|(\d+)\|(\d+)/);
+    const mjMatch = mjResult.success ? mjResult.output.match(/MJ\|(\d+)\|(\d+)/) : null;
     if (mjMatch) {
       return {
         hasApproach: true,
@@ -443,10 +443,11 @@ async function handleDetourScenario(
  */
 async function getDiagnostics(conn: KosConnection): Promise<string> {
   try {
-    const result = await conn.execute(
+    const result = await conn.queue(
       'PRINT ROUND(ADDONS:MJ:INFO:LOCALTWR, 2) + "|" + BODY:NAME + "|" + BODY:MU.',
       3000
     );
+    if (!result.success) return '';
     const parts = result.output.split('|');
     if (parts.length >= 3) {
       const twr = parts[0].trim();
@@ -497,8 +498,8 @@ export async function courseCorrection(
   // Check if already orbiting the target body
   // Course correction is for adjusting approach trajectories, not for when you're already at the target
   if (targetInfo.class === 'planet' || targetInfo.class === 'moon') {
-    const bodyResult = await conn.execute('PRINT SHIP:BODY:NAME + "|" + SHIP:ORBIT:ECCENTRICITY.', 2000);
-    const match = bodyResult.output.match(/([^|]+)\|([\d.]+)/);
+    const bodyResult = await conn.queue('PRINT SHIP:BODY:NAME + "|" + SHIP:ORBIT:ECCENTRICITY.', 2000);
+    const match = bodyResult.success ? bodyResult.output.match(/([^|]+)\|([\d.]+)/) : null;
     const currentBody = match?.[1]?.trim().toLowerCase() ?? '';
     const eccentricity = match ? parseFloat(match[2]) : 0;
 
@@ -574,9 +575,9 @@ export async function courseCorrection(
   logger?.info(`[CourseCorrect] Creating node for ${(targetPeriapsis / 1000).toFixed(1)}km target`);
 
   // Clear any existing node and create new one
-  await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+  await conn.raw('IF HASNODE { REMOVE NEXTNODE. }', 2000);
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${targetPeriapsis}).`;
-  const result = await conn.execute(cmd, 10_000);
+  const result = await conn.raw(cmd, 10_000);
 
   if (!result.output.includes('True')) {
     return {
@@ -592,13 +593,13 @@ export async function courseCorrection(
   const MIN_NODE_ETA = 1800; // 30 minutes minimum
   const TARGET_NODE_ETA = 3600; // 1 hour ideal
   try {
-    const etaResult = await conn.execute('PRINT NEXTNODE:ETA.', 2000);
-    const currentEta = parseFloat(etaResult.output.match(/[\d.]+/)?.[0] || '0');
+    const etaResult = await conn.queue('PRINT NEXTNODE:ETA.', 2000);
+    const currentEta = etaResult.success ? parseFloat(etaResult.output.match(/[\d.]+/)?.[0] || '0') : 0;
 
     if (currentEta < MIN_NODE_ETA) {
       // Get time to apoapsis to ensure we don't schedule past it
-      const apoResult = await conn.execute('PRINT ETA:APOAPSIS.', 2000);
-      const etaApo = parseFloat(apoResult.output.match(/[\d.]+/)?.[0] || '0');
+      const apoResult = await conn.queue('PRINT ETA:APOAPSIS.', 2000);
+      const etaApo = apoResult.success ? parseFloat(apoResult.output.match(/[\d.]+/)?.[0] || '0') : 0;
 
       // New ETA: 1 hour, or 10 min before apoapsis, whichever is smaller
       const newEta = Math.min(TARGET_NODE_ETA, etaApo > 600 ? etaApo - 600 : etaApo / 2);
@@ -606,7 +607,7 @@ export async function courseCorrection(
       if (newEta > currentEta + 60) {
         // Recreate node at new time by adjusting the node's UT
         const adjustCmd = `SET N TO NEXTNODE. SET NEWUT TO TIME:SECONDS + ${newEta}. SET NEWNODE TO NODE(NEWUT, N:RADIALOUT, N:NORMAL, N:PROGRADE). REMOVE N. ADD NEWNODE.`;
-        await conn.execute(adjustCmd, 5000);
+        await conn.raw(adjustCmd, 5000);
         logger?.info(`[CourseCorrect] Moved node from T-${Math.round(currentEta)}s to T-${Math.round(newEta)}s`);
 
         // Check resulting periapsis after move
@@ -640,13 +641,13 @@ export async function courseCorrection(
   // No SOI encounter yet, but MechJeb created a node - check if it improves close approach
   // Query the predicted close approach after the node
   try {
-    const caResult = await conn.execute(
+    const caResult = await conn.queue(
       'IF HASNODE AND HASTARGET { SET MJTGT TO ADDONS:MJ:TARGET. ' +
       'PRINT "CA|" + ROUND(MJTGT:CLOSESTAPPROACHDISTANCE) + "|" + ROUND(MJTGT:CLOSESTAPPROACHTIME). ' +
       '} ELSE { PRINT "NOCA". }',
       3000
     );
-    const caMatch = caResult.output.match(/CA\|(\d+)\|(\d+)/);
+    const caMatch = caResult.success ? caResult.output.match(/CA\|(\d+)\|(\d+)/) : null;
     if (caMatch) {
       const caDist = parseInt(caMatch[1]);
       const caTime = parseInt(caMatch[2]);
@@ -723,8 +724,8 @@ export const courseCorrectTool: ToolDefinition = {
           return ctx.errorResponse('course_correct', `Target "${target}" not found`);
         }
 
-        const bodyResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
-        const currentBody = bodyResult.output.trim().split('\n').pop()?.trim() ?? '';
+        const bodyResult = await conn.queue('PRINT SHIP:BODY:NAME.', 2000);
+        const currentBody = bodyResult.success ? bodyResult.output : '';
 
         // Body targets: check if we're actually "at" the target vs. on approach
         if ((targetInfo.class === 'planet' || targetInfo.class === 'moon') &&
@@ -885,7 +886,7 @@ export const courseCorrectTool: ToolDefinition = {
         // Post-creation validation: reject invalid nodes
         if (result.deltaV != null && result.deltaV < 0.1) {
           // Node is essentially 0 m/s - no correction needed or invalid
-          await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+          await conn.raw('IF HASNODE { REMOVE NEXTNODE. }', 2000);
           const diag = await getDiagnostics(conn);
           return ctx.errorResponse('course_correct',
             `Course correction node is 0 m/s - no adjustment needed or trajectory already optimal.\n` +
@@ -894,16 +895,16 @@ export const courseCorrectTool: ToolDefinition = {
 
         // Check if node is in current SOI (before any SOI transition)
         if (result.timeToNode != null) {
-          const soiCheck = await conn.execute(
+          const soiCheck = await conn.queue(
             'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "SOI|" + ROUND(SHIP:ORBIT:NEXTPATCHETA). } ELSE { PRINT "NOSOI". }',
             2000
           );
-          const soiMatch = soiCheck.output.match(/SOI\|(\d+)/);
+          const soiMatch = soiCheck.success ? soiCheck.output.match(/SOI\|(\d+)/) : null;
           if (soiMatch) {
             const timeToSOI = parseInt(soiMatch[1]);
             if (result.timeToNode > timeToSOI) {
               // Node is after SOI transition - invalid
-              await conn.execute('IF HASNODE { REMOVE NEXTNODE. }', 2000);
+              await conn.raw('IF HASNODE { REMOVE NEXTNODE. }', 2000);
               return ctx.errorResponse('course_correct',
                 `Course correction node is scheduled after SOI transition (in ${formatTime(result.timeToNode)} vs SOI in ${formatTime(timeToSOI)}).\n` +
                 `Execute the transfer first, warp to SOI, then course correct.`);

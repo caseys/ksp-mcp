@@ -77,7 +77,7 @@ async function main() {
     // Check if ASCENTGUIDANCE is the correct path
     console.log('\nTrying ASCENTGUIDANCE path:');
     try {
-      const agResult = await conn.execute('PRINT ADDONS:MJ:ASCENTGUIDANCE:SUFFIXNAMES.', 3000);
+      const agResult = await conn.raw('PRINT ADDONS:MJ:ASCENTGUIDANCE:SUFFIXNAMES.', 3000);
       console.log(`  ASCENTGUIDANCE suffixes available`);
       // Parse and show first few
       const agSuffixes = agResult.output.match(/\["value"\]\s*=\s*"([^"]+)"/g);
@@ -91,7 +91,7 @@ async function main() {
     // Check if ASCENT is also valid
     console.log('\nTrying ASCENT path:');
     try {
-      const aResult = await conn.execute('PRINT ADDONS:MJ:ASCENT:SUFFIXNAMES.', 3000);
+      const aResult = await conn.raw('PRINT ADDONS:MJ:ASCENT:SUFFIXNAMES.', 3000);
       console.log(`  ASCENT suffixes available`);
     } catch (e) {
       console.log(`  ASCENT path not available`);
@@ -100,7 +100,7 @@ async function main() {
     // Check INFO path
     console.log('\nTrying INFO path:');
     try {
-      const infoResult = await conn.execute('PRINT ADDONS:MJ:INFO:SUFFIXNAMES.', 3000);
+      const infoResult = await conn.raw('PRINT ADDONS:MJ:INFO:SUFFIXNAMES.', 3000);
       console.log(`  INFO suffixes available`);
       const infoSuffixes = infoResult.output.match(/\["value"\]\s*=\s*"([^"]+)"/g);
       if (infoSuffixes) {

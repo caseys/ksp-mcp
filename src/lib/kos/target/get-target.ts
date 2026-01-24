@@ -17,8 +17,8 @@ import { fmtVel } from '../../utils/format.js';
  * @param conn kOS connection
  */
 export async function getTargetInfo(conn: KosConnection): Promise<GetTargetInfo> {
-  // Use unique markers to avoid matching command echo
-  const result = await conn.execute(
+  // Use queue() for clean output extraction
+  const result = await conn.queue(
     'IF HASTARGET { ' +
     '  PRINT "TGT_NAME|" + TARGET:NAME. ' +
     '  PRINT "TGT_TYPE|" + TARGET:TYPENAME. ' +
@@ -31,10 +31,15 @@ export async function getTargetInfo(conn: KosConnection): Promise<GetTargetInfo>
     '  } ' +
     '} ELSE { ' +
     '  PRINT "TGT_NONE". ' +
-    '}'
+    '}',
+    5000
   );
 
-  const output = result.output.trim();
+  if (!result.success) {
+    return { hasTarget: false };
+  }
+
+  const output = result.output;
   const markers = ['TGT_NAME|', 'TGT_TYPE|', 'TGT_DIST|', 'TGT_RAD|', 'TGT_ALT|', 'TGT_VEL|', 'TGT_NONE'];
 
   const findMarker = (token: string, start = 0): number => {

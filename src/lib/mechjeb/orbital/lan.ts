@@ -72,8 +72,8 @@ export const changeAscendingNodeTool: ToolDefinition = {
           ? 'Burn complete'
           : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
-          const lanInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:LAN, 2).', 2000);
-          const lan = lanInfo.output.trim();
+          const lanInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:LAN, 2).', 2000);
+          const lan = lanInfo.success ? lanInfo.output : '?';
           text += `\nLAN: ${lan}°`;
         }
         return ctx.successResponse('change_ascending_node', text);

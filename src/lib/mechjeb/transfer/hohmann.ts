@@ -38,14 +38,14 @@ interface TransferAttemptResult {
  * Uses the maneuver node's predicted orbit to check TARGETDISTANCE.
  */
 async function queryCloseApproach(conn: KosConnection): Promise<{ distance: number; time: number } | null> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'IF HASTARGET AND NEXTNODE:ORBIT:TARGETDISTANCE > 0 { ' +
     'PRINT "CA|" + ROUND(NEXTNODE:ORBIT:TARGETDISTANCE) + "|" + ROUND(NEXTNODE:ORBIT:TARGETTIME). ' +
     '} ELSE { PRINT "NOCA". }',
     5000
   );
 
-  const match = result.output.match(/CA\|(\d+)\|(\d+)/);
+  const match = result.success ? result.output.match(/CA\|(\d+)\|(\d+)/) : null;
   if (match) {
     return {
       distance: Number.parseInt(match[1]),
@@ -69,16 +69,16 @@ async function attemptHohmannTransfer(
   const captureStr = capture ? 'TRUE' : 'FALSE';
   const rendezvousStr = rendezvous ? 'TRUE' : 'FALSE';
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. SET PLANNER:HOHMANNRENDEZVOUS TO ${rendezvousStr}. PRINT PLANNER:HOHMANN("${timeRef}", ${captureStr}).`;
-  const result = await conn.execute(cmd, 10_000);
+  const result = await conn.queue(cmd, 10_000);
 
-  const success = result.output.includes('True');
+  const success = result.success && result.output.includes('True');
   if (!success) {
     return { success: false, error: sanitizeError(result.output, 'Hohmann transfer') };
   }
 
   // Verify MechJeb actually created a node (it returns True even when no node needed)
-  const hasNodeCheck = await conn.execute('PRINT HASNODE.', 2000);
-  if (!hasNodeCheck.output.includes('True')) {
+  const hasNodeCheck = await conn.queue('PRINT HASNODE.', 2000);
+  if (!hasNodeCheck.success || !hasNodeCheck.output.includes('True')) {
     // MechJeb said success but didn't create a node - likely already on transfer
     return { success: false, noEncounter: false, error: 'MechJeb returned success but no node was created - vessel may already be on transfer trajectory' };
   }
@@ -87,11 +87,11 @@ async function attemptHohmannTransfer(
   const nodeInfo = await queryNodeInfo(conn);
 
   // Verify encounter exists AND is with the correct target
-  const encounterCheck = await conn.execute(
+  const encounterCheck = await conn.queue(
     'IF NEXTNODE:ORBIT:HASNEXTPATCH { PRINT NEXTNODE:ORBIT:NEXTPATCH:BODY:NAME. } ELSE { PRINT "NO_ENCOUNTER". }',
     3000
   );
-  const encounterBody = encounterCheck.output.trim();
+  const encounterBody = encounterCheck.success ? encounterCheck.output : 'NO_ENCOUNTER';
 
   if (encounterBody === 'NO_ENCOUNTER') {
     // No SOI encounter, but check for close approach (important for low-gravity bodies like Minmus)
@@ -122,8 +122,8 @@ async function attemptHohmannTransfer(
   }
 
   // Query actual node count
-  const nodeCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-  const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+  const nodeCountResult = await conn.queue('PRINT ALLNODES:LENGTH.', 2000);
+  const nodesCreated = nodeCountResult.success ? Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1') : 1;
 
   return {
     success: true,
@@ -173,8 +173,8 @@ export async function hohmannTransfer(
   const targetName = validation.targetInfo?.name ?? '';
 
   // Check if target is current SOI body (can't transfer to where you already are)
-  const soiResult = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
-  const currentSOI = soiResult.output.trim().split('\n').pop()?.trim() ?? '';
+  const soiResult = await conn.queue('PRINT SHIP:BODY:NAME.', 2000);
+  const currentSOI = soiResult.success ? soiResult.output : '';
   if (targetName.toLowerCase() === currentSOI.toLowerCase()) {
     return {
       success: false,
@@ -218,7 +218,7 @@ export async function hohmannTransfer(
 
   // Check for close approach without SOI encounter (elliptical orbit reaching target plane)
   if (!hasExistingTransfer && validation.targetInfo?.class === 'moon') {
-    const caCheck = await conn.execute(
+    const caCheck = await conn.queue(
       'IF HASTARGET AND TARGET:TYPENAME = "Body" { ' +
       'LOCAL tgtSma IS TARGET:ORBIT:SEMIMAJORAXIS. ' +
       'LOCAL shipApo IS SHIP:APOAPSIS + SHIP:BODY:RADIUS. ' +
@@ -226,11 +226,11 @@ export async function hohmannTransfer(
       'ELSE { PRINT "NOREACH". } } ELSE { PRINT "NOTGT". }',
       3000
     );
-    const reachMatch = caCheck.output.match(/REACH\|(\d+)\|(\d+)/);
+    const reachMatch = caCheck.success ? caCheck.output.match(/REACH\|(\d+)\|(\d+)/) : null;
     if (reachMatch) {
       // Ship's apoapsis reaches target's orbital radius - check actual encounter/approach
       // Use ADDONS:MJ:TARGET (always available) not ADDONS:MJ:TGT (may not exist)
-      const encCheck = await conn.execute(
+      const encCheck = await conn.queue(
         'LOCAL hasEnc IS SHIP:ORBIT:HASNEXTPATCH AND SHIP:ORBIT:NEXTPATCH:BODY:NAME = TARGET:NAME. ' +
         'SET MJTGT TO ADDONS:MJ:TARGET. ' +
         'LOCAL caDist IS MJTGT:CLOSESTAPPROACHDISTANCE. ' +
@@ -248,7 +248,7 @@ export async function hohmannTransfer(
       );
 
       // Parse encounter info
-      const encMatch = encCheck.output.match(/ENC\|(-?\d+)\|(\d+)\|(\d+)\|(\d+)/);
+      const encMatch = encCheck.success ? encCheck.output.match(/ENC\|(-?\d+)\|(\d+)\|(\d+)\|(\d+)/) : null;
       if (encMatch) {
         const periapsis = parseInt(encMatch[1]);
         const caTime = parseInt(encMatch[2]);
@@ -281,7 +281,7 @@ export async function hohmannTransfer(
       }
 
       // Close approach without SOI encounter
-      const closeMatch = encCheck.output.match(/CA\|(\d+)\|(\d+)\|(\d+)\|(\d+)/);
+      const closeMatch = encCheck.success ? encCheck.output.match(/CA\|(\d+)\|(\d+)\|(\d+)\|(\d+)/) : null;
       if (closeMatch) {
         const caDist = parseInt(closeMatch[1]);
         const caTime = parseInt(closeMatch[2]);
@@ -360,8 +360,8 @@ export async function hohmannTransfer(
       // Case 1: Crash trajectory - keep nodes, warn about course_correct required
       if (details.isCrash) {
         // Query node count for the kept nodes
-        const nodeCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-        const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+        const nodeCountResult = await conn.queue('PRINT ALLNODES:LENGTH.', 2000);
+        const nodesCreated = nodeCountResult.success ? Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1') : 1;
 
         return {
           success: true,
@@ -378,8 +378,8 @@ export async function hohmannTransfer(
       // Case 2: Safe encounter + close approach to target - keep nodes, suggest course_correct
       if (details.hasCloseApproach) {
         // Query node count for the kept nodes
-        const nodeCountResult = await conn.execute('PRINT ALLNODES:LENGTH.', 2000);
-        const nodesCreated = Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1');
+        const nodeCountResult = await conn.queue('PRINT ALLNODES:LENGTH.', 2000);
+        const nodesCreated = nodeCountResult.success ? Number.parseInt(nodeCountResult.output.match(/\d+/)?.[0] || '1') : 1;
 
         return {
           success: true,
@@ -398,7 +398,7 @@ export async function hohmannTransfer(
     await clearNodes(conn);
 
     // Set new target to the accidentally-encountered body
-    await conn.execute(`SET TARGET TO BODY("${detourBody}").`, 3000);
+    await conn.raw(`SET TARGET TO BODY("${detourBody}").`, 3000);
 
     // Replan Hohmann transfer to detour body - use same two-step retry logic
     let detourAttempt = await attemptHohmannTransfer(conn, timeRef, capture, rendezvous, detourBody);
@@ -438,11 +438,11 @@ export async function hohmannTransfer(
     if (attempt.error?.includes('no node was created')) {
       // Check current close approach distance using MechJeb's target info
       // Use ADDONS:MJ:TARGET (always available) not ADDONS:MJ:TGT (may not exist)
-      const caCheck = await conn.execute(
+      const caCheck = await conn.queue(
         'IF HASTARGET { SET MJTGT TO ADDONS:MJ:TARGET. PRINT "CA|" + ROUND(MJTGT:CLOSESTAPPROACHDISTANCE) + "|" + ROUND(MJTGT:CLOSESTAPPROACHTIME). } ELSE { PRINT "NOTGT". }',
         3000
       );
-      const caMatch = caCheck.output.match(/CA\|(-?\d+)\|(-?\d+)/);
+      const caMatch = caCheck.success ? caCheck.output.match(/CA\|(-?\d+)\|(-?\d+)/) : null;
       if (caMatch) {
         const caDist = parseInt(caMatch[1]);
         const caTime = parseInt(caMatch[2]);
@@ -570,7 +570,7 @@ export const hohmannTransferTool: ToolDefinition = {
             logger.info?.(`[Hohmann] Post-burn Pe: ${(currentPe / 1000).toFixed(0)}km${atmNote}, fine-tuning to ${targetPe / 1000}km...`);
 
             // Align and enable RCS for fine-tuning
-            await conn.execute('SAS ON. WAIT 0.3. SET SASMODE TO "PROGRADE". RCS ON.', 5000);
+            await conn.raw('SAS ON. WAIT 0.3. SET SASMODE TO "PROGRADE". RCS ON.', 5000);
             await delay(2000);
 
             const fineTuneResult = await rcsFineTune(conn, {
@@ -585,7 +585,7 @@ export const hohmannTransferTool: ToolDefinition = {
             });
 
             // Cleanup RCS
-            await conn.execute('SET SHIP:CONTROL:FORE TO 0. RCS OFF.', 3000);
+            await conn.raw('SET SHIP:CONTROL:FORE TO 0. RCS OFF.', 3000);
             didFineTune = true;
 
             if (fineTuneResult.success) {

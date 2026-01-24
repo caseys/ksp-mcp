@@ -93,7 +93,7 @@ async function selectTarget(
 async function getBasicOrbitInfo(conn: ReturnType<typeof getConnection> | null): Promise<OrbitInfo | null> {
   if (!conn) return null;
   try {
-    const result = await conn.execute(
+    const result = await conn.queue(
       'PRINT SHIP:ORBIT:PERIAPSIS + "|" + SHIP:ORBIT:APOAPSIS + "|" + SHIP:ALTITUDE + "|" + SHIP:ORBIT:ECCENTRICITY.',
       3000
     );
@@ -163,14 +163,6 @@ export function createServer(): McpServer {
       // 4. Fallback - assume notification support
       if (DEBUG) console.error(`[supportsNotifications] fallback -> true`);
       return true;
-    },
-    restartDaemon: async () => {
-      // Restart daemon after command completes so it can continue idle-time features
-      // (auto-warp during blackout, etc.)
-      const conn = getConnection();
-      if (conn.isConnected()) {
-        await conn.restartDaemon();
-      }
     },
   };
 

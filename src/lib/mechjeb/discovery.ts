@@ -27,22 +27,19 @@ function parseSuffixList(output: string): string[] {
  * Check if MechJeb is available on the current vessel
  */
 export async function isMechJebAvailable(conn: KosConnection): Promise<boolean> {
-  const result = await conn.execute('PRINT ADDONS:MJ:AVAILABLE.');
-  return result.output.includes('True');
+  const result = await conn.queue('PRINT ADDONS:MJ:AVAILABLE.', 3000);
+  return result.success && result.output.includes('True');
 }
 
 /**
  * Get MechJeb version
  */
 async function getMechJebVersion(conn: KosConnection): Promise<string | undefined> {
-  try {
-    const result = await conn.execute('PRINT ADDONS:MJ:VERSION.');
-    // Parse version from output
-    const match = result.output.match(/[\d.]+/);
-    return match ? match[0] : undefined;
-  } catch {
-    return undefined;
-  }
+  const result = await conn.queue('PRINT ADDONS:MJ:VERSION.', 3000);
+  if (!result.success) return undefined;
+  // Parse version from output
+  const match = result.output.match(/[\d.]+/);
+  return match ? match[0] : undefined;
 }
 
 /**
@@ -67,8 +64,8 @@ export async function discoverModules(conn: KosConnection): Promise<MechJebModul
   const version = await getMechJebVersion(conn);
 
   // Query MJ suffixes to see what modules exist
-  const result = await conn.execute('PRINT ADDONS:MJ:SUFFIXNAMES.');
-  const suffixes = parseSuffixList(result.output);
+  const result = await conn.queue('PRINT ADDONS:MJ:SUFFIXNAMES.', 5000);
+  const suffixes = result.success ? parseSuffixList(result.output) : [];
 
   // Check for known module names (kOS.MechJeb2.Addon uses different naming)
   const hasAscent = suffixes.includes('ASCENT') || suffixes.includes('ASCENTGUIDANCE');
@@ -91,22 +88,22 @@ export async function discoverModules(conn: KosConnection): Promise<MechJebModul
  * Discover ascent module suffixes
  */
 export async function discoverAscentSuffixes(conn: KosConnection): Promise<string[]> {
-  const result = await conn.execute('PRINT ADDONS:MJ:ASCENT:SUFFIXNAMES.');
-  return parseSuffixList(result.output);
+  const result = await conn.queue('PRINT ADDONS:MJ:ASCENT:SUFFIXNAMES.', 5000);
+  return result.success ? parseSuffixList(result.output) : [];
 }
 
 /**
  * Discover vessel state suffixes
  */
 export async function discoverVesselSuffixes(conn: KosConnection): Promise<string[]> {
-  const result = await conn.execute('PRINT ADDONS:MJ:VESSEL:SUFFIXNAMES.');
-  return parseSuffixList(result.output);
+  const result = await conn.queue('PRINT ADDONS:MJ:VESSEL:SUFFIXNAMES.', 5000);
+  return result.success ? parseSuffixList(result.output) : [];
 }
 
 /**
  * Discover info suffixes
  */
 export async function discoverInfoSuffixes(conn: KosConnection): Promise<string[]> {
-  const result = await conn.execute('PRINT ADDONS:MJ:INFO:SUFFIXNAMES.');
-  return parseSuffixList(result.output);
+  const result = await conn.queue('PRINT ADDONS:MJ:INFO:SUFFIXNAMES.', 5000);
+  return result.success ? parseSuffixList(result.output) : [];
 }

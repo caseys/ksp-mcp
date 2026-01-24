@@ -3,6 +3,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
+import { getStatusData, type StatusData } from '../../mechjeb/telemetry.js';
 
 /**
  * KSP Vessel.Situations enum values (from SHIP:STATUS)
@@ -87,36 +88,27 @@ const STATUS_NAMES: Record<VesselStatus, string> = {
 };
 
 /**
- * Query vessel state information from kOS.
- * Single atomic query to minimize round trips.
+ * Query vessel state information using mcp_status script.
+ * Uses telemetry which handles auto-redeploy of outdated scripts.
  *
  * @param conn kOS connection
  * @returns Vessel state info
  */
 export async function getVesselStateInfo(conn: KosConnection): Promise<VesselStateInfo> {
-  // Single atomic kOS command to get all vessel state info
-  // Format: STATE|status|bodyName|parentBodyName|apo|peri|ecc|hasEnc|hasNode
-  // Note: For escape trajectories (ecc >= 1), apoapsis is infinite - use -1 sentinel
-  const cmd = [
-    'PRINT "STATE|" + SHIP:STATUS + "|" + SHIP:BODY:NAME + "|" + SHIP:BODY:BODY:NAME + "|" +',
-    '(CHOOSE -1 IF ORBIT:ECCENTRICITY >= 1 ELSE ROUND(APOAPSIS)) + "|" +',
-    'ROUND(PERIAPSIS) + "|" + ROUND(ORBIT:ECCENTRICITY, 4) + "|" +',
-    'ORBIT:HASNEXTPATCH + "|" + HASNODE.',
-  ].join(' ');
+  const statusData = await getStatusData(conn);
+  return statusDataToVesselState(statusData);
+}
 
-  const result = await conn.execute(cmd, 5000);
-  const output = result.output;
+/**
+ * Convert StatusData from telemetry to VesselStateInfo.
+ * Useful when you already have status data and don't need another query.
+ */
+export function statusDataToVesselState(data: StatusData): VesselStateInfo {
+  const bodyName = data.soi;
+  const parentBodyName = data.soiParent;
 
-  // Parse STATE|status|body|parent|apo|peri|ecc|hasEnc|hasNode
-  const match = output.match(/STATE\|(\w+)\|([^|]+)\|([^|]+)\|(-?[\d.]+)\|(-?[\d.]+)\|([\d.]+)\|(True|False)\|(True|False)/i);
-  if (!match) {
-    throw new Error(`Failed to parse vessel state. Raw output: ${output.slice(0, 200)}`);
-  }
-
-  const [, statusRaw, bodyName, parentBodyName, apoStr, periStr, eccStr, hasEncStr, hasNodeStr] = match;
-
-  // Parse status (lowercase for consistency)
-  const status = statusRaw.toLowerCase().replace(' ', '_') as VesselStatus;
+  // Parse status (lowercase, replace space with underscore)
+  const status = data.status.toLowerCase().replace(' ', '_') as VesselStatus;
 
   // Determine body type based on parent
   let bodyType: BodyType;
@@ -130,14 +122,14 @@ export async function getVesselStateInfo(conn: KosConnection): Promise<VesselSta
 
   return {
     status,
-    bodyName: bodyName.trim(),
+    bodyName,
     bodyType,
-    parentBodyName: parentBodyName.trim(),
-    apoapsis: Number.parseFloat(apoStr),
-    periapsis: Number.parseFloat(periStr),
-    eccentricity: Number.parseFloat(eccStr),
-    hasEncounter: hasEncStr.toLowerCase() === 'true',
-    hasManeuverNode: hasNodeStr.toLowerCase() === 'true',
+    parentBodyName,
+    apoapsis: data.apo,
+    periapsis: data.per,
+    eccentricity: data.ecc,
+    hasEncounter: data.hasNextPatch,
+    hasManeuverNode: data.hasNode,
   };
 }
 

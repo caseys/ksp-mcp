@@ -61,7 +61,7 @@ interface SmartLaunchParams {
  * Query body properties (radius, atmosphere height)
  */
 async function getBodyProperties(conn: KosConnection): Promise<{ radius: number; atmHeight: number }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET _R TO SHIP:BODY:RADIUS. ' +
     'SET _ATM TO 0. IF SHIP:BODY:ATM:EXISTS { SET _ATM TO SHIP:BODY:ATM:HEIGHT. } ' +
     'PRINT _R + "|" + _ATM.',
@@ -114,6 +114,17 @@ async function resolveSmartLaunchParams(
   const parkingAltitude = calculateParkingOrbitAltitude(bodyProps.radius, bodyProps.atmHeight);
 
   // Step 3: Handle edge cases (heuristics)
+
+  // Case: Target is the body we're launching FROM (e.g., targeting Minmus while on Minmus)
+  // Just launch to orbit normally - target is meaningless for transfer
+  if (targetInfo.name.toLowerCase() === vesselState.bodyName.toLowerCase()) {
+    logger.info(`[Ascent] Target ${targetInfo.name} is our current body - launching to orbit`);
+    return {
+      altitude: parkingAltitude,
+      launchMode: 'orbit',
+      strategyMessage: `Launching to ${vesselState.bodyName} orbit (target is current body).`
+    };
+  }
 
   // Case: Target is parent body of our moon (e.g., targeting Kerbin from Mun)
   // Just launch into orbit normally - user can then use return_from_moon
@@ -263,16 +274,16 @@ async function warpToTransferWindow(
     // Call MechJeb directly, bypassing our validation (which requires orbit)
     // MechJeb can calculate transfer windows from the launchpad
     const cmd = 'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:INTERPLANETARY(TRUE).';
-    const result = await conn.execute(cmd, 10_000);
+    const result = await conn.queue(cmd, 10_000);
 
     // Check if node was created
-    if (result.output.toLowerCase().includes('false') || result.output.toLowerCase().includes('error')) {
+    if (!result.success || result.output.toLowerCase().includes('false') || result.output.toLowerCase().includes('error')) {
       return `Could not create transfer node: ${result.output.trim()}`;
     }
 
     // Verify a node exists
-    const hasNodeResult = await conn.execute('PRINT HASNODE.', 3000);
-    if (!hasNodeResult.output.toLowerCase().includes('true')) {
+    const hasNodeResult = await conn.queue('PRINT HASNODE.', 3000);
+    if (!hasNodeResult.success || !hasNodeResult.output.toLowerCase().includes('true')) {
       return 'Transfer node was not created by MechJeb';
     }
 
@@ -284,7 +295,7 @@ async function warpToTransferWindow(
       logger.progress(`[Ascent] Warping to transfer window in ${formatTime(nodeInfo.timeToNode)}...`);
 
       // Use WARPTO directly - warpForward has crash checks that fail on launchpad
-      await conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpSeconds}).`, 5000);
+      await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpSeconds}).`, 5000);
 
       // Wait for warp to complete (poll WARP level)
       let warpComplete = false;
@@ -293,7 +304,7 @@ async function warpToTransferWindow(
 
       while (!warpComplete && (Date.now() - startTime) < maxWait) {
         await new Promise(resolve => setTimeout(resolve, 2000));
-        const warpResult = await conn.execute('PRINT WARP.', 3000);
+        const warpResult = await conn.queue('PRINT WARP.', 3000);
         const warpLevel = parseInt(warpResult.output.match(/(\d+)/)?.[1] ?? '0');
         if (warpLevel === 0) {
           warpComplete = true;
@@ -353,7 +364,7 @@ export class AscentHandle {
    */
   async getProgress(): Promise<AscentProgress> {
     // Single atomic query for all progress values including MechJeb status and atmosphere height
-    const result = await this.conn.execute(
+    const result = await this.conn.queue(
       'PRINT "PROG|" + ALTITUDE + "|" + APOAPSIS + "|" + PERIAPSIS + "|" + ' +
       'ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:STATUS + "|" + ' +
       'ROUND(SHIP:BODY:ATM:HEIGHT).',
@@ -409,7 +420,7 @@ export class AscentHandle {
     this.logger.info(`[Ascent] Target: ${Math.round(this.targetAltitude/1000)}km orbit`);
 
     // Query atmosphere height once (0 for bodies without atmosphere)
-    const atmResult = await this.conn.execute(
+    const atmResult = await this.conn.queue(
       'IF SHIP:BODY:ATM:EXISTS { PRINT ROUND(SHIP:BODY:ATM:HEIGHT). } ELSE { PRINT 0. }',
       3000
     );
@@ -437,7 +448,7 @@ export class AscentHandle {
       poll: async () => {
         // Use pipe delimiters for robust parsing (status may contain spaces/colons)
         // Include eccentricity for orbit quality assessment
-        const statusResult = await this.conn.execute(
+        const statusResult = await this.conn.queue(
           'SET _ASC TO ADDONS:MJ:ASCENT. ' +
           'SET _E TO _ASC:ENABLED. ' +
           'SET _S TO _ASC:STATUS. ' +
@@ -445,8 +456,14 @@ export class AscentHandle {
           'SET _P TO ROUND(PERIAPSIS). ' +
           'SET _B TO SHIP:BODY:NAME. ' +
           'SET _EC TO ROUND(ORBIT:ECCENTRICITY, 4). ' +
-          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.'
+          'PRINT _E + "|" + _S + "|" + _A + "|" + _P + "|" + _B + "|" + _EC.',
+          5000
         );
+
+        // Check for signal loss (detected by kos-connection)
+        if (statusResult.error?.includes('blackout') || statusResult.output.includes('Signal lost')) {
+          throw new Error('Signal lost');
+        }
 
         const statusMatch = statusResult.output.match(/(True|False)\|([^|]*)\|(-?\d+)\|(-?\d+)\|(\w+)\|([\d.]+)/i);
         if (!statusMatch) {
@@ -500,24 +517,24 @@ export class AscentHandle {
           // MECO before coast - stop physics warp, switch to rails
           newStatus=`[Ascent] MECO at ${formatOrbit(state.apoapsis, state.periapsis)}`;
         } else if ((state.status).includes('Coasting to circularization burn')) {
-          try { await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".'); } catch { /* ignore */ }
+          try { await this.conn.raw('SET WARP TO 0. SET WARPMODE TO "RAILS".'); } catch { /* ignore */ }
           // Warp to circularization burn (only once)
           if (!hasWarpedToCirc && config.warp.onRails) {
             hasWarpedToCirc = true;
             try {
               // Get node ETA and warp to 15s before burn starts
-              const etaResult = await this.conn.execute('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 3000);
+              const etaResult = await this.conn.queue('IF HASNODE { PRINT NEXTNODE:ETA. } ELSE { PRINT 0. }', 3000);
               const nodeEta = Number.parseFloat(etaResult.output.match(/([\d.]+)/)?.[1] ?? '0');
               if (nodeEta > 30) {
                 const warpTarget = nodeEta - 15;
                 newStatus=`[Ascent] Circularizing in in ${formatTime(nodeEta)}`;
-                await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
+                await this.conn.raw('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
                 await delay(500);
-                await this.conn.execute(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
+                await this.conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTarget}).`, 5000);
                 newStatus=`[Ascent] Warping to burn (in ${formatTime(warpTarget)})`;
               } else {
                 // Short time to burn - ensure we're in rails mode
-                await this.conn.execute('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
+                await this.conn.raw('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
                 newStatus=`[Ascent] Circularizing in in ${formatTime(nodeEta)}`;
               }
             } catch {
@@ -565,7 +582,7 @@ export class AscentHandle {
 
           if (fixResult.success) {
             // Re-query orbit state after fix
-            const postFix = await this.conn.execute(
+            const postFix = await this.conn.queue(
               'PRINT ROUND(APOAPSIS) + "|" + ROUND(PERIAPSIS) + "|" + ROUND(ORBIT:ECCENTRICITY, 4).',
               3000
             );
@@ -638,8 +655,8 @@ export class AscentProgram {
 
     for (let i = 0; i < MAX_ATTEMPTS; i++) {
       // Use SET then PRINT for reliable output (inline MechJeb addon access can be lost)
-      const result = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
-      if (!hasKosError(result.output) && result.output.trim() !== '') {
+      const result = await this.conn.queue('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.', 3000);
+      if (result.success && !hasKosError(result.output) && result.output.trim() !== '') {
         this.logger.info('[Ascent] MechJeb ready');
         return;
       }
@@ -740,7 +757,7 @@ export class AscentProgram {
     // Execute commands one at a time for reliability
     // Batch commands can overwhelm the kOS telnet connection
     for (const cmd of commands) {
-      await this.conn.execute(cmd);
+      await this.conn.raw(cmd);
       await delay(50);  // Small delay between commands
     }
   }
@@ -751,7 +768,7 @@ export class AscentProgram {
    */
   async getStatus(): Promise<AscentStatus> {
     // Single atomic query for all ascent status values
-    const result = await this.conn.execute(
+    const result = await this.conn.queue(
       'PRINT "ASC|" + ADDONS:MJ:ASCENT:ENABLED + "|" + ADDONS:MJ:ASCENT:DESIREDALTITUDE + "|" + ADDONS:MJ:ASCENT:DESIREDINCLINATION.',
       3000
     );
@@ -773,7 +790,7 @@ export class AscentProgram {
    * Enable or disable ascent autopilot
    */
   async setEnabled(enabled: boolean): Promise<void> {
-    await this.conn.execute(`SET ADDONS:MJ:ASCENT:ENABLED TO ${enabled ? 'TRUE' : 'FALSE'}.`);
+    await this.conn.raw(`SET ADDONS:MJ:ASCENT:ENABLED TO ${enabled ? 'TRUE' : 'FALSE'}.`);
   }
 
   /**
@@ -809,14 +826,14 @@ export class AscentProgram {
 
       // Set the target in KSP
       this.logger.info(`[Ascent] Setting target: ${target}`);
-      const targetResult = await this.conn.execute(`SET TARGET TO "${target}".`);
+      const targetResult = await this.conn.raw(`SET TARGET TO "${target}".`);
       if (targetResult.output.toLowerCase().includes('error') || targetResult.output.toLowerCase().includes('not found')) {
         throw new Error(`Failed to set target '${target}'. Make sure the vessel/body exists.`);
       }
       await delay(200);
 
       // Verify target was set
-      const verifyTarget = await this.conn.execute('IF HASTARGET { PRINT TARGET:NAME. } ELSE { PRINT "NO_TARGET". }');
+      const verifyTarget = await this.conn.queue('IF HASTARGET { PRINT TARGET:NAME. } ELSE { PRINT "NO_TARGET". }');
       if (verifyTarget.output.includes('NO_TARGET')) {
         throw new Error(`Target '${target}' was not set successfully.`);
       }
@@ -861,7 +878,7 @@ export class AscentProgram {
     await this.configure(ascentSettings);
 
     // Verify roll settings were applied
-    const rollCheck = await this.conn.execute('PRINT "ROLL|" + ADDONS:MJ:ASCENT:FORCEROLL + "|" + ADDONS:MJ:ASCENT:TURNROLL.');
+    const rollCheck = await this.conn.queue('PRINT "ROLL|" + ADDONS:MJ:ASCENT:FORCEROLL + "|" + ADDONS:MJ:ASCENT:TURNROLL.', 3000);
     const rollMatch = rollCheck.output.match(/ROLL\|(\w+)\|(\d+)/);
     if (rollMatch && rollMatch[1] === 'True') {
       this.logger.info(`[Ascent] Roll guidance: ${rollMatch[2]}deg`);
@@ -874,10 +891,10 @@ export class AscentProgram {
     // For normal orbit mode, use our staged launch
     if (launchMode === 'plane' || launchMode === 'rendezvous') {
       // Enable autopilot and start countdown - MechJeb will warp to launch window
-      await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
+      await this.conn.raw('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
       await delay(500);
 
-      await this.conn.execute('PRINT ADDONS:MJ:ASCENT:STARTCOUNTDOWN(TIME:SECONDS + 999999).');
+      await this.conn.queue('PRINT ADDONS:MJ:ASCENT:STARTCOUNTDOWN(TIME:SECONDS + 999999).');
       await delay(1000);
 
       // Wait for MechJeb to warp to window and launch
@@ -885,7 +902,7 @@ export class AscentProgram {
       let wasWarping = false;
       let countdownLogged = false;
       for (let i = 0; i < 600; i++) {
-        const statusResult = await this.conn.execute('PRINT SHIP:STATUS + "|" + WARP.');
+        const statusResult = await this.conn.queue('PRINT SHIP:STATUS + "|" + WARP.', 3000);
         const parts = statusResult.output.split('|');
         const status = parts[0]?.toLowerCase() ?? '';
         const warpLevel = parseInt(parts[1]?.trim() ?? '0');
@@ -908,10 +925,10 @@ export class AscentProgram {
           }
           // Give MechJeb a moment to launch on its own
           await delay(1000);
-          const checkStatus = await this.conn.execute('PRINT SHIP:STATUS.');
+          const checkStatus = await this.conn.queue('PRINT SHIP:STATUS.', 3000);
           if (checkStatus.output.toLowerCase().includes('prelaunch')) {
             // Still on pad - stage manually
-            await this.conn.execute('STAGE.');
+            await this.conn.raw('STAGE.');
             await delay(500);
           }
         }
@@ -926,11 +943,11 @@ export class AscentProgram {
       // Normal orbit mode - enable autopilot and stage manually
       let autopilotEngaged = false;
       for (let attempt = 1; attempt <= 10; attempt++) {
-        await this.conn.execute('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
+        await this.conn.raw('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
         await delay(500);
 
         for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
-          const verifyResult = await this.conn.execute('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.');
+          const verifyResult = await this.conn.queue('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.', 3000);
           if (verifyResult.output.toLowerCase().includes('true')) {
             autopilotEngaged = true;
             break;
@@ -951,20 +968,20 @@ export class AscentProgram {
       }
 
       // Release controls
-      await this.conn.execute('UNLOCK THROTTLE.');
+      await this.conn.raw('UNLOCK THROTTLE.');
       await delay(100);
-      await this.conn.execute('SAS OFF.');
+      await this.conn.raw('SAS OFF.');
       await delay(100);
 
       // Check if we need to stage
-      const statusResult = await this.conn.execute('PRINT SHIP:STATUS.');
+      const statusResult = await this.conn.queue('PRINT SHIP:STATUS.', 3000);
       const shipStatus = statusResult.output.toLowerCase();
 
       if (shipStatus.includes('prelaunch')) {
         // Launch countdown
         this.logger.progress('[Ascent] 5... 4... 3...');
         await delay(3000);
-        await this.conn.execute('STAGE.');
+        await this.conn.raw('STAGE.');
         await delay(500);
       }
     }
@@ -973,24 +990,24 @@ export class AscentProgram {
     // Use physics warp in atmosphere (required), rails warp on airless bodies (faster)
     if (config.warp.physicsMax > 0) {
       // Check atmosphere before setting timeout (capture for closure)
-      this.conn.execute('PRINT SHIP:BODY:ATM:EXISTS.', 2000)
+      this.conn.queue('PRINT SHIP:BODY:ATM:EXISTS.', 2000)
         .then(result => {
           const hasAtmosphere = result.output.includes('True');
 
           if (hasAtmosphere) {
             // Physics warp for atmospheric ascent
             void setTimeout(() => {
-              this.conn.execute(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`)
+              this.conn.raw(`SET WARPMODE TO "PHYSICS". SET WARP TO 0. WAIT 0.3. SET WARP TO ${config.warp.physicsMax}.`)
                 .catch(() => { /* Ignore warp errors during ascent */ });
             }, 20_000);
             void setTimeout(() => {
-              this.conn.execute(`SET WARP TO 2.`)
+              this.conn.raw(`SET WARP TO 2.`)
                 .catch(() => { /* Ignore warp errors during ascent */ });
             }, 30_000);
           } else {
             // Rails warp for airless body ascent (faster, no physics overhead)
             void setTimeout(() => {
-              this.conn.execute('SET WARPMODE TO "RAILS". SET WARP TO 0. WAIT 0.3. SET WARP TO 3.')
+              this.conn.raw('SET WARPMODE TO "RAILS". SET WARP TO 0. WAIT 0.3. SET WARP TO 3.')
                 .catch(() => { /* Ignore warp errors during ascent */ });
             }, 10_000);  // Start earlier on airless bodies
           }
@@ -1035,7 +1052,7 @@ async function getBodyOrbitConstraints(conn: KosConnection): Promise<BodyOrbitCo
   const ATM_RECOMMENDED = 1.5;  // 50% above atmosphere = recommended
 
   try {
-    const result = await conn.execute(
+    const result = await conn.queue(
       'PRINT SHIP:BODY:NAME + "|" + SHIP:BODY:ATM:EXISTS + "|" + (CHOOSE SHIP:BODY:ATM:HEIGHT IF SHIP:BODY:ATM:EXISTS ELSE 0).',
       3000
     );
@@ -1220,10 +1237,6 @@ export const launchAscentTool: ToolDefinition = {
       const wait = waitArg === 'auto' ? ctx.supportsNotifications(extra) : waitArg;
 
       if (wait) {
-        // Restart daemon BEFORE entering monitor loop - it was killed by Ctrl+C when
-        // we sent commands, and won't restart until tool completes.
-        await ctx.restartDaemon();
-
         // Wait for completion (blocking call that monitors ascent)
         try {
           const result = await handle.waitForCompletion();
@@ -1238,7 +1251,7 @@ export const launchAscentTool: ToolDefinition = {
           if (result.success) {
             const orbit = result.finalOrbit;
             // Query orbit details for comprehensive status
-            const orbitQuery = await conn.execute(
+            const orbitQuery = await conn.queue(
               'PRINT SHIP:BODY:NAME + "|" + ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(ORBIT:INCLINATION, 1) + "|" + ROUND(ORBIT:PERIOD).',
               3000
             );
@@ -1260,7 +1273,7 @@ export const launchAscentTool: ToolDefinition = {
               try {
                 if (launchMode === 'plane') {
                   // Check inclination match with target
-                  const tgtQuery = await conn.execute(
+                  const tgtQuery = await conn.queue(
                     'IF HASTARGET { SET TGT TO ADDONS:MJ:TARGET. PRINT "TGT|" + TARGET:NAME + "|" + TGT:TARGETINCLINATION. } ELSE { PRINT "NOTGT". }',
                     3000
                   );
@@ -1279,7 +1292,7 @@ export const launchAscentTool: ToolDefinition = {
                   }
                 } else if (launchMode === 'rendezvous') {
                   // Check distance and closest approach to target vessel
-                  const rdzQuery = await conn.execute(
+                  const rdzQuery = await conn.queue(
                     'IF HASTARGET { PRINT "RDZ|" + TARGET:NAME + "|" + ROUND(TARGET:DISTANCE) + "|" + ROUND(ADDONS:MJ:TARGET:CLOSESTAPPROACHDISTANCE). } ELSE { PRINT "NOTGT". }',
                     3000
                   );

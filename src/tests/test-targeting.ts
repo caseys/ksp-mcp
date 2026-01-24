@@ -25,7 +25,7 @@ async function main() {
 
     // Check current body
     console.log('2. Current location...');
-    const locationResult = await conn.execute(
+    const locationResult = await conn.raw(
       'PRINT "Vessel: " + SHIP:NAME. ' +
       'PRINT "Orbiting: " + SHIP:BODY:NAME.'
     );
@@ -42,10 +42,10 @@ async function main() {
       setCmd = `SET TARGET TO "${targetName}".`;
     }
 
-    await conn.execute(setCmd);
+    await conn.raw(setCmd);
 
     // Verify target was set by checking HASTARGET
-    const hasTargetResult = await conn.execute('PRINT HASTARGET.');
+    const hasTargetResult = await conn.raw('PRINT HASTARGET.');
 
     if (!hasTargetResult.output.includes('True')) {
       console.log(`   ❌ Failed to set target "${targetName}"`);
@@ -54,7 +54,7 @@ async function main() {
     }
 
     // Get target info
-    const verifyResult = await conn.execute(
+    const verifyResult = await conn.raw(
       'PRINT "Target: " + TARGET:NAME + " (" + TARGET:TYPENAME + ")". ' +
       'IF TARGET:TYPENAME = "Body" { ' +
       '  PRINT "Radius: " + ROUND(TARGET:RADIUS / 1000, 1) + " km". ' +
@@ -67,7 +67,7 @@ async function main() {
 
     // Get detailed target info
     console.log('4. Target details...');
-    const detailsResult = await conn.execute(
+    const detailsResult = await conn.raw(
       'IF HASTARGET { ' +
       '  PRINT "Distance: " + ROUND(TARGET:DISTANCE / 1000, 1) + " km". ' +
       '  IF TARGET:TYPENAME = "Body" { ' +
@@ -89,7 +89,7 @@ async function main() {
 
     // Test getting target
     console.log('5. Testing GET target...');
-    const getResult = await conn.execute(
+    const getResult = await conn.raw(
       'IF HASTARGET { ' +
       '  PRINT "Current target is: " + TARGET:NAME. ' +
       '} ELSE { ' +
@@ -100,8 +100,8 @@ async function main() {
 
     // Test clearing target
     console.log('6. Clearing target...');
-    await conn.execute('UNSET TARGET.');
-    const clearResult = await conn.execute(
+    await conn.raw('UNSET TARGET.');
+    const clearResult = await conn.raw(
       'IF HASTARGET { ' +
       '  PRINT "Still have target: " + TARGET:NAME. ' +
       '} ELSE { ' +

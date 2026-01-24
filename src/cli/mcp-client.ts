@@ -53,6 +53,7 @@ export class McpCliClient {
       command: 'node',
       args: [KSP_MCP_PATH],
       stderr: 'inherit', // Show server errors
+      env: process.env as Record<string, string>, // Pass through KOS_DEBUG, KOS_TRACE, etc.
     });
   }
 

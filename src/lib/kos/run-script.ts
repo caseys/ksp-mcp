@@ -164,11 +164,12 @@ export async function runScript(
   try {
     // Step 2: Clear monitor and initialize completion flag
     globalKosMonitor.clear();
-    await conn.execute(`SET ${COMPLETION_FLAG} TO FALSE.`, 2000);
+    await conn.raw(`SET ${COMPLETION_FLAG} TO FALSE.`, 2000);
 
     // Step 3: Run the script
+    // Uses queue() because we need to check output for syntax errors
     const runCmd = `RUNPATH("0:/${scriptName.toLowerCase()}").`;
-    const runResult = await conn.execute(runCmd, 5000);
+    const runResult = await conn.queue(runCmd, 5000);
 
     // Check for immediate syntax errors
     if (runResult.output.includes('Syntax error') || runResult.output.includes('Cannot find')) {
@@ -192,7 +193,7 @@ export async function runScript(
       elapsed = Date.now() - startTime;
 
       // Check completion flag
-      const checkResult = await conn.execute(`PRINT ${COMPLETION_FLAG}.`, 2000);
+      const checkResult = await conn.queue(`PRINT ${COMPLETION_FLAG}.`, 2000);
       globalKosMonitor.trackLine(checkResult.output);
 
       if (checkResult.output.includes('True')) {
@@ -257,7 +258,7 @@ export async function runScript(
 
     // Best effort cleanup of completion flag
     try {
-      await conn.execute(`UNSET ${COMPLETION_FLAG}.`, 1000);
+      await conn.raw(`UNSET ${COMPLETION_FLAG}.`, 1000);
     } catch {
       // Ignore cleanup errors
     }

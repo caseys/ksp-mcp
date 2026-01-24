@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en-US">
+
+  <body>
+    <p>
+      <strong>
+        MCP for kOS — High-Level Architecture Plan (Authoritative)
+      </strong>
+    </p>
+    <p>
+      <strong>
+        0. Purpose
+      </strong>
+    </p>
+    <p>
+      Design a
+      <strong>
+        terminal-friendly, event-driven control system
+      </strong>
+      for kOS that:
+    </p>
+    <ul >
+      <li>
+        Runs automatically at vessel boot
+      </li>
+      <li>
+        Never monopolizes the terminal
+      </li>
+      <li>
+        Exposes live vessel status
+      </li>
+      <li>
+        Accepts commands from local and remote clients
+      </li>
+      <li>
+        Executes complex actions (e.g. landing) deterministically
+      </li>
+      <li>
+        Survives program replacement, aborts, and reboots
+      </li>
+    </ul>
+    <p>
+      The system must respect kOS's
+      <strong>
+        single-threaded, non-reentrant execution model
+      </strong>
+      .
+    </p>
+    
+    <p>
+      <strong>
+        1. Fundamental Constraints (Non-negotiable)
+      </strong>
+    </p>
+    <p>
+      Codex
+      <strong>
+        must not violate
+      </strong>
+      these:
+    </p>
+    <ol >
+      <li>
+        Only
+        <strong>
+          one kOS program executes at a time
+        </strong>
+      </li>
+      <li>
+        RUN / RUNPATH
+        <strong>
+          replace
+        </strong>
+        the current program
+      </li>
+      <li>
+        The terminal is usable
+        <strong>
+          only while no instructions are executing
+        </strong>
+      </li>
+      <li>
+        There is
+        <strong>
+          no persistent process
+        </strong>
+      </li>
+      <li>
+        Triggers ( WHEN ) may persist after program exit
+      </li>
+      <li>
+        Files are the
+        <strong>
+          only reliable shared state
+        </strong>
+      </li>
+      <li>
+        Globals are ephemeral and
+        <strong>
+          must not be authoritative
+        </strong>
+      </li>
+    </ol>
+    <p>
+      Any design that contradicts these is invalid.
+    </p>
+    
+    <p>
+      <strong>
+        2. Core Design Principle
+      </strong>
+    </p>
+    <p>
+      <strong>
+        The “daemon” is not a loop.The daemon is a set of triggers plus files.
+      </strong>
+    </p>
+    <p>
+      There must be:
+    </p>
+    <ul >
+      <li>
+        <strong>
+          No infinite loops
+        </strong>
+      </li>
+      <li>
+        <strong>
+          No background polling
+        </strong>
+      </li>
+      <li>
+        <strong>
+          No RUNPATH inside long-running loops
+        </strong>
+      </li>
+    </ul>
+    <p>
+      Execution must be
+      <strong>
+        short-lived, event-driven, and serialized
+      </strong>
+      .
+    </p>
+    
+    <p>
+      <strong>
+        3. System Components (Clear Separation)
+      </strong>
+    </p>
+    <p>
+      <strong>
+        3.1 Boot Installer (runs once, exits)
+      </strong>
+    </p>
+    <p>
+      Responsibilities:
+    </p>
+    <ul >
+      <li>
+        Wait for SHIP:UNPACKED
+      </li>
+      <li>
+        Ensure directory structure exists
+      </li>
+      <li>
+        Copy / compile scripts if needed
+      </li>
+      <li>
+        Install triggers
+      </li>
+      <li>
+        Exit immediately
+      </li>
+    </ul>
+    <p>
+      This is the
+      <strong>
+        only script
+      </strong>
+      set as CORE:BOOTFILENAME .
+    </p>
+    
+    <p>
+      <strong>
+        3.2 Triggers (the “resident logic”)
+      </strong>
+    </p>
+    <p>
+      Responsibilities:
+    </p>
+    <ul >
+      <li>
+        Detect
+        <em>
+          changes
+        </em>
+        , not poll
+      </li>
+      <li>
+        Update state files
+      </li>
+      <li>
+        Dispatch commands
+      </li>
+      <li>
+        Never block
+      </li>
+    </ul>
+    <p>
+      Triggers must:
+    </p>
+    <ul >
+      <li>
+        Be short
+      </li>
+      <li>
+        Never loop
+      </li>
+      <li>
+        Use PRESERVE
+      </li>
+      <li>
+        Defer all heavy work to short-lived scripts
+      </li>
+    </ul>
+    
+    <p>
+      <strong>
+        3.3 State (single source of truth)
+      </strong>
+    </p>
+    <p>
+      Use
+      <strong>
+        files only
+      </strong>
+      .
+    </p>
+    <p>
+      Example:
+    </p>
+    <p>
+      1:/mcp/state.json
+    </p>
+    <p>
+      Contains:
+    </p>
+    <ul >
+      <li>
+        Time (UT)
+      </li>
+      <li>
+        Vessel name
+      </li>
+      <li>
+        SOI
+      </li>
+      <li>
+        Target
+      </li>
+      <li>
+        Radio state
+      </li>
+      <li>
+        Current mode (idle / landing / etc.)
+      </li>
+      <li>
+        Last command
+      </li>
+      <li>
+        Error state (if any)
+      </li>
+    </ul>
+    <p>
+      No script may assume in-memory state is authoritative.
+    </p>
+    
+    <p>
+      <strong>
+        3.4 Command Interface (RPC-like)
+      </strong>
+    </p>
+    <p>
+      Commands are file-based.
+    </p>
+    <p>
+      Example:
+    </p>
+    <p>
+      1:/mcp/cmd.txt
+    </p>
+    <p>
+      1:/mcp/resp.txt
+    </p>
+    <p>
+      1:/mcp/lock.txt
+    </p>
+    <p>
+      Flow:
+    </p>
+    <ol >
+      <li>
+        Client writes cmd.txt
+      </li>
+      <li>
+        Trigger detects it
+      </li>
+      <li>
+        Dispatcher runs exactly once
+      </li>
+      <li>
+        Dispatcher writes response
+      </li>
+      <li>
+        Dispatcher exits
+      </li>
+    </ol>
+    <p>
+      No concurrency. No queues unless explicitly implemented.
+    </p>
+    
+    <p>
+      <strong>
+        3.5 Action Scripts (e.g. landing)
+      </strong>
+    </p>
+    <p>
+      Responsibilities:
+    </p>
+    <ul >
+      <li>
+        Perform one task
+      </li>
+      <li>
+        Read state from file
+      </li>
+      <li>
+        Write updates to state
+      </li>
+      <li>
+        Exit cleanly
+      </li>
+    </ul>
+    <p>
+      They must
+      <strong>
+        not
+      </strong>
+      :
+    </p>
+    <ul >
+      <li>
+        Install triggers
+      </li>
+      <li>
+        Assume persistence
+      </li>
+      <li>
+        Loop forever
+      </li>
+      <li>
+        Call other long-running scripts
+      </li>
+    </ul>
+    
+    <p>
+      <strong>
+        3.6 Status Renderer
+      </strong>
+    </p>
+    <p>
+      Responsibilities:
+    </p>
+    <ul >
+      <li>
+        Read state file
+      </li>
+      <li>
+        Print or rewrite status
+      </li>
+      <li>
+        Exit immediately
+      </li>
+    </ul>
+    <p>
+      Status is
+      <strong>
+        pulled
+      </strong>
+      , not pushed.
+    </p>
+    <p>
+      No background printing.
+    </p>
+    
+    <p>
+      <strong>
+        4. Explicitly Remove / Do Not Recreate
+      </strong>
+    </p>
+    <p>
+      Codex must
+      <strong>
+        not recreate
+      </strong>
+      :
+    </p>
+    <ul >
+      <li>
+        mcp_env -style “environment scripts”
+      </li>
+      <li>
+        Infinite daemon loops
+      </li>
+      <li>
+        Polling _MCP_OP -style globals
+      </li>
+      <li>
+        Long-running background programs
+      </li>
+      <li>
+        “Service” scripts expecting return
+      </li>
+      <li>
+        Any assumption of parallel execution
+      </li>
+    </ul>
+    
+    <p>
+      <strong>
+        5. Execution Flow (Authoritative)
+      </strong>
+    </p>
+    <p>
+      <strong>
+        Boot
+      </strong>
+    </p>
+    <p>
+      BOOTFILENAME → installer → trigger setup → exit
+    </p>
+    <p>
+      <strong>
+        Normal Operation
+      </strong>
+    </p>
+    <p>
+      (trigger fires) → update state → exit
+    </p>
+    <p>
+      <strong>
+        Command Execution
+      </strong>
+    </p>
+    <p>
+      cmd.txt appears
+    </p>
+    <p>
+      → trigger fires
+    </p>
+    <p>
+      → dispatcher runs
+    </p>
+    <p>
+      → action script runs
+    </p>
+    <p>
+      → state updated
+    </p>
+    <p>
+      → dispatcher exits
+    </p>
+    <p>
+      → terminal free
+    </p>
+    
+    <p>
+      <strong>
+        6. Error Handling &amp; Safety
+      </strong>
+    </p>
+    <ul >
+      <li>
+        Use a lock file to prevent reentry
+      </li>
+      <li>
+        Always delete lock on exit
+      </li>
+      <li>
+        Action scripts must be abort-safe
+      </li>
+      <li>
+        Optional: abort handler writes error state to file
+      </li>
+      <li>
+        No script may assume it will resume
+      </li>
+    </ul>
+    
+    <p>
+      <strong>
+        7. Client Model
+      </strong>
+    </p>
+    <p>
+      Clients (human or AI) interact
+      <strong>
+        only via files
+      </strong>
+      .
+    </p>
+    <p>
+      They may:
+    </p>
+    <ul >
+      <li>
+        Read state.json
+      </li>
+      <li>
+        Write cmd.txt
+      </li>
+      <li>
+        Wait for resp.txt
+      </li>
+    </ul>
+    <p>
+      They may not:
+    </p>
+    <ul >
+      <li>
+        Depend on terminal availability
+      </li>
+      <li>
+        Expect synchronous responses
+      </li>
+      <li>
+        Assume ordering beyond one command at a time
+      </li>
+    </ul>
+    
+    <p>
+      <strong>
+        8. Style &amp; Discipline Rules for Codex
+      </strong>
+    </p>
+    <p>
+      Codex must:
+    </p>
+    <ul >
+      <li>
+        Favor
+        <strong>
+          small scripts
+        </strong>
+      </li>
+      <li>
+        Use
+        <strong>
+          explicit filenames
+        </strong>
+      </li>
+      <li>
+        Never hide state in globals
+      </li>
+      <li>
+        Avoid cleverness
+      </li>
+      <li>
+        Prefer determinism over convenience
+      </li>
+      <li>
+        Treat kOS like an embedded controller, not an OS
+      </li>
+    </ul>
+    
+    <p>
+      <strong>
+        9. Success Criteria
+      </strong>
+    </p>
+    <p>
+      The system is correct if:
+    </p>
+    <ul >
+      <li>
+        Terminal is usable &gt;95% of the time
+      </li>
+      <li>
+        No script runs indefinitely
+      </li>
+      <li>
+        Commands always serialize
+      </li>
+      <li>
+        Rebooting the vessel does not corrupt state
+      </li>
+      <li>
+        Landing and other complex actions work identically
+      </li>
+      <li>
+        No part of the system depends on “what ran before”
+      </li>
+    </ul>
+    
+    <p>
+      <strong>
+        10. Summary (one-paragraph version)
+      </strong>
+    </p>
+    <p>
+      Implement MCP for kOS as an event-driven, file-backed control system with no persistent processes. A one-shot boot installer installs triggers that react to vessel events and file-based commands. All state is stored in files. All actions are short-lived scripts that read state, act, write results, and exit. There are no daemons, no background loops, no shared memory, and no assumptions of concurrency.
+    </p>
+    <p>
+      <a href="https://wordtohtml.net/?utm_source=wth_free_doc_conversion_link&utm_medium=external" target="_blank">Converted to HTML with WordToHTML.net</a>
+      |
+      <a href="https://documentconverter.pro/?utm_source=wth_free_doc_conversion_link&utm_medium=external" target="_blank">Document Converter for Windows</a>
+    </p>
+  </body>
+
+</html>

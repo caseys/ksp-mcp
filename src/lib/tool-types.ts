@@ -55,11 +55,6 @@ export interface ToolContext {
    * Returns false for Claude Code (stdio) which doesn't display notifications well.
    */
   supportsNotifications: (extra: RequestHandlerExtra<ServerRequest, ServerNotification>) => boolean;
-  /**
-   * Restart the mcp-daemon after tool execution.
-   * Call this at the end of tool handlers to ensure daemon keeps running.
-   */
-  restartDaemon: () => Promise<void>;
 }
 
 /**

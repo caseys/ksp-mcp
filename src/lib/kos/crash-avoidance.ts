@@ -65,7 +65,7 @@ function calculateThrottle(angle: number, fullThrottleAngle: number, startAngle:
  */
 async function checkLandingDeltaV(conn: KosConnection): Promise<{dvLand: number, dvOrbit: number, landingCheaper: boolean | null}> {
   // Calculate landing delta-v (accounts for current speed + speed gained from falling)
-  const dvLandResult = await conn.execute(
+  const dvLandResult = await conn.queue(
     'SET g_local TO BODY:MU / (BODY:RADIUS + ALTITUDE)^2. ' +
     'SET v_total_surface TO SHIP:VELOCITY:SURFACE:MAG. ' +
     'PRINT SQRT(v_total_surface^2 + 2 * g_local * ALT:RADAR).',
@@ -76,7 +76,7 @@ async function checkLandingDeltaV(conn: KosConnection): Promise<{dvLand: number,
   // Calculate orbit delta-v (circularization cost at current apoapsis)
   // For suborbital trajectories, apoapsis may be below surface or SMA may be invalid
   // We need to check if apoapsis is above surface before calculating
-  const dvOrbitResult = await conn.execute(
+  const dvOrbitResult = await conn.queue(
     'SET ap TO SHIP:ORBIT:APOAPSIS. ' +
     'SET sma TO SHIP:ORBIT:SEMIMAJORAXIS. ' +
     'IF ap > 0 AND sma > 0 { ' +
@@ -171,10 +171,10 @@ export async function crashAvoidance(
 
   // Step 1: Enable RCS and SAS with proper waits for initialization
   log.progress('[CrashAvoidance] Enabling RCS and SAS, setting RADIALOUT...');
-  await conn.execute('RCS ON. SAS ON. WAIT 1. SET SASMODE TO "RADIALOUT". WAIT 0.5.', 4000);
+  await conn.raw('RCS ON. SAS ON. WAIT 1. SET SASMODE TO "RADIALOUT". WAIT 0.5.', 4000);
 
   // Step 2: Query NAVMODE to determine reference frame for angle calculation
-  const navmodeResult = await conn.execute('PRINT NAVMODE.', 2000);
+  const navmodeResult = await conn.queue('PRINT NAVMODE.', 2000);
   const isSurfaceMode = navmodeResult.output.includes('SURFACE');
   log.info(`[CrashAvoidance] NavMode: ${isSurfaceMode ? 'SURFACE' : 'ORBIT'}`);
 
@@ -209,12 +209,12 @@ export async function crashAvoidance(
   let circularized = false;
 
   // Set up throttle control variable in kOS
-  await conn.execute('SET MCP_THR TO 0.', 2000);
-  await conn.execute('LOCK THROTTLE TO MCP_THR.', 2000);
+  await conn.raw('SET MCP_THR TO 0.', 2000);
+  await conn.raw('LOCK THROTTLE TO MCP_THR.', 2000);
 
   while (Date.now() - burnStart < timeoutMs) {
     // Query alignment angle using the appropriate reference frame
-    const angleResult = await conn.execute(angleCmd, 2000);
+    const angleResult = await conn.queue(angleCmd, 2000);
     const angle = Number.parseFloat(angleResult.output.match(/[\d.]+/)?.[0] || '180');
 
     // Calculate and set throttle based on alignment
@@ -222,7 +222,7 @@ export async function crashAvoidance(
 
     // Update throttle - use locked variable for reliable control
     if (Math.abs(throttle - lastThrottle) > 0.02 || lastThrottle < 0) {
-      await conn.execute(`SET MCP_THR TO ${throttle.toFixed(2)}.`, 2000);
+      await conn.raw(`SET MCP_THR TO ${throttle.toFixed(2)}.`, 2000);
       lastThrottle = throttle;
     }
 
@@ -255,11 +255,11 @@ export async function crashAvoidance(
       log.progress('[CrashAvoidance] Transitioning to circularization...');
 
       // Stop throttle
-      await conn.execute('SET MCP_THR TO 0.', 2000);
+      await conn.raw('SET MCP_THR TO 0.', 2000);
       await unlockControls(conn);
 
       // Create circularization node at apoapsis
-      const circResult = await conn.execute(
+      const circResult = await conn.queue(
         'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("APOAPSIS").',
         10_000
       );
@@ -289,13 +289,13 @@ export async function crashAvoidance(
       log.progress(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), transitioning to circularization...`);
 
       // Stop throttle
-      await conn.execute('SET MCP_THR TO 0.', 2000);
+      await conn.raw('SET MCP_THR TO 0.', 2000);
       await unlockControls(conn);
 
       log.info(`[CrashAvoidance] Current apoapsis: ${(currentAp / 1000).toFixed(1)} km`);
 
       // Create circularization node at apoapsis
-      const circResult = await conn.execute(
+      const circResult = await conn.queue(
         'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("APOAPSIS").',
         10_000
       );
@@ -323,7 +323,7 @@ export async function crashAvoidance(
       const stageDv = await queryNumber(conn, 'STAGE:DELTAV:CURRENT');
       if (stageDv < DV_STAGE_THRESHOLD) {
         log.progress('[CrashAvoidance] Stage depleted, staging...');
-        await conn.execute('STAGE.', 2000);
+        await conn.raw('STAGE.', 2000);
         stagesUsed++;
         await delay(500);
         continue;
@@ -339,7 +339,7 @@ export async function crashAvoidance(
 
   // Step 4: Stop throttle and unlock controls
   log.progress('[CrashAvoidance] Stopping throttle...');
-  await conn.execute('SET MCP_THR TO 0.', 2000);
+  await conn.raw('SET MCP_THR TO 0.', 2000);
   await unlockControls(conn);
 
   // Calculate delta-v used

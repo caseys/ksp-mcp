@@ -72,8 +72,8 @@ export const changePeriapsisLongitudeTool: ToolDefinition = {
           ? 'Burn complete'
           : `Node: ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
         if (result.executed) {
-          const argPeInfo = await conn.execute('PRINT ROUND(SHIP:ORBIT:ARGUMENTOFPERIAPSIS, 2).', 2000);
-          const argPe = argPeInfo.output.trim();
+          const argPeInfo = await conn.queue('PRINT ROUND(SHIP:ORBIT:ARGUMENTOFPERIAPSIS, 2).', 2000);
+          const argPe = argPeInfo.success ? argPeInfo.output : '?';
           text += `\nArgument of periapsis: ${argPe}°`;
         }
         return ctx.successResponse('change_periapsis_longitude', text);

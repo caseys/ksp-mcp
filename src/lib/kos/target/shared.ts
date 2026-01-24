@@ -8,20 +8,20 @@ import type { KosConnection } from '../../../transport/kos-connection.js';
  * Check if a navigation target is currently set
  */
 export async function hasTarget(conn: KosConnection): Promise<boolean> {
-  const result = await conn.execute('PRINT HASTARGET.', 2000);
-  const output = result.output.trim().toLowerCase();
+  const result = await conn.queue('PRINT HASTARGET.', 2000);
   // kOS returns "True" or "False" - check for true anywhere in output
-  return output.includes('true');
+  return result.success && result.output.toLowerCase().includes('true');
 }
 
 /**
  * Get the name of the body the ship is currently orbiting (SOI body)
  */
 export async function getSOIBody(conn: KosConnection): Promise<string> {
-  const result = await conn.execute('PRINT SHIP:BODY:NAME.', 2000);
-  // Extract body name from output (may have kOS prompt chars)
+  const result = await conn.queue('PRINT SHIP:BODY:NAME.', 2000);
+  if (!result.success) return 'Unknown';
+  // Extract body name from output
   const match = result.output.match(/([A-Za-z]+)/);
-  return match ? match[1] : result.output.trim();
+  return match ? match[1] : result.output;
 }
 
 /**

@@ -11,7 +11,7 @@ import type { McpLogger } from '../tool-types.js';
  */
 export async function unlockControls(conn: KosConnection): Promise<void> {
   try {
-    await conn.execute('UNLOCK STEERING. UNLOCK THROTTLE.', 2000);
+    await conn.raw('UNLOCK STEERING. UNLOCK THROTTLE.', 2000);
   } catch {
     // Ignore errors - best effort cleanup
   }
@@ -84,7 +84,8 @@ export async function queryWrongEncounterDetails(
   encounterBody: string
 ): Promise<WrongEncounterDetails | null> {
   try {
-    const result = await conn.execute(
+    // Use queue() for clean output extraction
+    const result = await conn.queue(
       `LOCAL encPe IS NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS. ` +
       `LOCAL xferAp IS NEXTNODE:ORBIT:APOAPSIS. ` +
       `LOCAL tgtSMA IS TARGET:ORBIT:SEMIMAJORAXIS. ` +
@@ -92,12 +93,14 @@ export async function queryWrongEncounterDetails(
       5000
     );
 
-    const match = result.output.match(/([-\d.]+)\|([-\d.]+)\|([-\d.]+)/);
-    if (!match) return null;
+    if (!result.success) return null;
 
-    const encounterPeriapsis = parseFloat(match[1]);
-    const transferApoapsis = parseFloat(match[2]);
-    const targetSMA = parseFloat(match[3]);
+    const parts = result.output.split('|');
+    if (parts.length < 3) return null;
+
+    const encounterPeriapsis = parseFloat(parts[0]);
+    const transferApoapsis = parseFloat(parts[1]);
+    const targetSMA = parseFloat(parts[2]);
 
     const SAFE_PE_THRESHOLD = 10_000;  // 10km minimum safe periapsis
     const CLOSE_APPROACH_RATIO = 0.85;  // Must reach 85% of target's orbital altitude
@@ -180,8 +183,8 @@ function parseTimeString(output: string): number {
  * Query a numeric value from MechJeb (e.g., "23.80  m/s")
  */
 export async function queryNumber(conn: KosConnection, suffix: string): Promise<number> {
-  const result = await conn.execute(`PRINT ${suffix}.`, 2000);
-  return parseNumber(result.output);
+  const result = await conn.queue(`PRINT ${suffix}.`, 2000);
+  return result.success ? parseNumber(result.output) : 0;
 }
 
 /**
@@ -192,24 +195,25 @@ export async function queryNumber(conn: KosConnection, suffix: string): Promise<
  * Optimized: single command instead of 3 sequential queries
  */
 export async function queryNodeInfo(conn: KosConnection): Promise<{ deltaV: number; timeToNode: number }> {
-  // Single atomic query: check for node and get values in one command
-  const result = await conn.execute(
-    'IF HASNODE { PRINT "NODE|" + NEXTNODE:DELTAV:MAG + "|" + NEXTNODE:ETA. } ELSE { PRINT "NONODE". }',
+  // Use queue() for clean output - no need to worry about echo interference
+  const result = await conn.queue(
+    'IF HASNODE { PRINT NEXTNODE:DELTAV:MAG + "|" + NEXTNODE:ETA. } ELSE { PRINT "NONODE". }',
     3000
   );
 
-  // Parse "NODE|deltaV|eta" format
-  // The command echo contains "NONODE" as string literal, so we must check for
-  // the actual result pattern first
-  const match = result.output.match(/NODE\|([\d.]+)\|([\d.]+)/);
-  if (match) {
+  if (!result.success || result.output === 'NONODE') {
+    return { deltaV: 0, timeToNode: 0 };
+  }
+
+  // Parse "deltaV|eta" format - clean output, no markers needed
+  const parts = result.output.split('|');
+  if (parts.length >= 2) {
     return {
-      deltaV: Number.parseFloat(match[1]),
-      timeToNode: Number.parseFloat(match[2])
+      deltaV: Number.parseFloat(parts[0]),
+      timeToNode: Number.parseFloat(parts[1])
     };
   }
 
-  // No node data found - either no node exists or output was empty/error
   return { deltaV: 0, timeToNode: 0 };
 }
 
@@ -256,30 +260,30 @@ export async function validateNodeInCurrentPatch(
   conn: KosConnection,
   toolName: string
 ): Promise<{ valid: boolean; error?: string }> {
-  // Check if we have both a node AND a future patch
-  // Guard against edge cases where STARTTIME isn't available
-  const result = await conn.execute(
+  // Use queue() for clean output extraction
+  const result = await conn.queue(
     'IF HASNODE AND SHIP:ORBIT:HASNEXTPATCH { ' +
     '  SET np TO SHIP:ORBIT:NEXTPATCH. ' +
     '  IF np:TRANSITION = "ENCOUNTER" OR np:TRANSITION = "ESCAPE" { ' +
-    '    PRINT "CHECK|" + NEXTNODE:ETA + "|" + (np:STARTTIME - TIME:SECONDS). ' +
+    '    PRINT NEXTNODE:ETA + "|" + (np:STARTTIME - TIME:SECONDS). ' +
     '  } ELSE { PRINT "OK". } ' +
     '} ELSE { PRINT "OK". }',
     3000
   );
 
-  console.log(`[${toolName}] validateNodeInCurrentPatch raw output: ${result.output}`);
+  console.log(`[${toolName}] validateNodeInCurrentPatch output: ${result.output}`);
 
-  const match = result.output.match(/CHECK\|([\d.]+)\|([\d.]+)/);
-  if (match) {
-    const nodeEta = Number.parseFloat(match[1]);
-    const timeToSOI = Number.parseFloat(match[2]);
+  // Parse "nodeEta|timeToSOI" format - clean output from queue()
+  const parts = result.output.split('|');
+  if (parts.length >= 2 && result.output !== 'OK') {
+    const nodeEta = Number.parseFloat(parts[0]);
+    const timeToSOI = Number.parseFloat(parts[1]);
 
     console.log(`[${toolName}] nodeEta=${nodeEta}s, timeToSOI=${timeToSOI}s, nodeAfterSOI=${nodeEta > timeToSOI}`);
 
     if (nodeEta > timeToSOI) {
       // Node is beyond current patch - clear it
-      await conn.execute('REMOVE NEXTNODE.', 2000);
+      await conn.raw('REMOVE NEXTNODE.', 2000);
       console.log(`[${toolName}] Node was ${Math.round(nodeEta - timeToSOI)}s past SOI change - REMOVED`);
       return {
         valid: false,
@@ -312,9 +316,16 @@ export async function executeManeuverCommand(
     console.log(`[${toolName}] executeManeuverCommand starting`);
   }
 
-  const result = await conn.execute(cmd, timeout);
+  // Rewrite "PRINT PLANNER:OP(args)." to "LOCAL _mjr IS PLANNER:OP(args). WAIT 0.5. PRINT _mjr."
+  // MechJeb planner operations need a brief delay before result is ready
+  const rewrittenCmd = cmd.replace(
+    /PRINT (PLANNER:[A-Z]+\([^)]*\))\./,
+    'LOCAL _mjr IS $1. WAIT 0.5. PRINT _mjr.'
+  );
 
-  const success = result.output.includes('True');
+  const result = await conn.queue(rewrittenCmd, timeout);
+
+  const success = result.success && result.output.includes('True');
   if (!success) {
     if (toolName) {
       console.log(`[${toolName}] Planning failed: ${result.output}`);
@@ -391,29 +402,28 @@ function parseVelocityString(str: string): number | undefined {
 export async function queryTargetEncounterInfo(
   conn: KosConnection
 ): Promise<TargetEncounterInfo | null> {
-  // First, check if target exists and get its type
-  const targetCheck = await conn.execute(
-    'IF HASTARGET { PRINT "TGT|" + TARGET:NAME + "|" + TARGET:TYPENAME. } ELSE { PRINT "NOTGT". }',
+  // Use queue() for clean output - check if target exists and get its type
+  const targetCheck = await conn.queue(
+    'IF HASTARGET { PRINT TARGET:NAME + "|" + TARGET:TYPENAME. } ELSE { PRINT "NOTGT". }',
     3000
   );
 
-  if (targetCheck.output.includes('NOTGT')) {
+  if (!targetCheck.success || targetCheck.output === 'NOTGT') {
     return null;
   }
 
-  // Parse target name and type
-  const targetMatch = targetCheck.output.match(/TGT\|([^|]+)\|(\w+)/);
-  if (!targetMatch) {
+  // Parse "name|type" format - clean output from queue()
+  const parts = targetCheck.output.split('|');
+  if (parts.length < 2) {
     return null;
   }
 
-  const targetName = targetMatch[1].trim();
-  const targetType = targetMatch[2].toLowerCase();
+  const targetName = parts[0].trim();
+  const targetType = parts[1].toLowerCase();
 
   if (targetType === 'body') {
-    // Query body-specific encounter info using kOS orbit patches (more reliable than MechJeb INFO)
-    // Check both current orbit patches and node-predicted patches
-    const bodyInfo = await conn.execute(
+    // Use queue() for clean output - query body-specific encounter info
+    const bodyInfo = await conn.queue(
       'LOCAL encPe IS -999. LOCAL encEta IS -1. ' +
       'IF HASNODE AND NEXTNODE:ORBIT:HASNEXTPATCH { ' +
         'SET encPe TO ROUND(NEXTNODE:ORBIT:NEXTPATCH:PERIAPSIS). ' +
@@ -422,51 +432,45 @@ export async function queryTargetEncounterInfo(
         'SET encPe TO ROUND(ORBIT:NEXTPATCH:PERIAPSIS). ' +
         'SET encEta TO ROUND(ORBIT:NEXTPATCH:ETA:PERIAPSIS). ' +
       '} ' +
-      'PRINT "BODY|" + encPe + "|" + encEta + "|" + TARGET:ATM:HEIGHT.',
+      'PRINT encPe + "|" + encEta + "|" + TARGET:ATM:HEIGHT.',
       5000
     );
 
-    const bodyMatch = bodyInfo.output.match(/BODY\|(-?[\d.]+)\|(-?[\d.]+)\|(.+)/);
-    if (!bodyMatch) {
-      // Fallback: return basic info
-      return {
-        targetType: 'body',
-        targetName,
-      };
+    // Parse "encPe|encEta|atmHeight" format - clean output from queue()
+    const bodyParts = bodyInfo.output.split('|');
+    if (bodyParts.length < 3) {
+      return { targetType: 'body', targetName };
     }
 
-    const encPe = parseNumber(bodyMatch[1]);
-    const encEta = parseNumber(bodyMatch[2]);
+    const encPe = parseNumber(bodyParts[0]);
+    const encEta = parseNumber(bodyParts[1]);
 
     return {
       targetType: 'body',
       targetName,
       periapsisInTargetSOI: encPe != null && encPe > -999 ? encPe : undefined,
       timeToClosestApproach: encEta != null && encEta > 0 ? encEta : undefined,
-      atmosphereHeight: parseNumber(bodyMatch[3]),
+      atmosphereHeight: parseNumber(bodyParts[2]),
     };
   } else {
-    // Query vessel-specific encounter info
-    const vesselInfo = await conn.execute(
-      'PRINT "VESSEL|" + ADDONS:MJ:INFO:CADIST + "|" + ADDONS:MJ:INFO:TCA + "|" + ADDONS:MJ:INFO:CAREL.',
+    // Use queue() for clean output - query vessel-specific encounter info
+    const vesselInfo = await conn.queue(
+      'PRINT ADDONS:MJ:INFO:CADIST + "|" + ADDONS:MJ:INFO:TCA + "|" + ADDONS:MJ:INFO:CAREL.',
       3000
     );
 
-    const vesselMatch = vesselInfo.output.match(/VESSEL\|([^|]+)\|([^|]+)\|(.+)/);
-    if (!vesselMatch) {
-      // Fallback: return basic info
-      return {
-        targetType: 'vessel',
-        targetName,
-      };
+    // Parse "dist|time|relVel" format - clean output from queue()
+    const vesselParts = vesselInfo.output.split('|');
+    if (vesselParts.length < 3) {
+      return { targetType: 'vessel', targetName };
     }
 
     return {
       targetType: 'vessel',
       targetName,
-      closestApproachDistance: parseDistanceString(vesselMatch[1]),
-      timeToClosestApproach: parseTimeString(vesselMatch[2]),
-      closestApproachRelVel: parseVelocityString(vesselMatch[3]),
+      closestApproachDistance: parseDistanceString(vesselParts[0]),
+      timeToClosestApproach: parseTimeString(vesselParts[1]),
+      closestApproachRelVel: parseVelocityString(vesselParts[2]),
     };
   }
 }
@@ -480,20 +484,23 @@ export async function queryTargetEncounterInfo(
  */
 export async function formatResultingOrbit(conn: KosConnection): Promise<string> {
   try {
-    const orbitInfo = await conn.execute(
+    // Use queue() for clean output extraction
+    const orbitInfo = await conn.queue(
       'PRINT SHIP:BODY:NAME + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000) + "|" + ROUND(ORBIT:ECCENTRICITY, 4).',
       3000
     );
+
+    if (!orbitInfo.success) return '';
+
+    // Parse "body|apoKm|peKm|ecc" format - clean output from queue()
     const parts = orbitInfo.output.split('|').map(s => s.trim());
     if (parts.length >= 4) {
       const [body, apoKm, peKm, ecc] = parts;
 
-      // Validate parsed values are actual numbers, not command echo garbage
       const apoNum = Number.parseFloat(apoKm);
       const peNum = Number.parseFloat(peKm);
       const eccNum = Number.parseFloat(ecc);
       if (isNaN(apoNum) || isNaN(peNum) || isNaN(eccNum)) {
-        console.log('[formatResultingOrbit] Invalid parsed values - possible command echo leak:', { body, apoKm, peKm, ecc });
         return '';
       }
 
@@ -516,27 +523,31 @@ export async function formatResultingOrbit(conn: KosConnection): Promise<string>
  */
 export async function checkPostBurnPeriapsis(conn: KosConnection, logger?: McpLogger): Promise<string | undefined> {
   try {
-    // Query post-burn periapsis and atmosphere in one atomic command
-    // Handle airless bodies by checking ATM:EXISTS first
-    const result = await conn.execute(
+    // Use queue() for clean output extraction
+    const result = await conn.queue(
       'IF HASNODE { ' +
       'LOCAL atmH IS CHOOSE SHIP:BODY:ATM:HEIGHT IF SHIP:BODY:ATM:EXISTS ELSE 0. ' +
-      'PRINT "PE|" + ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(atmH) + "|" + SHIP:BODY:NAME. ' +
+      'PRINT ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + ROUND(atmH) + "|" + SHIP:BODY:NAME. ' +
       '} ELSE { PRINT "NONODE". }',
       3000
     );
 
-    logger?.info(`[checkPostBurnPeriapsis] Raw output: ${result.output}`);
+    logger?.info(`[checkPostBurnPeriapsis] Output: ${result.output}`);
 
-    const match = result.output.match(/PE\|(-?\d+)\|(\d+)\|(.+)/);
-    if (!match) {
+    if (!result.success || result.output === 'NONODE') {
+      return undefined;
+    }
+
+    // Parse "pe|atmH|bodyName" format - clean output from queue()
+    const parts = result.output.split('|');
+    if (parts.length < 3) {
       logger?.warn(`[checkPostBurnPeriapsis] Failed to parse output: ${result.output}`);
       return undefined;
     }
 
-    const postBurnPe = Number.parseInt(match[1]);
-    const atmHeight = Number.parseInt(match[2]);
-    const bodyName = match[3].trim();
+    const postBurnPe = Number.parseInt(parts[0]);
+    const atmHeight = Number.parseInt(parts[1]);
+    const bodyName = parts[2].trim();
 
     logger?.info(`[checkPostBurnPeriapsis] PostBurnPe=${postBurnPe}, atmHeight=${atmHeight}, body=${bodyName}`);
 

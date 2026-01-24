@@ -103,12 +103,12 @@ export async function hasMjTarget(conn: KosConnection): Promise<{
   hasNormal: boolean;
   hasPosition: boolean;
 }> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:NORMALTARGETEXISTS + "|" + TGT:POSITIONTARGETEXISTS.',
     3000
   );
 
-  const match = result.output.match(/(True|False)\|(True|False)/i);
+  const match = result.success ? result.output.match(/(True|False)\|(True|False)/i) : null;
   if (!match) {
     return { hasNormal: false, hasPosition: false };
   }
@@ -131,11 +131,11 @@ export async function getMjTargetBasicInfo(conn: KosConnection): Promise<MjTarge
 
   if (hasPosition) {
     // Position target - get lat/lng and body
-    const result = await conn.execute(
+    const result = await conn.queue(
       'SET TGT TO ADDONS:MJ:TARGET. PRINT "POS|" + TGT:TARGETLATITUDE + "|" + TGT:TARGETLONGITUDE + "|" + TGT:TARGETBODY.',
       3000
     );
-    const match = result.output.match(/POS\|([^|]+)\|([^|]+)\|(.+)/);
+    const match = result.success ? result.output.match(/POS\|([^|]+)\|([^|]+)\|(.+)/) : null;
     if (match) {
       const lat = Number.parseFloat(match[1]);
       const lng = Number.parseFloat(match[2]);
@@ -150,11 +150,11 @@ export async function getMjTargetBasicInfo(conn: KosConnection): Promise<MjTarge
 
   if (hasNormal) {
     // Normal target (body or vessel)
-    const result = await conn.execute(
+    const result = await conn.queue(
       'PRINT TARGET:NAME + "|" + TARGET:TYPENAME.',
       3000
     );
-    const match = result.output.match(/([^|]+)\|(\w+)/);
+    const match = result.success ? result.output.match(/([^|]+)\|(\w+)/) : null;
     if (match) {
       const name = match[1].trim();
       const typeName = match[2].toLowerCase();
@@ -188,12 +188,12 @@ export async function setPositionTarget(
     return { success: false, error: 'Longitude must be between -180 and 180 degrees' };
   }
 
-  const result = await conn.execute(
+  const result = await conn.queue(
     `SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:SETTARGET(${latitude}, ${longitude}).`,
     5000
   );
 
-  const success = result.output.includes('True');
+  const success = result.success && result.output.includes('True');
   if (!success) {
     return {
       success: false,
@@ -202,11 +202,11 @@ export async function setPositionTarget(
   }
 
   // Get the body the target is on
-  const bodyResult = await conn.execute(
+  const bodyResult = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:TARGETBODY.',
     3000
   );
-  const body = bodyResult.output.trim().split('\n').pop()?.trim() || 'Unknown';
+  const body = bodyResult.success ? (bodyResult.output.split('\n').pop() || 'Unknown') : 'Unknown';
 
   return {
     success: true,
@@ -220,12 +220,12 @@ export async function setPositionTarget(
  * Set position target to KSC runway
  */
 export async function setPositionTargetKSC(conn: KosConnection): Promise<SetPositionTargetResult> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:SETTARGETKSC().',
     5000
   );
 
-  const success = result.output.includes('True');
+  const success = result.success && result.output.includes('True');
   if (!success) {
     return {
       success: false,
@@ -253,11 +253,11 @@ async function hasPositionTarget(conn: KosConnection): Promise<boolean> {
  * Clear the current MechJeb target (both position and normal) (internal use)
  */
 async function unsetMjTarget(conn: KosConnection): Promise<boolean> {
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:UNSET().',
     3000
   );
-  return result.output.includes('True');
+  return result.success && result.output.includes('True');
 }
 
 // Silence unused warnings for internal functions
@@ -281,7 +281,7 @@ export async function getRendezvousInfo(conn: KosConnection): Promise<Rendezvous
 
   // Query rendezvous calculations from MechJeb target controller
   // All values in single query for efficiency
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. ' +
     'PRINT "RDV|" + TGT:PHASEANGLE + "|" + TGT:RELATIVEINCLINATION + "|" + ' +
     'TGT:CLOSESTAPPROACHTIME + "|" + TGT:CLOSESTAPPROACHDISTANCE + "|" + ' +
@@ -289,9 +289,9 @@ export async function getRendezvousInfo(conn: KosConnection): Promise<Rendezvous
     5000
   );
 
-  const match = result.output.match(
+  const match = result.success ? result.output.match(
     /RDV\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|([-\d.]+)\|(True|False)\|(True|False)/i
-  );
+  ) : null;
 
   if (!match) {
     // Try to get partial info
@@ -349,7 +349,7 @@ export async function getTargetOrbitInfo(conn: KosConnection): Promise<TargetOrb
     return null;
   }
 
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. ' +
     'PRINT "ORB|" + TGT:TARGETAPOAPSIS + "|" + TGT:TARGETPERIAPSIS + "|" + ' +
     'TGT:TARGETINCLINATION + "|" + TGT:TARGETECCENTRICITY + "|" + ' +
@@ -357,9 +357,9 @@ export async function getTargetOrbitInfo(conn: KosConnection): Promise<TargetOrb
     5000
   );
 
-  const match = result.output.match(
+  const match = result.success ? result.output.match(
     /ORB\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.]+)\|([-\d.]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.]+)/i
-  );
+  ) : null;
 
   if (!match) {
     console.log('[getTargetOrbitInfo] Failed to parse result:', result.output);
@@ -408,7 +408,7 @@ export async function getTargetPositionInfo(conn: KosConnection): Promise<Target
     return null;
   }
 
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. ' +
     'PRINT "POS|" + TGT:DISTANCE + "|" + TGT:CANALIGN + "|" + ' +
     'TGT:RELVELOCITY:X + "|" + TGT:RELVELOCITY:Y + "|" + TGT:RELVELOCITY:Z + "|" + ' +
@@ -416,9 +416,9 @@ export async function getTargetPositionInfo(conn: KosConnection): Promise<Target
     5000
   );
 
-  const match = result.output.match(
+  const match = result.success ? result.output.match(
     /POS\|([-\d.E+]+)\|(True|False)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)/i
-  );
+  ) : null;
 
   if (!match) {
     console.log('[getTargetPositionInfo] Failed to parse result:', result.output);
@@ -451,11 +451,11 @@ export async function getTargetPositionInfo(conn: KosConnection): Promise<Target
   // Try to get docking axis if alignment is available
   let dockingAxis: { x: number; y: number; z: number } | undefined;
   if (canAlign) {
-    const axisResult = await conn.execute(
+    const axisResult = await conn.queue(
       'SET TGT TO ADDONS:MJ:TARGET. PRINT "AXIS|" + TGT:DOCKINGAXIS:X + "|" + TGT:DOCKINGAXIS:Y + "|" + TGT:DOCKINGAXIS:Z.',
       3000
     );
-    const axisMatch = axisResult.output.match(/AXIS\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)/i);
+    const axisMatch = axisResult.success ? axisResult.output.match(/AXIS\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)/i) : null;
     if (axisMatch) {
       dockingAxis = {
         x: Number.parseFloat(axisMatch[1]),
@@ -527,7 +527,7 @@ export async function getUnifiedTargetInfo(conn: KosConnection): Promise<Unified
   }
 
   // Single query combining all target data for efficiency
-  const result = await conn.execute(
+  const result = await conn.queue(
     'SET TGT TO ADDONS:MJ:TARGET. ' +
     'PRINT "UTGT|" + TGT:TARGETAPOAPSIS + "|" + TGT:TARGETPERIAPSIS + "|" + ' +
     'TGT:TARGETINCLINATION + "|" + TGT:TARGETECCENTRICITY + "|" + ' +
@@ -540,9 +540,9 @@ export async function getUnifiedTargetInfo(conn: KosConnection): Promise<Unified
   );
 
   // Parse: ap|pe|inc|ecc|period|sma|lan|dist|relvel|canAlign|phase|relInc|caTime|caDist|toAN|toDN|anEx|dnEx
-  const match = result.output.match(
+  const match = result.success ? result.output.match(
     /UTGT\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.]+)\|([-\d.]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.]+)\|([-\d.E+]+)\|([-\d.E+]+)\|(True|False)\|([-\d.]+)\|([-\d.]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)\|([-\d.E+]+)\|(True|False)\|(True|False)/i
-  );
+  ) : null;
 
   if (!match) {
     console.log('[getUnifiedTargetInfo] Failed to parse result:', result.output);

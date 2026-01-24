@@ -23,30 +23,56 @@ let archivePathChecked = false;
 
 /**
  * Get the KSP installation root path.
- * Queries ADDONS:MJ:KSPROOT from kOS and caches the result.
- * Returns null if unavailable (addon not installed or error).
+ *
+ * Priority:
+ * 1. KSP_ROOT environment variable (reliable, user-configured)
+ * 2. ADDONS:MJ:KSPROOT from kOS (requires dev kOS.MechJeb2.Addon)
+ *
+ * Returns null if unavailable. Caller decides what to do (fallback to terminal).
  */
 export async function getKspRoot(conn: KosConnection): Promise<string | null> {
   if (kspRootChecked) {
     return cachedKspRoot;
   }
 
+  // Priority 1: Environment variable (most reliable)
+  const envRoot = process.env.KSP_ROOT;
+  if (envRoot) {
+    if (existsSync(envRoot)) {
+      cachedKspRoot = envRoot;
+      kspRootChecked = true;
+      return cachedKspRoot;
+    }
+    // Env var set but path doesn't exist - warn once
+    console.warn(`[kos-archive] KSP_ROOT="${envRoot}" does not exist`);
+  }
+
+  // Priority 2: Query from kOS.MechJeb2.Addon (dev builds only)
   try {
-    const result = await conn.execute('PRINT "KSPROOT|" + ADDONS:MJ:KSPROOT.', 5000);
-    const match = result.output.match(/KSPROOT\|(.+)/);
-    if (match) {
-      const root = match[1].trim();
-      // Validate path exists
-      if (existsSync(root)) {
+    const result = await conn.queue('PRINT ADDONS:MJ:KSPROOT.', 5000);
+    if (result.success) {
+      const root = result.output.trim();
+      if (root && existsSync(root)) {
         cachedKspRoot = root;
+        kspRootChecked = true;
+        return cachedKspRoot;
       }
     }
   } catch {
-    // ADDONS:MJ:KSPROOT not available
+    // Silently ignore - addon may not be installed
+  }
+
+  // Neither method worked - log helpful message ONCE
+  if (!envRoot) {
+    console.info(
+      '[kos-archive] Direct archive write unavailable. ' +
+      'Set KSP_ROOT env var for faster script deployment. ' +
+      'Using terminal fallback (slower but works).'
+    );
   }
 
   kspRootChecked = true;
-  return cachedKspRoot;
+  return null;
 }
 
 /**
@@ -80,7 +106,7 @@ export async function getArchivePath(conn: KosConnection): Promise<string | null
  * Write a file directly to the kOS archive.
  *
  * @param conn - kOS connection (for discovering KSP root)
- * @param kosPath - kOS path like "boot/mcp_blackout_warp.ks" or "mcp_daemon.ks" (no 0:/ prefix)
+ * @param kosPath - kOS path like "mcp_status.ks" (no 0:/ prefix)
  * @param content - File content to write
  * @returns true if direct write succeeded, false if fallback needed
  */
@@ -96,7 +122,7 @@ export async function writeToArchive(
     }
 
     // Build full filesystem path
-    // kosPath should be like "boot/mcp_blackout_warp.ks" or "mcp_daemon.ks"
+    // kosPath should be like "boot/mcp_status.ks"
     const fullPath = join(archivePath, kosPath);
 
     // Ensure parent directory exists
@@ -121,7 +147,7 @@ export async function writeToArchive(
  * Slow path: Fall back to line-by-line LOG if direct write fails.
  *
  * @param conn - kOS connection
- * @param kosPath - Destination path in kOS (e.g., "0:/boot/mcp_blackout_warp.ks")
+ * @param kosPath - Destination path in kOS (e.g., "0:/mcp_status.ks")
  * @param content - Script content
  * @returns DeployResult with success/error
  */
@@ -142,7 +168,7 @@ export async function deployScript(
     // IMPORTANT: Delete existing file in kOS first to invalidate cache
     // kOS caches file content, so writing to disk doesn't update kOS's view
     try {
-      await conn.execute(`IF EXISTS("${kosPath}") { DELETEPATH("${kosPath}"). }`, 3000);
+      await conn.raw(`IF EXISTS("${kosPath}") { DELETEPATH("${kosPath}"). }`, 3000);
     } catch {
       // Ignore delete errors - file may not exist yet
     }
@@ -152,14 +178,19 @@ export async function deployScript(
     if (directSuccess) {
       // File is now in archive - verify kOS can see it (should re-read from disk after delete)
       try {
-        const checkResult = await conn.execute(`PRINT EXISTS("${kosPath}").`, 3000);
-        if (checkResult.output.includes('True')) {
+        const checkResult = await conn.queue(`PRINT EXISTS("${kosPath}").`, 3000);
+        if (checkResult.success && checkResult.output.includes('True')) {
+          console.error(`[kos-archive] Direct write to ${kosPath} succeeded`);
           return { success: true, method: 'direct' };
         }
         // File written but kOS can't see it - fall through to terminal method
-      } catch {
+        console.error(`[kos-archive] Direct write succeeded but EXISTS check failed for ${kosPath}`);
+      } catch (err) {
+        console.error(`[kos-archive] Direct write succeeded but EXISTS check threw: ${err}`);
         // Fall through to terminal method
       }
+    } else {
+      console.error(`[kos-archive] Direct write to ${kosPath} failed, falling back to terminal`);
     }
   }
 
@@ -169,17 +200,17 @@ export async function deployScript(
     // Ensure parent directory exists
     const parentPath = kosPath.slice(0, Math.max(0, kosPath.lastIndexOf('/')));
     if (parentPath && parentPath !== '0:') {
-      await conn.execute(`IF NOT EXISTS("${parentPath}") { CREATEDIR("${parentPath}"). }`, 5000);
+      await conn.raw(`IF NOT EXISTS("${parentPath}") { CREATEDIR("${parentPath}"). }`, 5000);
     }
 
     // Clear existing file
-    await conn.execute(`IF EXISTS("${kosPath}") { DELETEPATH("${kosPath}"). }`, 3000);
+    await conn.raw(`IF EXISTS("${kosPath}") { DELETEPATH("${kosPath}"). }`, 3000);
 
     // Write line by line
     const lines = content.split('\n');
     for (const line of lines) {
       const escaped = line.replaceAll('\\', '\\\\').replaceAll('"', '""');
-      await conn.execute(`LOG "${escaped}" TO "${kosPath}".`, 2000);
+      await conn.raw(`LOG "${escaped}" TO "${kosPath}".`, 2000);
     }
 
     return { success: true, method: 'terminal' };

@@ -12,6 +12,6 @@
     "src/tests/**",
     "src/repl.ts"
   ],
-  "ignoreBinaries": ["semgrep"],
+  "ignoreBinaries": ["semgrep", "pkill"],
   "ignoreExportsUsedInFile": true
 }
