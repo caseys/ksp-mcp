@@ -214,13 +214,11 @@ export class SocketTransport extends BaseTransport {
         this.socket?.off('data', onData);
       };
 
-      // Check if pattern already in buffer
+      // Register listener first, then check buffer
+      // This eliminates the race condition where data arrives between
+      // checking the buffer and registering the listener
+      this.socket.on('data', onData);
       checkBuffer();
-
-      // Listen for new data events
-      if (!resolved) {
-        this.socket.on('data', onData);
-      }
     });
   }
 

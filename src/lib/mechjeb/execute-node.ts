@@ -16,6 +16,7 @@ import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 import { runAlignScript } from '../../utils/kos-scripts.js';
+import { invalidateStatusCache } from './telemetry.js';
 export interface ExecuteNodeResult {
   success: boolean;
   nodesExecuted: number;
@@ -373,7 +374,7 @@ export async function rcsFineTune(
 // Configuration
 const MAX_RETRIES = 3;
 const DEFAULT_TIMEOUT_MS = 600_000; // 10 minutes
-const DEFAULT_POLL_INTERVAL_MS = 10_000; // 10 seconds
+const DEFAULT_POLL_INTERVAL_MS = 2500; // 2.5 seconds - must be fast enough to catch short burns
 const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 
 // Alignment configuration
@@ -506,17 +507,29 @@ export async function executeNode(
     await conn.raw('WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during burn". }');
   }
 
+  // Precision thrust limiting: halve thrust when dV remaining < 20% AND < 100m/s
+  // This fires once during burn to reduce overshoot. Halves current limit (never increases).
+  const precisionThreshold = Math.min(dvRequired * 0.2, 100);
+  await conn.raw(`
+    WHEN HASNODE AND NEXTNODE:DELTAV:MAG < ${precisionThreshold.toFixed(1)} THEN {
+      FOR eng IN SHIP:ENGINES {
+        IF NOT eng:FLAMEOUT { SET eng:THRUSTLIMIT TO eng:THRUSTLIMIT / 2. }
+      }
+      PRINT "Thrust halved for precision burn".
+    }
+  `.trim().replaceAll('\n', ' '));
+
   // Get estimated burn duration from MechJeb INFO wrapper
   const burnDuration = await queryNumber(conn, 'ADDONS:MJ:INFO:NEXTMANEUVERNODEBURNTIME');
   const halfBurn = burnDuration / 2;
 
   // RCS mode for alignment (ascending aggressiveness: 0=none, 1=burst, 2=pulsed, 3=continuous):
   // - Tiny burns (< 1 m/s): mode 0 (no RCS) - RCS would overpower the burn
-  // - Small burns (< 10 m/s): mode 2 (pulsed RCS) for gentle alignment
-  // - Normal burns: mode 3 (continuous RCS) for fastest alignment
+  // - Small burns (< 10 m/s): mode 1 (burst) for light touch
+  // - Normal burns (>= 10 m/s): mode 2 (pulsed + adaptive) for reliable alignment
   const isTinyBurn = dvRequired < 1;
   const isSmallBurn = dvRequired < 10;
-  const rcsMode = noRcsAlign || isTinyBurn ? 0 : (isSmallBurn ? 2 : 3);
+  const rcsMode = noRcsAlign || isTinyBurn ? 0 : (isSmallBurn ? 1 : 2);
 
   // Align to node BEFORE enabling MechJeb executor
   // MechJeb's WARPALIGN can get stuck - we want to be aligned before starting
@@ -600,22 +613,20 @@ export async function executeNode(
     .catch(() => false);
 
   // For small burns, limit engine thrust to prevent overshooting
-  let thrustWasLimited = false;
+  // Note: Precision WHEN trigger above will halve thrust near end of ALL burns,
+  // so we always restore thrust after completion
+  const thrustWasLimited = true; // Always restore - WHEN trigger modifies all burns
   if (dvRequired < SMALL_BURN_THRESHOLD) {
     await limitEngineThrust(conn, SMALL_BURN_THRUST_LIMIT, log);
-    thrustWasLimited = true;
   }
-
-  // Enable MechJeb executor FIRST, before any warp
-  // This ensures burn will complete even if we warp into a blackout zone
-  // MechJeb runs on the vessel autonomously once enabled
-  // IMPORTANT: Unlock steering to prevent kOS steering from conflicting with MechJeb
-  await stopWarp(conn);
-  await conn.raw('UNLOCK STEERING. SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
 
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
   // This ensures we arrive 15s before the burn should START (not before node time)
+  // IMPORTANT: Do NOT enable MechJeb until after warp - it interferes with time warp
+  await stopWarp(conn);
+  await conn.raw('UNLOCK STEERING. SAS OFF.', 3000);
+
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
   const alignmentBuffer = 15; // Extra time for alignment before burn starts
   const warpLeadTime = halfBurn + alignmentBuffer;
@@ -626,37 +637,91 @@ export async function executeNode(
     const warpTargetSeconds = nodeEta - warpLeadTime;
     await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
 
-    // Wait for warp to complete (poll until ETA is close)
+    // Wait for warp to complete (poll until ETA is close or warp stops)
     let warpAttempts = 0;
     let consecutiveFailures = 0;
-    const maxWarpAttempts = 600; // Max 10 minutes of warp checking (1s poll interval)
-    const maxConsecutiveFailures = 30; // Exit after 30s of failures (assume warp done or connection lost)
+    let lastLoggedEta = nodeEta;
+    let lastLogTime = Date.now();
+    const maxWarpAttempts = 240; // Max 10 minutes of warp checking (2.5s poll interval)
+    const maxConsecutiveFailures = 12; // Exit after 30s of failures (assume warp done or connection lost)
+
     while (warpAttempts < maxWarpAttempts) {
-      await delay(1000);
+      await delay(2500);
       try {
-        const currentEta = await queryNumber(conn, 'NEXTNODE:ETA');
+        // Query node status and warp level (NOT MechJeb state - it's not enabled yet)
+        const statusResult = await conn.queue(
+          'PRINT HASNODE + "|" + WARP + "|" + (CHOOSE NEXTNODE:ETA IF HASNODE ELSE 0).',
+          2000
+        );
+        const parts = statusResult.output.split('|');
+        const hasNode = parts[0]?.toLowerCase().includes('true');
+        const warpLevel = parseNumber(parts[1] || '0');
+        const currentEta = parseNumber(parts[2] || '0');
+
         consecutiveFailures = 0; // Reset on successful query
-        if (currentEta <= warpLeadTime + 5) {
-          log.progress(`${logPrefix} Dropping out of warp. preparing for maneuver.`);
+
+        // If node is gone, burn already happened (shouldn't happen without MechJeb, but check anyway)
+        if (!hasNode) {
+          log.progress(`${logPrefix} Burn complete`);
           break;
         }
-        if (warpAttempts % 30 === 0) {
-          log.progress(`${logPrefix} On approach... ignition in ${formatTime(currentEta)}`);
+
+        // Exit if ETA is low enough
+        if (currentEta <= 0 || currentEta <= warpLeadTime + 5) {
+          log.progress(`${logPrefix} Dropping out of warp, preparing for maneuver`);
+          break;
+        }
+
+        // Exit if warp stopped (warp level = 0 means we've arrived)
+        if (warpLevel === 0 && warpAttempts > 2) {
+          log.progress(`${logPrefix} Warp complete, ${formatTime(currentEta)} to ignition`);
+          break;
+        }
+
+        // Log if ETA changed significantly OR every 15 seconds
+        const now = Date.now();
+        const etaChanged = Math.abs(currentEta - lastLoggedEta) > 30;
+        const timeElapsed = now - lastLogTime >= 15_000;
+
+        if (etaChanged || timeElapsed) {
+          log.progress(`${logPrefix} Warping... ignition in ${formatTime(currentEta)}`);
+          lastLoggedEta = currentEta;
+          lastLogTime = now;
         }
       } catch {
-        // May be in blackout during warp - that's fine, MechJeb will handle it
+        // May be in blackout during warp - that's fine
         consecutiveFailures++;
         if (consecutiveFailures >= maxConsecutiveFailures) {
           // Too many consecutive failures - assume warp complete or failed, proceed to burn phase
           log.progress(`${logPrefix} Warp query timeout - proceeding to burn phase`);
           break;
         }
-        if (warpAttempts % 30 === 0) {
-          log.progress(`${logPrefix} Warp in progress (no signal - autopilot handling)`);
+        const now = Date.now();
+        if (now - lastLogTime >= 15_000) {
+          log.progress(`${logPrefix} Warp in progress (no signal)`);
+          lastLogTime = now;
         }
       }
       warpAttempts++;
     }
+  }
+
+  // Lock roll to prevent MechJeb from inducing roll during burn
+  // Uses current top vector to maintain current roll orientation
+  await conn.raw('LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, SHIP:FACING:TOPVECTOR).', 3000);
+
+  // NOW enable MechJeb executor - after warp is complete
+  // This ensures burn will complete even if we warp into a blackout zone
+  // MechJeb runs on the vessel autonomously once enabled
+  await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+  await delay(500); // Give MechJeb time to initialize
+
+  // Verify MechJeb is actually enabled
+  const verifyEnable = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
+  if (!verifyEnable.output.includes('True')) {
+    log.warn(`${logPrefix} MechJeb executor not enabled, retrying...`);
+    await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+    await delay(500);
   }
 
   // Poll state interface for burn monitoring
@@ -725,11 +790,17 @@ export async function executeNode(
     // Wait for burn completion using pollWithBlackoutResilience
     const result = await pollWithBlackoutResilience<BurnPollState>({
       poll: async () => {
-        // Query MechJeb state first - this is most reliable for completion detection
-        // Then query node if it exists. Split into two parts to handle node removal gracefully.
-        // Using queue() for clean output extraction (no echo stripping issues)
+        // FIRST: Quick check if node still exists - this is the most reliable completion indicator
+        // Do this as a separate query to avoid complex parsing issues
+        const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
+        if (nodeCheck.success && !nodeCheck.output.includes('True')) {
+          // Node is gone - burn complete!
+          return { noNode: true, dvRemaining: 0, executorEnabled: false, executorState: 'IDLE', burnComplete: true, executorStopped: false, nodeEta: 0 };
+        }
+
+        // Node exists - query full state for progress tracking
         const progressResult = await conn.queue(
-          'PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + HASNODE + "|" + (CHOOSE ROUND(NEXTNODE:DELTAV:MAG,1) IF HASNODE ELSE 0) + "|" + (CHOOSE ROUND(NEXTNODE:ETA) IF HASNODE ELSE 0).',
+          'PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE + "|" + ROUND(NEXTNODE:DELTAV:MAG,1) + "|" + ROUND(NEXTNODE:ETA).',
           3000
         );
 
@@ -739,35 +810,18 @@ export async function executeNode(
           return { noNode: false, dvRemaining: 999, executorEnabled: true, executorState: 'WARPALIGN', burnComplete: false, executorStopped: false, nodeEta: 0 };
         }
 
-        // Check for no node - either HASNODE returned False or node was removed
-        // Format: enabled|state|hasNode|dv|eta
-        const noNodeMatch = progressResult.output.match(/(True|False)\|(\w+)\|False\|/i);
-        if (noNodeMatch) {
-          const executorEnabled = noNodeMatch[1].toLowerCase() === 'true';
-          const executorState = noNodeMatch[2];
-          return { noNode: true, dvRemaining: 0, executorEnabled, executorState, burnComplete: true, executorStopped: false, nodeEta: 0 };
-        }
-
-        // Parse "enabled|state|hasNode|dv|eta" format (hasNode=True case)
-        const progressMatch = progressResult.output.match(/(True|False)\|(\w+)\|True\|([\d.]+)\|(-?\d+)/i);
+        // Parse "enabled|state|dv|eta" format
+        const progressMatch = progressResult.output.match(/(True|False)\|(\w+)\|([\d.]+)\|(-?\d+)/i);
         if (!progressMatch) {
           parseFailureCount++;
-          // After too many parse failures, do a direct node check to break the stall
           if (parseFailureCount >= MAX_PARSE_FAILURES) {
-            log.warn(`${logPrefix} Parse failures detected, checking node directly...`);
-            try {
-              const directCheck = await conn.queue('PRINT HASNODE.', 2000);
-              if (directCheck.success && !directCheck.output.includes('True')) {
-                return { noNode: true, dvRemaining: 0, executorEnabled: false, executorState: 'IDLE', burnComplete: true, executorStopped: false, nodeEta: 0 };
-              }
-            } catch { /* ignore */ }
-            parseFailureCount = 0; // Reset and continue
+            log.warn(`${logPrefix} Parse failures detected, assuming burn complete...`);
+            // After many parse failures, assume we're done (node may have been consumed)
+            return { noNode: true, dvRemaining: 0, executorEnabled: false, executorState: 'IDLE', burnComplete: true, executorStopped: false, nodeEta: 0 };
           }
-          // Return last valid state if available (but don't loop forever)
           if (lastValidState) {
             return lastValidState;
           }
-          // No previous state - return a "still checking" state
           return { noNode: false, dvRemaining: 999, executorEnabled: true, executorState: 'WARPALIGN', burnComplete: false, executorStopped: false, nodeEta: 0 };
         }
 
@@ -782,6 +836,15 @@ export async function executeNode(
         // Executor stopped: either disabled, or IDLE state (MechJeb sets IDLE when done even if enabled)
         const executorIdle = executorState.toUpperCase() === 'IDLE';
         const executorStopped = (!executorEnabled || executorIdle) && dvRemaining >= DV_THRESHOLD;
+
+        // Double-check: if MechJeb is IDLE, verify node still exists
+        // (MechJeb may have completed and we just need to confirm)
+        if (executorIdle) {
+          const confirmNode = await conn.queue('PRINT HASNODE.', 1500);
+          if (confirmNode.success && !confirmNode.output.includes('True')) {
+            return { noNode: true, dvRemaining: 0, executorEnabled, executorState, burnComplete: true, executorStopped: false, nodeEta: 0 };
+          }
+        }
 
         const state = { noNode: false, dvRemaining, executorEnabled, executorState, burnComplete, executorStopped, nodeEta };
         lastValidState = state; // Save for fallback
@@ -846,6 +909,10 @@ export async function executeNode(
               // Just let the normal polling continue until burnComplete
               statusMsg = `Burn: ${fmtVel(state.dvRemaining)} to go (realigning)`;
               warpAlignStuckCount = 0; // Reset stuck counter
+            } else if (currentAngle < ALIGN_THRESHOLD) {
+              // Aligned but MechJeb still in WARPALIGN state - just wait for ignition
+              statusMsg = `Aligned, awaiting ignition`;
+              warpAlignStuckCount = 0;
             } else {
               // Check for stuck alignment (angle not changing)
               if (lastWarpAlignAngle !== null) {
@@ -897,14 +964,16 @@ export async function executeNode(
         // All cleanup commands wrapped in try/catch to prevent stalls if connection dies
         try { await stopWarp(conn); } catch { /* ignore */ }
 
-        // Log completion - show residual dV only if significant (> 0.5 m/s)
-        if (state.dvRemaining > 0.5) {
-          log.progress(`${logPrefix} Burn complete (${fmtVel(state.dvRemaining)} residual)`);
-        } else {
-          log.progress(`${logPrefix} Burn complete`);
-        }
+        // Log completion
+        log.progress(`${logPrefix} Burn complete`);
 
-        // Clear any residual node to avoid "No maneuver nodes present!" errors
+        // Unlock steering BEFORE removing node (steering references NEXTNODE:BURNVECTOR)
+        try { await conn.raw('UNLOCK STEERING.', 2000); } catch { /* ignore */ }
+
+        // Log burn error (residual dV) and clear node
+        if (state.dvRemaining > 0.1) {
+          log.progress(`${logPrefix} Burn error: ${fmtVel(state.dvRemaining)}`);
+        }
         try { await conn.raw('IF HASNODE { REMOVE NEXTNODE. }', 3000); } catch { /* ignore */ }
 
         // Restore thrust if it was limited for small burns
@@ -924,6 +993,8 @@ export async function executeNode(
         } catch { /* ignore SAS errors */ }
         // Clear operation state on success (safety monitor may have already cleared)
         try { await clearKosOperation(conn); } catch { /* ignore */ }
+        // Invalidate status cache - orbit changed after burn
+        invalidateStatusCache();
         return {
           success: true,
           nodesExecuted: initialNodeCount,

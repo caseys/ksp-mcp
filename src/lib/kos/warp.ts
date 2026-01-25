@@ -14,7 +14,7 @@ import { hasTarget } from './target/shared.js';
 import { ManeuverOrchestrator } from '../mechjeb/orchestrator.js';
 import { handlePostSOIArrival } from '../mechjeb/transfer/return-from-moon.js';
 
-const POLL_INTERVAL_MS = 2000;  // Poll every 2s
+const POLL_INTERVAL_MS = 2500;  // Poll every 2.5s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
 
 export type WarpTarget = 'node' | 'soi' | 'periapsis' | 'apoapsis' | 'reentry';
@@ -591,6 +591,8 @@ async function warpToNode(
   await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(NEXTNODE:TIME - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close to target
+  let lastLogTime = Date.now();
+  let lastLoggedEta = initialEta;
   const result = await pollWithBlackoutResilience<number>({
     poll: async () => Number.parseFloat(await queryValue(conn, 'NEXTNODE:ETA')),
     isDone: (eta) => eta <= leadTime + 5,
@@ -600,7 +602,16 @@ async function warpToNode(
     logger: log,
     context: 'Warp',
     connection: conn,
-    onPoll: (eta) => log.progress(`[Warp] ETA to maneuver: ${formatTime(eta)}`),
+    onPoll: (eta) => {
+      const now = Date.now();
+      const etaChanged = Math.abs(eta - lastLoggedEta) > 30; // Significant change
+      const timeElapsed = now - lastLogTime >= 15_000;
+      if (etaChanged || timeElapsed) {
+        log.progress(`[Warp] ETA to maneuver: ${formatTime(eta)}`);
+        lastLogTime = now;
+        lastLoggedEta = eta;
+      }
+    },
   });
 
   if (result.success) {
@@ -665,6 +676,9 @@ async function warpToSOI(
     nextBody: string | null;  // Body after next patch (for flyby detection)
   }
 
+  let lastLogTime = Date.now();
+  let lastLoggedBody = currentBody;
+  let lastLoggedEta = soiEta;
   const result = await pollWithBlackoutResilience<SOIPollState>({
     poll: async () => {
       const body = await queryValue(conn, 'SHIP:BODY:NAME');
@@ -693,17 +707,23 @@ async function warpToSOI(
     context: 'Warp',
     connection: conn,
     onPoll: (state) => {
-      // Check if we've crossed into the new SOI
+      const now = Date.now();
       const crossed = state.body.toLowerCase() !== currentBody.toLowerCase();
+      const bodyChanged = state.body.toLowerCase() !== lastLoggedBody.toLowerCase();
+      const etaChanged = state.eta !== null && Math.abs(state.eta - lastLoggedEta) > 30;
+      const timeElapsed = now - lastLogTime >= 15_000;
 
-      if (!crossed) {
-        // Still approaching destination
-        if (state.eta !== null && state.eta < 100_000) {
-          log.progress(`[Warp] Approaching destination... ETA ${formatTime(state.eta)}`);
+      if (bodyChanged || etaChanged || timeElapsed) {
+        if (!crossed) {
+          if (state.eta !== null && state.eta < 100_000) {
+            log.progress(`[Warp] Approaching destination... ETA ${formatTime(state.eta)}`);
+          }
+        } else if (state.eta !== null && state.nextBody) {
+          log.progress(`[Warp] Flyby trajectory - returns to ${state.nextBody} in ${formatTime(state.eta)}`);
         }
-      } else if (state.eta !== null && state.nextBody) {
-        // Crossed into new SOI - eta now refers to exit trajectory
-        log.progress(`[Warp] Flyby trajectory - returns to ${state.nextBody} in ${formatTime(state.eta)}`);
+        lastLogTime = now;
+        lastLoggedBody = state.body;
+        if (state.eta !== null) lastLoggedEta = state.eta;
       }
     },
   });
@@ -786,6 +806,8 @@ async function warpToOrbitalPoint(
   await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ETA:${point} - ${leadTime}).`, 5000);
 
   // Poll ETA until we're close
+  let lastLogTime = Date.now();
+  let lastLoggedEta = initialEta;
   const result = await pollWithBlackoutResilience<number>({
     poll: async () => Number.parseFloat(await queryValue(conn, `ETA:${point}`)),
     isDone: (eta) => eta <= leadTime + 5,
@@ -795,7 +817,16 @@ async function warpToOrbitalPoint(
     logger: log,
     context: 'Warp',
     connection: conn,
-    onPoll: (eta) => log.progress(`[Warp] On approach... ${formatTime(eta)} to ${pointName}`),
+    onPoll: (eta) => {
+      const now = Date.now();
+      const etaChanged = Math.abs(eta - lastLoggedEta) > 30;
+      const timeElapsed = now - lastLogTime >= 15_000;
+      if (etaChanged || timeElapsed) {
+        log.progress(`[Warp] On approach... ${formatTime(eta)} to ${pointName}`);
+        lastLogTime = now;
+        lastLoggedEta = eta;
+      }
+    },
   });
 
   if (result.success) {
@@ -923,6 +954,8 @@ export async function warpForward(
   await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${seconds}).`, 5000);
 
   // Poll WARP status until it's 0 (warp complete)
+  let lastLogTime = Date.now();
+  let lastLoggedWarp = -1;
   const result = await pollWithBlackoutResilience<number>({
     poll: async () => {
       const warpResult = await conn.queue('PRINT WARP.', 3000);
@@ -936,7 +969,16 @@ export async function warpForward(
     logger: log,
     context: 'Warp',
     connection: conn,
-    onPoll: (warpLevel) => log.progress(`[Warp] Warp factor ${warpLevel}...`),
+    onPoll: (warpLevel) => {
+      const now = Date.now();
+      const warpChanged = warpLevel !== lastLoggedWarp;
+      const timeElapsed = now - lastLogTime >= 15_000;
+      if (warpChanged || timeElapsed) {
+        log.progress(`[Warp] Warp factor ${warpLevel}...`);
+        lastLogTime = now;
+        lastLoggedWarp = warpLevel;
+      }
+    },
   });
 
   if (result.success) {

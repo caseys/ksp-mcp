@@ -19,6 +19,26 @@ import { formatTime, formatOrbit, fmtNum, fmtDist, fmtVel } from '../utils/forma
 // Delay between query batches - set to 0 since all telemetry queries are read-only
 const TELEMETRY_DELAY_MS = 0;
 
+// ==================== Status Data Cache ====================
+// Cache with hysteresis: base timeout extends on hits, resets on miss
+let cachedStatusData: StatusData | null = null;
+let cacheTimestamp = 0;
+let cacheTimeout = 5000;  // Current timeout (varies with hysteresis)
+
+const CACHE_BASE_TIMEOUT = 5000;    // 5 seconds base
+const CACHE_EXTENSION = 1000;       // +1 second per cache hit
+const CACHE_MAX_TIMEOUT = 15_000;    // Cap at 15 seconds
+
+/**
+ * Invalidate the status data cache.
+ * Call after operations that change vessel state (burns, target changes, etc.)
+ */
+export function invalidateStatusCache(): void {
+  cachedStatusData = null;
+  cacheTimestamp = 0;
+  cacheTimeout = CACHE_BASE_TIMEOUT;
+}
+
 /**
  * Get smart display status for reentry/aerobraking trajectories.
  * Replaces generic "SUB_ORBITAL" with more descriptive states.
@@ -380,15 +400,29 @@ function convertKosJson(obj: unknown): unknown {
 /**
  * Get raw status data from mcp_status.ks script.
  * Handles auto-redeploy of outdated scripts.
+ * Results are cached with hysteresis timeout (5s base, extends on hits).
  *
  * @param conn kOS connection
  * @param timeoutMs Timeout for status script execution
+ * @param forceRefresh Bypass cache and fetch fresh data
  * @returns Raw StatusData from the status script
  */
 export async function getStatusData(
   conn: KosConnection,
-  timeoutMs = 5000
+  timeoutMs = 5000,
+  forceRefresh = false
 ): Promise<StatusData> {
+  // Check cache (unless force refresh requested)
+  const now = Date.now();
+  if (!forceRefresh && cachedStatusData && (now - cacheTimestamp) < cacheTimeout) {
+    // Cache HIT - extend timeout (hysteresis pattern)
+    cacheTimeout = Math.min(cacheTimeout + CACHE_EXTENSION, CACHE_MAX_TIMEOUT);
+    return cachedStatusData;
+  }
+
+  // Cache MISS or forced refresh - reset timeout to base
+  cacheTimeout = CACHE_BASE_TIMEOUT;
+
   let data: StatusData | null = null;
   let lastError = '';
   let needsRedeploy = false;
@@ -508,6 +542,10 @@ export async function getStatusData(
   if (!data) {
     throw new Error(`Telemetry error: status script failed (${lastError})`);
   }
+
+  // Update cache on successful fetch
+  cachedStatusData = data;
+  cacheTimestamp = Date.now();
 
   return data;
 }

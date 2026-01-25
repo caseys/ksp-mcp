@@ -415,7 +415,7 @@ export class AscentHandle {
    * Wait for the ascent to complete using TypeScript polling
    * More reliable than blocking kOS UNTIL loop - handles connection recovery
    */
-  async waitForCompletion(pollIntervalMs = 5000): Promise<AscentResult> {
+  async waitForCompletion(pollIntervalMs = 2500): Promise<AscentResult> {
     const MAX_WAIT_MS = 900_000; // 15 minutes max
     this.logger.info(`[Ascent] Target: ${Math.round(this.targetAltitude/1000)}km orbit`);
 

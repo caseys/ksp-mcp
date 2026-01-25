@@ -5,6 +5,7 @@
  */
 
 import type { KosConnection } from '../../transport/kos-connection.js';
+import { invalidateStatusCache } from '../mechjeb/telemetry.js';
 
 export interface ClearNodesResult {
   success: boolean;
@@ -31,6 +32,8 @@ export async function clearNodes(conn: KosConnection): Promise<ClearNodesResult>
   const match = result.output.match(/CLEARED\|(\d+)/);
   const nodesCleared = match ? Number.parseInt(match[1], 10) : 0;
 
+  // Invalidate status cache - nodes changed
+  invalidateStatusCache();
   return { success: true, nodesCleared };
 }
 

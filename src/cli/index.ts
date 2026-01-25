@@ -132,6 +132,8 @@ function parseArgs(args: string[], toolName: string): Record<string, unknown> {
   const result: Record<string, unknown> = {};
   const positionalNames = POSITIONAL_ARGS[toolName] || [];
   let positionalIndex = 0;
+  // For command tool, preserve commas in kOS code strings
+  const preserveCommas = toolName === 'command';
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
@@ -141,13 +143,13 @@ function parseArgs(args: string[], toolName: string): Record<string, unknown> {
       const eqIndex = arg.indexOf('=');
       if (eqIndex !== -1) {
         const key = kebabToCamel(arg.slice(2, eqIndex));
-        const value = parseValue(arg.slice(eqIndex + 1));
+        const value = parseValue(arg.slice(eqIndex + 1), preserveCommas);
         result[key] = value;
       } else {
         const key = kebabToCamel(arg.slice(2));
         // Check if next arg is a value or another flag
         if (i + 1 < args.length && !args[i + 1].startsWith('--')) {
-          result[key] = parseValue(args[i + 1]);
+          result[key] = parseValue(args[i + 1], preserveCommas);
           i++;
         } else {
           // Boolean flag
@@ -163,13 +165,13 @@ function parseArgs(args: string[], toolName: string): Record<string, unknown> {
       // Check for smart first positional (number vs string routing)
       if (positionalIndex === 0 && SMART_FIRST_POSITIONAL[toolName]) {
         const smart = SMART_FIRST_POSITIONAL[toolName];
-        const value = parseValue(arg);
+        const value = parseValue(arg, preserveCommas);
         const paramName = typeof value === 'number' ? smart.number : smart.string;
         result[paramName] = value;
         positionalIndex++;
       } else if (positionalIndex < positionalNames.length) {
         const paramName = positionalNames[positionalIndex];
-        const value = parseValue(arg);
+        const value = parseValue(arg, preserveCommas);
         // If same param name used multiple times, combine into array
         if (result[paramName] !== undefined) {
           const existing = result[paramName];
@@ -187,14 +189,17 @@ function parseArgs(args: string[], toolName: string): Record<string, unknown> {
 
 /**
  * Parse a string value into appropriate type
+ * @param value - The string value to parse
+ * @param preserveCommas - If true, don't split on commas (used for command strings)
  */
-function parseValue(value: string): unknown {
+function parseValue(value: string, preserveCommas = false): unknown {
   // Boolean
   if (value.toLowerCase() === 'true') return true;
   if (value.toLowerCase() === 'false') return false;
 
   // Comma-separated array (e.g., "65,75" → [65, 75])
-  if (value.includes(',')) {
+  // Skip for command strings that contain kOS code
+  if (!preserveCommas && value.includes(',')) {
     return value.split(',').map(v => parseValue(v.trim()));
   }
 

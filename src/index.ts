@@ -47,6 +47,28 @@ export * from './lib/index.js';
 export { config } from './config/index.js';
 export type { Config } from './config/index.js';
 
+// =============================================================================
+// Server Activity Tracking (for idle timeout)
+// =============================================================================
+
+/** Last time the server had activity (request or progress sent) */
+let lastActivityTime = Date.now();
+
+/**
+ * Reset the idle timeout by marking activity.
+ * Call this when sending progress notifications to keep server alive during long operations.
+ */
+export function markServerActivity(): void {
+  lastActivityTime = Date.now();
+}
+
+/**
+ * Get the last activity timestamp (for idle timeout checking)
+ */
+export function getLastActivityTime(): number {
+  return lastActivityTime;
+}
+
 // MCP Server
 export { createServer } from './service/http-server.js';
 
@@ -157,11 +179,11 @@ Examples:
     }>();
 
     // Idle timeout tracking (only if idleTimeoutSecs > 0)
-    let lastRequestTime = Date.now();
+    // Uses shared lastActivityTime which is updated on both requests AND progress output
     if (idleTimeoutSecs > 0) {
       const idleTimeoutMs = idleTimeoutSecs * 1000;
       setInterval(() => {
-        if (Date.now() - lastRequestTime > idleTimeoutMs) {
+        if (Date.now() - getLastActivityTime() > idleTimeoutMs) {
           console.error(`[server] Idle timeout (${idleTimeoutSecs}s), shutting down`);
           process.exit(0);
         }
@@ -169,8 +191,8 @@ Examples:
     }
 
     const httpServer = http.createServer(async (req, res) => {
-      // Update last request time for idle timeout
-      lastRequestTime = Date.now();
+      // Update activity time for idle timeout (requests count as activity)
+      markServerActivity();
       // CORS headers for cross-origin access
       res.setHeader('Access-Control-Allow-Origin', '*');
       res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');

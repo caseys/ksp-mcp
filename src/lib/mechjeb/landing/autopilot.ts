@@ -313,7 +313,7 @@ async function jettisonStage(
 }
 
 // Configuration
-const DEFAULT_POLL_INTERVAL_MS = 5000; // 5 seconds
+const DEFAULT_POLL_INTERVAL_MS = 2500; // 2.5 seconds
 const DEFAULT_TIMEOUT_MS = 1_800_000; // 30 minutes
 const TARGET_LANDING_TWR = 15; // Target TWR for landing - limit engines if higher
 
@@ -439,6 +439,8 @@ async function monitorLanding(
   let lastLoggedAlt = 0;
   let descentLogCount = 0;
   let consecutiveDisabledCount = 0;
+  let lastThresholdLogTime = Date.now();  // For threshold matches: every 10s
+  let lastNonThresholdLogTime = Date.now();  // For non-threshold: state change OR 30s
 
   // Track deferred separation state
   let separationFired = false;
@@ -649,10 +651,14 @@ async function monitorLanding(
           initialBrakingSpeed = speed;
         }
 
-        // Only log every 30 m/s change to reduce verbosity
-        if (lastLoggedSpeed === 0 || lastLoggedSpeed - speed >= 30) {
+        // Log if threshold met (30 m/s change) AND 10s has passed
+        const now = Date.now();
+        const thresholdMet = lastLoggedSpeed === 0 || lastLoggedSpeed - speed >= 30;
+        const timeElapsed = now - lastThresholdLogTime >= 10_000;
+        if (thresholdMet && timeElapsed) {
           log.progress(`[Landing] Braking: ${speed}_m/sec`);
           lastLoggedSpeed = speed;
+          lastThresholdLogTime = now;
         }
 
         // Progressive physics warp - only on bodies WITHOUT atmosphere
@@ -688,8 +694,11 @@ async function monitorLanding(
             currentWarpLevel = 0;
           } catch { /* ignore */ }
         }
-        // Only log every 50m change or at key altitudes
-        if (lastLoggedAlt === 0 || lastLoggedAlt - alt >= 50 || alt <= 20) {
+        // Log if threshold met (50m change or key altitude) AND 10s has passed
+        const now = Date.now();
+        const thresholdMet = lastLoggedAlt === 0 || lastLoggedAlt - alt >= 50 || alt <= 20;
+        const timeElapsed = now - lastThresholdLogTime >= 10_000;
+        if (thresholdMet && timeElapsed) {
           descentLogCount++;
           // Every other log, include descent rate
           if (descentLogCount % 2 === 0) {
@@ -704,6 +713,7 @@ async function monitorLanding(
             log.progress(`[Landing] Final descent: ${alt}m`);
           }
           lastLoggedAlt = alt;
+          lastThresholdLogTime = now;
         }
         return;
       }
@@ -722,7 +732,12 @@ async function monitorLanding(
       }
 
       // Log other status changes (not braking/descent)
-      if (rawStatus !== lastStatusText) {
+      // Log if state changed OR 30s has passed
+      const now = Date.now();
+      const stateChanged = rawStatus !== lastStatusText;
+      const timeElapsed = now - lastNonThresholdLogTime >= 30_000;
+
+      if (stateChanged || timeElapsed) {
         lastStatusText = rawStatus;
 
         // Map raw status to cleaner messages
@@ -749,6 +764,7 @@ async function monitorLanding(
 
         if (statusText) {
           log.progress(`[Landing] ${statusText}`);
+          lastNonThresholdLogTime = now;
         }
       }
 

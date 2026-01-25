@@ -60,7 +60,6 @@ FUNCTION DO_ALIGN {
 
 // ------------------ save state ------------------
 LOCAL origSAS IS SAS.
-LOCAL origRCS IS RCS.
 
 
 // ------------------ enter physics warp x2 ------------------
@@ -78,16 +77,22 @@ WAIT 0.
 
 
 // ------------------ RCS setup ------------------
-IF RCS_MODE = 1 {
-    // Mode 1: brief burst at start
-    SET RCS TO TRUE.
-    WAIT 0.1.
-    SET RCS TO FALSE.
-} ELSE IF RCS_MODE >= 2 {
-    // Modes 2-3: RCS on, adaptive control
-    SET RCS TO TRUE.
+IF RCS_MODE >= 1 {
     SET_RCS_POWER(100).
-    WAIT 0.
+}
+IF RCS_MODE = 1 {
+    // Mode 1: brief burst at start only
+    SET RCS TO TRUE.
+    WAIT 0.05.
+    SET RCS TO FALSE.
+} ELSE IF RCS_MODE = 2 {
+    // Mode 2: initial pulse burst
+    SET RCS TO TRUE.
+    WAIT 0.05.
+    SET RCS TO FALSE.
+} ELSE IF RCS_MODE = 3 {
+    // Mode 3: continuous RCS
+    SET RCS TO TRUE.
 }
 
 
@@ -99,6 +104,19 @@ LOCAL maxAttempts IS 3.
 LOCAL aligned IS FALSE.
 LOCAL method IS "KOS".
 
+// Capture initial error for precision RCS trigger
+LOCAL initialError IS VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR).
+LOCAL precisionThreshold IS initialError * 0.15.
+
+// Precision RCS control: halve RCS power when error < 15% of initial
+// Fires once during alignment to reduce overshoot
+IF RCS_MODE >= 1 AND precisionThreshold > 1 {
+    WHEN VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR) < precisionThreshold THEN {
+        SET_RCS_POWER(50).
+        PRINT "ALIGN: RCS halved for precision".
+    }
+}
+
 UNTIL alignAttempts >= maxAttempts {
     SET alignAttempts TO alignAttempts + 1.
     SET method TO DO_ALIGN().
@@ -107,19 +125,6 @@ UNTIL alignAttempts >= maxAttempts {
     LOCAL lastAngle IS 999.
     LOCAL tStart IS TIME:SECONDS.
 
-    // RCS pulse burst for mode 2
-    IF RCS_MODE = 2 {
-        PRINT "ALIGN: RCS pulse assist".
-        LOCAL idx IS 0.
-        UNTIL idx >= 3 {
-            SET RCS TO TRUE.
-            WAIT 0.05.
-            SET RCS TO FALSE.
-            WAIT 0.1.
-            SET idx TO idx + 1.
-        }
-        SET RCS TO TRUE.
-    }
 
     // Alignment loop (30 second timeout per attempt)
     UNTIL TIME:SECONDS - tStart > 30 {
@@ -133,8 +138,8 @@ UNTIL alignAttempts >= maxAttempts {
             BREAK.
         }
 
-        // Adaptive RCS thrust control (modes 2-3)
-        IF RCS_MODE >= 2 {
+        // Adaptive RCS thrust control (all RCS modes)
+        IF RCS_MODE >= 1 {
             IF angVel > 0.1 {
                 SET_RCS_POWER(25).       // Fast rotation - prevent overshoot
             } ELSE IF angVel > 0.05 {
@@ -144,6 +149,13 @@ UNTIL alignAttempts >= maxAttempts {
             } ELSE {
                 SET_RCS_POWER(75).       // Normal operation
             }
+        }
+
+        // Mode 2: pulse RCS on/off each iteration
+        IF RCS_MODE = 2 {
+            SET RCS TO TRUE.
+            WAIT 0.05.
+            SET RCS TO FALSE.
         }
 
         // Stuck detection: no angle change + low angular velocity
@@ -171,15 +183,16 @@ UNTIL alignAttempts >= maxAttempts {
 // ------------------ RCS end burst (mode 1) ------------------
 IF RCS_MODE = 1 {
     SET RCS TO TRUE.
-    WAIT 0.1.
+    WAIT 0.025.
 }
 
 
-// ------------------ restore RCS ------------------
-IF RCS_MODE >= 2 {
-    SET_RCS_POWER(100).  // Restore full thrust
+// ------------------ turn off RCS ------------------
+// RCS off after alignment - MechJeb handles the burn
+IF RCS_MODE >= 1 {
+    SET_RCS_POWER(100).  // Reset thrust limit for future use
 }
-SET RCS TO origRCS.
+SET RCS TO FALSE.
 WAIT 0.
 
 

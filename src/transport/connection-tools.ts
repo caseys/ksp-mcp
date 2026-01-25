@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { KosConnection, ConnectionState, CommandResult } from '../transport/kos-connection.js';
 import { config } from '../config/index.js';
-import { ensureAllScripts } from '../utils/deploy.js';
+import { ensureAllScripts, resetScriptsVerified } from '../utils/deploy.js';
 
 // Shared connection instance
 let connection: KosConnection | null = null;
@@ -103,6 +103,8 @@ export async function forceDisconnect(): Promise<void> {
     }
     connection = null;
   }
+  // Reset script verification cache so next connection re-deploys if needed
+  resetScriptsVerified();
 }
 
 /**

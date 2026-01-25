@@ -8,6 +8,7 @@ import type { ToolDefinition } from '../../tool-types.js';
 import { parseTarget } from '../../tool-types.js';
 import type { SetTargetResult } from './types.js';
 import { listTargets } from './get-targets.js';
+import { invalidateStatusCache } from '../../mechjeb/telemetry.js';
 
 /**
  * Internal implementation of setTarget with quick confirmation.
@@ -41,6 +42,8 @@ async function setTargetInternal(
   const okMatch = output.match(/TARGET_OK\|([^|]+)\|(\w+)/);
   if (okMatch) {
     const [, targetName, targetType] = okMatch;
+    // Invalidate status cache - target changed
+    invalidateStatusCache();
     return { success: true, name: targetName, type: targetType };
   }
 

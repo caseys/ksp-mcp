@@ -13,6 +13,7 @@ import { join } from 'node:path';
 import type { McpLogger } from '../lib/tool-types.js';
 import type { RequestHandlerExtra } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ServerNotification, ServerRequest } from '@modelcontextprotocol/sdk/types.js';
+import { markServerActivity } from '../index.js';
 
 type LogLevel = 'info' | 'warning' | 'error' | 'debug';
 
@@ -169,6 +170,9 @@ export class BroadcastLogger implements McpLogger {
 
   progress(message: string): void {
     writeToFile('progress', message);
+
+    // Mark server activity to prevent idle timeout during long operations
+    markServerActivity();
 
     // Send proper progress notification to initial client (if they support it)
     if (this.progressToken && this.initialExtra) {

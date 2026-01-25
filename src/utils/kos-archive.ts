@@ -14,6 +14,15 @@ import { writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { KosConnection } from '../transport/kos-connection.js';
+import { getActiveBroadcastLogger } from './mcp-logger.js';
+
+/**
+ * Dual logging helper - logs to both console.error (always) and MCP logger (if available).
+ */
+function logArchive(level: 'info' | 'warn' | 'error', msg: string): void {
+  console.error(msg);
+  getActiveBroadcastLogger()?.[level](msg);
+}
 
 // Cached paths (discovered once per session)
 let cachedKspRoot: string | null = null;
@@ -44,7 +53,7 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
       return cachedKspRoot;
     }
     // Env var set but path doesn't exist - warn once
-    console.warn(`[kos-archive] KSP_ROOT="${envRoot}" does not exist`);
+    logArchive('warn', `[kos-archive] KSP_ROOT="${envRoot}" does not exist`);
   }
 
   // Priority 2: Query from kOS.MechJeb2.Addon (dev builds only)
@@ -64,7 +73,7 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
 
   // Neither method worked - log helpful message ONCE
   if (!envRoot) {
-    console.info(
+    logArchive('info',
       '[kos-archive] Direct archive write unavailable. ' +
       'Set KSP_ROOT env var for faster script deployment. ' +
       'Using terminal fallback (slower but works).'
@@ -180,17 +189,17 @@ export async function deployScript(
       try {
         const checkResult = await conn.queue(`PRINT EXISTS("${kosPath}").`, 3000);
         if (checkResult.success && checkResult.output.includes('True')) {
-          console.error(`[kos-archive] Direct write to ${kosPath} succeeded`);
+          logArchive('info', `[kos-archive] Direct write to ${kosPath} succeeded`);
           return { success: true, method: 'direct' };
         }
         // File written but kOS can't see it - fall through to terminal method
-        console.error(`[kos-archive] Direct write succeeded but EXISTS check failed for ${kosPath}`);
+        logArchive('warn', `[kos-archive] Direct write succeeded but EXISTS check failed for ${kosPath}`);
       } catch (err) {
-        console.error(`[kos-archive] Direct write succeeded but EXISTS check threw: ${err}`);
+        logArchive('warn', `[kos-archive] Direct write succeeded but EXISTS check threw: ${err}`);
         // Fall through to terminal method
       }
     } else {
-      console.error(`[kos-archive] Direct write to ${kosPath} failed, falling back to terminal`);
+      logArchive('info', `[kos-archive] Direct write to ${kosPath} failed, falling back to terminal`);
     }
   }
 
@@ -213,6 +222,7 @@ export async function deployScript(
       await conn.raw(`LOG "${escaped}" TO "${kosPath}".`, 2000);
     }
 
+    logArchive('info', `[kos-archive] Terminal write to ${kosPath} succeeded (${lines.length} lines)`);
     return { success: true, method: 'terminal' };
   } catch (error) {
     return {

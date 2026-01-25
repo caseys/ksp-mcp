@@ -577,9 +577,9 @@ export async function courseCorrection(
   // Clear any existing node and create new one
   await conn.raw('IF HASNODE { REMOVE NEXTNODE. }', 2000);
   const cmd = `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:COURSECORRECTION(${targetPeriapsis}).`;
-  const result = await conn.raw(cmd, 10_000);
+  const result = await conn.queue(cmd, 10_000);
 
-  if (!result.output.includes('True')) {
+  if (!result.success || !result.output.includes('True')) {
     return {
       success: false,
       error: 'Failed to create course correction node',

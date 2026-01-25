@@ -11,6 +11,16 @@
 import type { KosConnection } from '../transport/kos-connection.js';
 import { deployScript } from './kos-archive.js';
 import { getScript, getScriptVersion, deployKosScript } from './kos-scripts.js';
+import { getActiveBroadcastLogger } from './mcp-logger.js';
+
+/**
+ * Dual logging helper - logs to both console.error (always) and MCP logger (if available).
+ * This ensures CLI users see output AND MCP clients receive notifications.
+ */
+function logDeploy(level: 'info' | 'warn' | 'error', msg: string): void {
+  console.error(msg);
+  getActiveBroadcastLogger()?.[level](msg);
+}
 
 // Script names and paths
 const STATUS_SCRIPT = 'mcp-status.ks';
@@ -18,6 +28,14 @@ const ALIGN_SCRIPT = 'mcp-align.ks';
 
 // Cache: once scripts are verified this session, skip re-checking
 let scriptsVerified = false;
+
+/**
+ * Reset the scripts verified cache.
+ * Call this when the connection is reset to force re-verification.
+ */
+export function resetScriptsVerified(): void {
+  scriptsVerified = false;
+}
 
 // Status script paths
 const STATUS_PATH = '0:/mcp_status.ks';
@@ -70,10 +88,10 @@ export async function ensureStatusScript(conn: KosConnection): Promise<boolean> 
   const archiveVersionOk = await checkScriptVersion(conn, STATUS_PATH, statusVersion);
   if (!archiveVersionOk) {
     // Archive missing or outdated - deploy fresh
-    console.error(`[deploy] Deploying status script (current: none, need: ${statusVersion})`);
+    logDeploy('info', `[deploy] Deploying status script (need: ${statusVersion})`);
     const deployResult = await deployStatusScript(conn);
     if (!deployResult.success) {
-      console.error(`[deploy] Failed to deploy status script: ${deployResult.error}`);
+      logDeploy('error', `[deploy] Failed to deploy status script: ${deployResult.error}`);
       return false;
     }
   }
@@ -81,9 +99,9 @@ export async function ensureStatusScript(conn: KosConnection): Promise<boolean> 
   // Copy to local volume for blackout resilience
   const copied = await copyStatusToLocal(conn);
   if (copied) {
-    console.error('[deploy] Copied status script to local');
+    logDeploy('info', '[deploy] Copied status script to local');
   } else {
-    console.error('[deploy] Failed to copy status script to local');
+    logDeploy('warn', '[deploy] Failed to copy status script to local');
     // Not fatal - archive version still works
   }
 
@@ -132,14 +150,12 @@ async function checkScriptVersion(
     const foundVersion = versionMatch?.[1] ?? null;
 
     if (foundVersion !== expectedVersion) {
-      console.error(
-        `[deploy] Version mismatch ${localPath}: found=${foundVersion ?? 'none'}, expected=${expectedVersion}`
-      );
+      logDeploy('info', `[deploy] Version mismatch ${localPath}: found=${foundVersion ?? 'none'}, expected=${expectedVersion}`);
     }
 
     return foundVersion === expectedVersion;
   } catch (err) {
-    console.error(`[deploy] Version check error ${localPath}: ${err}`);
+    logDeploy('error', `[deploy] Version check error ${localPath}: ${err}`);
     return false;
   }
 }
@@ -184,22 +200,22 @@ export async function ensureAllScripts(conn: KosConnection): Promise<{
         // Verify copy succeeded
         const verifyResult = await conn.queue(`PRINT EXISTS("${ALIGN_LOCAL_PATH}").`, 3000);
         if (verifyResult.success && verifyResult.output.includes('True')) {
-          console.error(`[deploy] Copied align script to local`);
+          logDeploy('info', '[deploy] Copied align script to local');
         } else {
-          console.error(`[deploy] Failed to copy align script to local`);
+          logDeploy('warn', '[deploy] Failed to copy align script to local');
         }
         alignOk = true; // Archive still works even if local copy failed
       } catch (err) {
-        console.error(`[deploy] Failed to copy align script to local: ${err}`);
+        logDeploy('warn', `[deploy] Failed to copy align script to local: ${err}`);
         alignOk = true; // Archive still works
       }
     } else {
       // Archive missing or outdated - full redeploy needed
-      console.error(`[deploy] Deploying align script (need: ${alignVersion})`);
+      logDeploy('info', `[deploy] Deploying align script (need: ${alignVersion})`);
       const alignResult = await deployKosScript(conn, ALIGN_SCRIPT, ALIGN_ARCHIVE_PATH, ALIGN_LOCAL_PATH);
       alignOk = alignResult.success;
       if (!alignResult.success) {
-        console.error(`[deploy] Failed to deploy align script: ${alignResult.error}`);
+        logDeploy('error', `[deploy] Failed to deploy align script: ${alignResult.error}`);
       }
     }
   }

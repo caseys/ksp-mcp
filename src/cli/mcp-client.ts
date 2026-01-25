@@ -23,7 +23,9 @@ const KSP_MCP_PATH = resolve(__dirname, '../../dist/index.js');
 const SERVER_HOST = '127.0.0.1';
 const SERVER_PORT = 3000;
 const SERVER_URL = `http://${SERVER_HOST}:${SERVER_PORT}/mcp`;
-const IDLE_TIMEOUT_SECS = 30;
+// Idle timeout - server stays alive while actively sending progress
+// This is just for cleanup after CLI commands finish
+const IDLE_TIMEOUT_SECS = 60; // 1 minute after last activity
 
 export interface ToolResult {
   success: boolean;
