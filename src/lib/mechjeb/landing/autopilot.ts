@@ -440,7 +440,7 @@ async function monitorLanding(
   let descentLogCount = 0;
   let consecutiveDisabledCount = 0;
   let lastThresholdLogTime = Date.now();  // For threshold matches: every 10s
-  let lastNonThresholdLogTime = Date.now();  // For non-threshold: state change OR 30s
+  let lastNonThresholdLogTime = Date.now();  // For status changes: state change OR 15s
 
   // Track deferred separation state
   let separationFired = false;
@@ -731,45 +731,33 @@ async function monitorLanding(
         initialBrakingSpeed = 0; // Reset for next braking phase
       }
 
-      // Log other status changes (not braking/descent)
-      // Log if state changed OR 30s has passed
+      // Log status changes or every 15 seconds (matches ascent/execute-node pattern)
       const now = Date.now();
       const stateChanged = rawStatus !== lastStatusText;
-      const timeElapsed = now - lastNonThresholdLogTime >= 30_000;
+      const timeElapsed = now - lastNonThresholdLogTime >= 15_000;
 
       if (stateChanged || timeElapsed) {
         lastStatusText = rawStatus;
 
         // Map raw status to cleaner messages
-        let statusText: string | undefined;
+        let statusText: string;
         if (/Coasting toward deceleration/.test(rawStatus)) {
           statusText = 'Coasting toward deceleration burn';
-        } else if (/Warping to start of braking burn/.test(rawStatus)) {
-          // Silent - warp in progress
         } else if (rawStatus === 'Off') {
           // Only show touchdown message if actually landed, otherwise MechJeb is just starting up
-          if (state.isLanded) {
-            statusText = 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.';
-          }
-          // Silent if not landed - MechJeb starting up
+          statusText = state.isLanded
+            ? 'Contact light, [[pbas 35]]Engine Shutdown, [[pbas 55]]Descent engine command override off.'
+            : 'Initializing autopilot';
         } else if (/course correction/i.test(rawStatus)) {
           // Filter out "0 m/s" corrections
           const dvMatch = rawStatus.match(/(\d+)/);
-          if (dvMatch && parseInt(dvMatch[1]) > 0) {
-            statusText = rawStatus;
-          }
+          statusText = (dvMatch && parseInt(dvMatch[1]) > 0) ? rawStatus : 'Course correction complete';
         } else {
           statusText = rawStatus;
         }
 
-        if (statusText) {
-          log.progress(`[Landing] ${statusText}`);
-          lastNonThresholdLogTime = now;
-        } else if (timeElapsed) {
-          // Send heartbeat even for silent statuses to keep MCP connection alive
-          log.progress(`[Landing] ${rawStatus}`);
-          lastNonThresholdLogTime = now;
-        }
+        log.progress(`[Landing] ${statusText}`);
+        lastNonThresholdLogTime = now;
       }
 
       // Log touchdown
