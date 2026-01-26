@@ -11,7 +11,7 @@ import type { McpLogger } from '../tool-types.js';
  */
 export async function unlockControls(conn: KosConnection): Promise<void> {
   try {
-    await conn.raw('UNLOCK STEERING. UNLOCK THROTTLE.', 2000);
+    await conn.raw('UNLOCK STEERING. UNLOCK THROTTLE. RCS OFF.', 2000);
   } catch {
     // Ignore errors - best effort cleanup
   }

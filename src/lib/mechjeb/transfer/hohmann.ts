@@ -16,22 +16,58 @@ import { formatTime, fmtVel } from '../../utils/format.js';
 
 /**
  * Create a fine tune function for Hohmann transfers.
- * Returns signed error: negative = undershoot (need prograde), positive = overshoot (need retrograde)
+ * Returns signed error:
+ *   - negative = undershoot (below minSafePe, including impact) → need prograde
+ *   - zero = in optimal range → no adjustment needed
+ *   - positive = overshoot (above maxOptimalPe) → need retrograde
  */
-function createHohmannFineTune(targetPe: number): FineTuneFunction {
+function createHohmannFineTune(minSafePe: number, maxOptimalPe: number): FineTuneFunction {
   return async (conn: KosConnection): Promise<number> => {
-    // Query current periapsis in target SOI using MechJeb
-    const result = await conn.queue('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
+    // Query periapsis from current trajectory (after burn, no node)
+    // Use marker concatenation to avoid matching echo in output
+    const result = await conn.queue(
+      'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "["+"PE"+"]" + ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS). } ELSE { PRINT "["+"NOENC"+"]". }',
+      3000
+    );
+
     if (!result.success) {
-      return 0; // Can't query - assume at target
-    }
-    const periapsis = parseNumber(result.output.trim());
-    if (periapsis === null || periapsis <= 0) {
-      return 0; // No encounter or invalid - consider at target
+      console.error('[fine-tune] Query failed:', result.output);
+      return 0;
     }
 
-    // Return signed error: negative = undershoot, positive = overshoot
-    return periapsis - targetPe;
+    // Check for no encounter
+    if (result.output.includes('[NOENC]')) {
+      console.error('[fine-tune] No encounter detected');
+      return 0;
+    }
+
+    // Parse periapsis from [PE]<value> format
+    const match = result.output.match(/\[PE\](-?\d+)/);
+    if (!match) {
+      console.error('[fine-tune] Failed to parse periapsis from:', result.output);
+      return 0;
+    }
+
+    const periapsis = parseInt(match[1]);
+    console.error(`[fine-tune] Periapsis: ${periapsis}m, optimal range: [${minSafePe}, ${maxOptimalPe}]`);
+
+    // In optimal range - no adjustment needed
+    if (periapsis >= minSafePe && periapsis <= maxOptimalPe) {
+      console.error('[fine-tune] In optimal range, no adjustment needed');
+      return 0;
+    }
+
+    // Below optimal (including negative/impact): need prograde
+    if (periapsis < minSafePe) {
+      const error = periapsis - minSafePe;
+      console.error(`[fine-tune] Below optimal, error: ${error}m (need prograde)`);
+      return error;
+    }
+
+    // Above optimal: need retrograde
+    const error = periapsis - maxOptimalPe;
+    console.error(`[fine-tune] Above optimal, error: ${error}m (need retrograde)`);
+    return error;
   };
 }
 
@@ -559,9 +595,10 @@ export const hohmannTransferTool: ToolDefinition = {
         );
         if (atmResult.success) {
           const atmHeight = parseNumber(atmResult.output.trim()) ?? 0;
-          // Target periapsis: 40km above atmosphere (or 40km if no atmosphere)
-          const targetPe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-          fineTuneFunction = createHohmannFineTune(targetPe);
+          // Optimal periapsis range: 40-90km above atmosphere (or 40-90km if no atmosphere)
+          const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+          const maxOptimalPe = minSafePe + 50_000;
+          fineTuneFunction = createHohmannFineTune(minSafePe, maxOptimalPe);
         }
       }
 

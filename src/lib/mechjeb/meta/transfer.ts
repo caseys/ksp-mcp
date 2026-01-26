@@ -13,6 +13,9 @@ import { getVesselStateInfo, validateVesselState, ORBITING_ONLY_REQUIREMENTS, ty
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
 import { formatTime,  fmtVel } from '../../utils/format.js';
+import { parseNumber } from '../shared.js';
+import type { FineTuneFunction } from '../execute-node.js';
+import type { KosConnection } from '../../../transport/kos-connection.js';
 
 // ============================================================================
 // Tool Definition
@@ -105,6 +108,12 @@ export const transferTool: ToolDefinition = {
         return ctx.errorResponse('transfer', error);
       }
 
+      // Create fine-tune function for hohmann transfers when executing
+      let fineTuneFunction: FineTuneFunction | undefined;
+      if (args.execute && transferType === 'hohmann' && targetInfo.class === 'moon') {
+        fineTuneFunction = await createTransferFineTune(conn, targetInfo.name);
+      }
+
       // Execute the appropriate transfer
       logger.progress(`[Transfer] Using ${transferType} for ${targetInfo.class}: ${targetInfo.name}`);
       const result = await executeSmartTransfer(orchestrator, transferType, {
@@ -112,6 +121,7 @@ export const transferTool: ToolDefinition = {
         execute: args.execute as boolean,
         logger,
         callerTool: 'transfer',
+        fineTuneFunction,
       });
 
       if (result.success) {
@@ -205,6 +215,7 @@ export interface ExecuteTransferOptions {
   execute: boolean;
   logger?: import('../../tool-types.js').McpLogger;
   callerTool: string;
+  fineTuneFunction?: FineTuneFunction;
 }
 
 /**
@@ -216,7 +227,7 @@ export async function executeSmartTransfer(
   transferType: TransferType,
   options: ExecuteTransferOptions
 ): Promise<import('../orchestrator.js').OrchestratedResult> {
-  const { target, execute, logger, callerTool } = options;
+  const { target, execute, logger, callerTool, fineTuneFunction } = options;
 
   if (transferType === 'hohmann') {
     return orchestrator.hohmannTransfer('COMPUTED', false, {
@@ -225,6 +236,7 @@ export async function executeSmartTransfer(
       logger,
       callerTool,
       rendezvous: true,
+      fineTuneFunction,
     });
   } else if (transferType === 'return_from_moon') {
     return orchestrator.returnFromMoon('auto', {
@@ -328,5 +340,78 @@ export function determineTransferType(
   return {
     transferType: 'hohmann',
     error: 'No valid target. Set a target body or vessel first.',
+  };
+}
+
+// ============================================================================
+// Fine-Tune Function for Transfers
+// ============================================================================
+
+/**
+ * Create a fine tune function for transfers to body targets.
+ * Queries target's atmosphere to determine optimal periapsis range.
+ */
+async function createTransferFineTune(conn: KosConnection, _targetName: string): Promise<FineTuneFunction | undefined> {
+  // Query target body's atmosphere height
+  const atmResult = await conn.queue(
+    'IF HASTARGET AND TARGET:ISTYPE("Body") { PRINT TARGET:ATM:HEIGHT. } ELSE { PRINT -1. }',
+    3000
+  );
+
+  if (!atmResult.success) {
+    return undefined;
+  }
+
+  const atmHeight = parseNumber(atmResult.output.trim()) ?? 0;
+  const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+  const maxOptimalPe = minSafePe + 50_000;
+
+  // Return fine-tune function that checks periapsis against optimal range
+  return async (conn: KosConnection): Promise<number> => {
+    // Query periapsis from current trajectory (after burn, no node)
+    // Use marker concatenation to avoid matching echo in output
+    const result = await conn.queue(
+      'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "["+"PE"+"]" + ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS). } ELSE { PRINT "["+"NOENC"+"]". }',
+      3000
+    );
+
+    if (!result.success) {
+      console.error('[fine-tune] Query failed:', result.output);
+      return 0;
+    }
+
+    // Check for no encounter
+    if (result.output.includes('[NOENC]')) {
+      console.error('[fine-tune] No encounter detected');
+      return 0;
+    }
+
+    // Parse periapsis from [PE]<value> format
+    const match = result.output.match(/\[PE\](-?\d+)/);
+    if (!match) {
+      console.error('[fine-tune] Failed to parse periapsis from:', result.output);
+      return 0;
+    }
+
+    const periapsis = parseInt(match[1]);
+    console.error(`[fine-tune] Periapsis: ${periapsis}m, optimal range: [${minSafePe}, ${maxOptimalPe}]`);
+
+    // In optimal range - no adjustment needed
+    if (periapsis >= minSafePe && periapsis <= maxOptimalPe) {
+      console.error('[fine-tune] In optimal range, no adjustment needed');
+      return 0;
+    }
+
+    // Below optimal (including negative/impact): need prograde
+    if (periapsis < minSafePe) {
+      const error = periapsis - minSafePe;
+      console.error(`[fine-tune] Below optimal, error: ${error}m (need prograde)`);
+      return error;
+    }
+
+    // Above optimal: need retrograde
+    const error = periapsis - maxOptimalPe;
+    console.error(`[fine-tune] Above optimal, error: ${error}m (need retrograde)`);
+    return error;
   };
 }

@@ -50,7 +50,7 @@ const SMALL_BURN_THRUST_LIMIT = 12; // percent - conservative limit for precisio
 const RCS_PULSE_DV_THRESHOLD = 10; // m/s - burns below this get shorter/fewer RCS pulses
 const RCS_PULSE_DURATION_MAX = 0.25; // seconds - maximum pulse duration
 const RCS_PULSE_DURATION_MIN = 0.03; // seconds - minimum pulse duration
-const RCS_PULSE_COUNT_MAX = 5; // max pulses per poll (large burns, large error)
+const RCS_PULSE_COUNT_MAX = 10; // max pulses per poll (large burns, large error)
 const RCS_PULSE_COUNT_MIN = 1; // min pulses per poll (small burns, small error)
 const RCS_PULSE_OFF_TIME = 0.3; // seconds - pause between pulses
 
@@ -126,9 +126,9 @@ function calculateRcsPulseDuration(burnDv: number, headingError: number): number
     baseDuration = RCS_PULSE_DURATION_MIN + dvFactor * (RCS_PULSE_DURATION_MAX - RCS_PULSE_DURATION_MIN);
   }
 
-  // Error-based reduction when < 15 degrees
-  if (headingError < 15) {
-    const errorFactor = Math.max(headingError / 15, 0.12); // Min 12% of base
+  // Error-based reduction when < 45 degrees
+  if (headingError < 45) {
+    const errorFactor = Math.max(headingError / 45, 0.12); // Min 12% of base
     baseDuration *= errorFactor;
   }
 
@@ -136,38 +136,37 @@ function calculateRcsPulseDuration(burnDv: number, headingError: number): number
 }
 
 /**
- * Calculate number of RCS pulses per poll based on burn delta-v and heading error.
+ * Calculate number of RCS pulses per poll based on heading error and burn delta-v.
  *
- * Fewer pulses = less aggressive pulsing = gentler alignment for small burns.
+ * Fewer pulses = less aggressive pulsing = helps large ships settle.
  *
- * Base count (from dV):
- * - dV >= 10 m/s: 5 pulses per poll
- * - dV < 10 m/s: scales down to 1 pulse at dV < 1 m/s
+ * Heading error is the PRIMARY factor:
+ * - error >= 45°: 5 pulses (aggressive turning)
+ * - error <= 15°: 1 pulse (gentle settling)
+ * - Linear scale between
  *
- * Error reduction (when error < 15 degrees):
- * - Reduces pulse count as we approach alignment
- * - Minimum 1 pulse
+ * Burn dV is a SECONDARY factor that can further reduce pulses for small burns.
  */
 function calculatePulseCount(burnDv: number, headingError: number): number {
-  // Base count from burn delta-v
-  let baseCount: number;
-  if (burnDv >= RCS_PULSE_DV_THRESHOLD) {
-    baseCount = RCS_PULSE_COUNT_MAX;
-  } else if (burnDv <= 1) {
-    baseCount = RCS_PULSE_COUNT_MIN;
+  // Primary: scale by heading error (45° -> 5 pulses, 15° -> 1 pulse)
+  let count: number;
+  if (headingError >= 45) {
+    count = RCS_PULSE_COUNT_MAX; // 5
+  } else if (headingError <= 15) {
+    count = RCS_PULSE_COUNT_MIN; // 1
   } else {
-    // Linear scale: 10 m/s -> 5, 1 m/s -> 1
-    const dvFactor = (burnDv - 1) / (RCS_PULSE_DV_THRESHOLD - 1);
-    baseCount = RCS_PULSE_COUNT_MIN + dvFactor * (RCS_PULSE_COUNT_MAX - RCS_PULSE_COUNT_MIN);
+    // Linear scale: 45° -> 5, 15° -> 1
+    const errorFactor = (headingError - 15) / (45 - 15);
+    count = RCS_PULSE_COUNT_MIN + errorFactor * (RCS_PULSE_COUNT_MAX - RCS_PULSE_COUNT_MIN);
   }
 
-  // Error-based reduction when < 15 degrees
-  if (headingError < 15) {
-    const errorFactor = Math.max(headingError / 15, 0.2); // Min 20% of base
-    baseCount *= errorFactor;
+  // Secondary: further reduce for small burns (< 10 m/s)
+  if (burnDv < RCS_PULSE_DV_THRESHOLD) {
+    const dvFactor = burnDv / RCS_PULSE_DV_THRESHOLD; // 0-1 range
+    count *= Math.max(dvFactor, 0.4); // At minimum, keep 40% of error-based count
   }
 
-  return Math.max(RCS_PULSE_COUNT_MIN, Math.round(baseCount));
+  return Math.max(RCS_PULSE_COUNT_MIN, Math.round(count));
 }
 
 // Configuration
@@ -177,15 +176,15 @@ const DEFAULT_POLL_INTERVAL_MS = 2500; // 2.5 seconds - must be fast enough to c
 const DV_THRESHOLD = 1; // m/s - consider burn complete below this
 
 // Alignment configuration
-const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
+const ALIGN_THRESHOLD = 5; // degrees - consider aligned below this
 
 // WARPALIGN stuck detection configuration
 const WARPALIGN_STUCK_THRESHOLD = 3; // Warn after 3 polls with no angle change (~6 seconds)
 
 // Fine tune phase configuration
 const FINE_TUNE_ENGINE_BURST_MS = 100;  // Short engine pulse duration
-const FINE_TUNE_RCS_BURST_MS = 50;      // RCS pulse duration
-const FINE_TUNE_MAX_ATTEMPTS = 3;       // Max attempts per direction
+const FINE_TUNE_RCS_BURST_MS = 200;     // RCS pulse duration (increased for effectiveness)
+const FINE_TUNE_MAX_ATTEMPTS = 15;      // Max attempts per direction (increased for far encounters)
 const FINE_TUNE_THRUST_LIMIT = 15;      // Engine thrust limit %
 
 /**
@@ -207,7 +206,7 @@ const FINE_TUNE_THRUST_LIMIT = 15;      // Engine thrust limit %
  */
 async function runAlignScript(
   conn: KosConnection,
-  targetError = 1,
+  targetError = 5,
   timeout = 60_000,
   burnDv?: number,
   logger?: McpLogger
@@ -220,8 +219,8 @@ async function runAlignScript(
 
   // Start alignment: LOCK STEERING only (no WHEN trigger)
   // RCS pulses are sent from TypeScript poll loop with calculated duration
-  // Uses LOOKDIRUP to maintain roll orientation
-  const alignCmd = 'SAS OFF. LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, SHIP:FACING:TOPVECTOR).';
+  // Freeze the up vector once so roll doesn't fight during alignment
+  const alignCmd = 'SAS OFF. SET frozenUp TO SHIP:UP:VECTOR. LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, frozenUp).';
   await conn.queue(alignCmd, 5000);
 
   // Poll until aligned or timeout
@@ -240,9 +239,8 @@ async function runAlignScript(
       errorAngle = angle;
 
       if (angle <= targetError) {
-        // Aligned - cleanup: restore warp
-        await conn.raw('SET WARP TO 0. SET RCS TO FALSE.', 2000);
-        await conn.queue('UNLOCK STEERING.', 3000);
+        // Aligned - cleanup: restore warp and unlock all controls
+        await conn.raw('SET WARP TO 0. SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
         return {
           success: true,
           method: 'KOS',
@@ -251,29 +249,32 @@ async function runAlignScript(
         };
       }
 
-      // Send RCS pulses with duration and count based on burn dV and heading error
-      // Shorter/fewer pulses for small burns and small errors = gentler assist
-      const pulseDuration = calculateRcsPulseDuration(burnDv ?? 100, angle);
-      const pulseCount = calculatePulseCount(burnDv ?? 100, angle);
+      // Skip RCS when error < 15° - let reaction wheels handle fine settling
+      // RCS is too powerful and causes oscillation around target
+      if (angle >= 15) {
+        // Send RCS pulses with duration and count based on burn dV and heading error
+        const pulseDuration = calculateRcsPulseDuration(burnDv ?? 100, angle);
+        const pulseCount = calculatePulseCount(burnDv ?? 100, angle);
 
-      // Build command for N pulses in one kOS execution (no round-trips between pulses)
-      let pulseCmd = '';
-      for (let i = 0; i < pulseCount; i++) {
-        pulseCmd += `SET RCS TO TRUE. WAIT ${pulseDuration.toFixed(3)}. SET RCS TO FALSE.`;
-        if (i < pulseCount - 1) {
-          pulseCmd += ` WAIT ${RCS_PULSE_OFF_TIME}. `;
+        // Build command for N pulses in one kOS execution (no round-trips between pulses)
+        let pulseCmd = '';
+        for (let i = 0; i < pulseCount; i++) {
+          pulseCmd += `SET RCS TO TRUE. WAIT ${pulseDuration.toFixed(3)}. SET RCS TO FALSE.`;
+          if (i < pulseCount - 1) {
+            pulseCmd += ` WAIT ${RCS_PULSE_OFF_TIME}. `;
+          }
         }
+        await conn.raw(pulseCmd, 5000);
       }
-      await conn.raw(pulseCmd, 5000);
+      // else: reaction wheels only via LOCK STEERING
     }
 
     // Wait before next poll
     await new Promise((resolve) => setTimeout(resolve, 2500));
   }
 
-  // Timeout - cleanup
-  await conn.raw('SET WARP TO 0. SET RCS TO FALSE.', 2000);
-  await conn.queue('UNLOCK STEERING.', 3000);
+  // Timeout - cleanup: restore warp and unlock all controls
+  await conn.raw('SET WARP TO 0. SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
   console.error(`[execute-node] Alignment timeout, final error: ${errorAngle}°`);
   return {
     success: false,
@@ -312,7 +313,7 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   log.progress(`${logPrefix} Aligning to burn vector (${fmtNum(initialAngle)}°)...`);
 
   // Run alignment script with RCS limiting for small burns
-  const result = await runAlignScript(conn, 1, 60_000, burnDv, log);
+  const result = await runAlignScript(conn, ALIGN_THRESHOLD, 60_000, burnDv, log);
 
   if (result.success) {
     log.progress(`${logPrefix} Aligned via ${result.method} (${fmtNum(result.errorAngle)}°)`);
@@ -617,6 +618,9 @@ export async function executeNode(
     }
   }
 
+  // Ensure RCS is off after alignment (MechJeb will control it during burn)
+  await conn.raw('RCS OFF.', 2000);
+
   // Lock roll to prevent MechJeb from inducing roll during burn
   // Uses current top vector to maintain current roll orientation
   await conn.raw('LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, SHIP:FACING:TOPVECTOR).', 3000);
@@ -886,8 +890,8 @@ export async function executeNode(
         // Log completion
         log.progress(`${logPrefix} Burn complete`);
 
-        // Unlock steering BEFORE removing node (steering references NEXTNODE:BURNVECTOR)
-        try { await conn.raw('UNLOCK STEERING.', 2000); } catch { /* ignore */ }
+        // Unlock steering and turn off RCS BEFORE removing node (steering references NEXTNODE:BURNVECTOR)
+        try { await conn.raw('UNLOCK STEERING. UNLOCK THROTTLE. RCS OFF.', 2000); } catch { /* ignore */ }
 
         // Log burn error (residual dV) and clear node
         if (state.dvRemaining > 0.1) {
@@ -905,20 +909,26 @@ export async function executeNode(
           try {
             log.progress(`${logPrefix} Fine tune phase...`);
 
-            // Step 1: Align prograde with RCS pulse assist
-            await runAlignScript(conn);
+            // Step 1: Align prograde using SAS (no maneuver node after burn)
+            await conn.raw('SAS ON. WAIT 0.3. SET SASMODE TO "PROGRADE". RCS ON.', 5000);
+            await delay(2000); // Wait for alignment
 
             // Step 2: Set engine thrust to low limit for precision
             await conn.raw(`FOR eng IN SHIP:ENGINES { SET eng:THRUSTLIMIT TO ${FINE_TUNE_THRUST_LIMIT}. }`, 3000);
 
             // Step 3: Query initial error
+            // For transfer orbits: positive = periapsis too high, negative = too low
+            // Orbital mechanics for transfers:
+            //   - Prograde → arrive faster → LOWER periapsis (deeper approach)
+            //   - Retrograde → arrive slower → HIGHER periapsis (shallower approach)
             let fineTuneResult = await fineTuneFunction(conn);
             let engineAttempts = 0;
 
-            // Step 4: Prograde engine bursts for undershoot (result < 0)
-            while (fineTuneResult < 0 && engineAttempts < FINE_TUNE_MAX_ATTEMPTS) {
+            // Step 4: Prograde engine bursts for FAR ENCOUNTER (result > 0, periapsis too high)
+            // Speed up to arrive faster and penetrate deeper into target's gravity well
+            while (fineTuneResult > 0 && engineAttempts < FINE_TUNE_MAX_ATTEMPTS) {
               engineAttempts++;
-              log.progress(`${logPrefix} Engine burst ${engineAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km)`);
+              log.progress(`${logPrefix} Engine burst ${engineAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: +${Math.round(fineTuneResult / 1000)}km)`);
 
               // Brief engine burn while aligned prograde
               await conn.raw(`LOCK THROTTLE TO 1. WAIT ${FINE_TUNE_ENGINE_BURST_MS / 1000}. LOCK THROTTLE TO 0.`, 3000);
@@ -927,27 +937,22 @@ export async function executeNode(
               fineTuneResult = await fineTuneFunction(conn);
             }
 
-            // Step 5: Retrograde RCS bursts for overshoot (result > 0)
-            if (fineTuneResult > 0) {
-              // Align retrograde for RCS correction
-              await conn.raw('SAS ON. WAIT 0.3. SET SASMODE TO "RETROGRADE". RCS ON.', 5000);
-              await delay(1500);
+            // Step 5: Retrograde RCS bursts for IMPACT/LOW PERIAPSIS (result < 0, periapsis too low)
+            // Slow down to arrive slower and have shallower approach
+            let rcsAttempts = 0;
+            while (fineTuneResult < 0 && rcsAttempts < FINE_TUNE_MAX_ATTEMPTS) {
+              rcsAttempts++;
+              log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km)`);
 
-              let rcsAttempts = 0;
-              while (fineTuneResult > 0 && rcsAttempts < FINE_TUNE_MAX_ATTEMPTS) {
-                rcsAttempts++;
-                log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: +${Math.round(fineTuneResult / 1000)}km)`);
+              // RCS burst retrograde (negative FORE = backward thrust while prograde-aligned)
+              await conn.raw(`SET SHIP:CONTROL:FORE TO -1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
+              await delay(300);
 
-                // RCS burst (positive FORE when retrograde = effective retrograde thrust)
-                await conn.raw(`SET SHIP:CONTROL:FORE TO 1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
-                await delay(300);
-
-                fineTuneResult = await fineTuneFunction(conn);
-              }
-
-              // Cleanup RCS controls
-              await conn.raw('SET SHIP:CONTROL:FORE TO 0. RCS OFF.', 2000);
+              fineTuneResult = await fineTuneFunction(conn);
             }
+
+            // Cleanup RCS controls
+            await conn.raw('SET SHIP:CONTROL:FORE TO 0. RCS OFF.', 2000);
 
             const finalErrorKm = Math.round(fineTuneResult / 1000);
             log.progress(`${logPrefix} Fine tune complete (error: ${finalErrorKm >= 0 ? '+' : ''}${finalErrorKm}km)`);
