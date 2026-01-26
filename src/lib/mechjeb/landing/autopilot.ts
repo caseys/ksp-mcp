@@ -119,6 +119,7 @@ interface VesselScanResult {
   landingLegStage: number | null;  // Lowest stage with legs
   hasBrakeTag: boolean;            // For airless 3-stage: 'brake' tagged decoupler exists
   hasLanderTag: boolean;           // For airless 3-stage: 'lander' tagged decoupler exists
+  hasLander2Tag: boolean;          // For airless 2-stage: 'lander2' tagged decoupler (post-deorbit timing)
   jettisonStage: number | null;    // Fallback: stage-based separation (above landing legs)
   reentryStage: number | null;     // For atmospheric: reentry separation stage
   error?: string;
@@ -180,6 +181,7 @@ async function scanVesselForLanding(
     LOCAL hasLegs IS FALSE.
     LOCAL hasBrakeTag IS FALSE.
     LOCAL hasLanderTag IS FALSE.
+    LOCAL hasLander2Tag IS FALSE.
     LOCAL taggedReentry IS -1.
     LOCAL coreLegsSep IS -1.
     LOCAL coreLegsDepth IS 9999.
@@ -200,6 +202,9 @@ async function scanVesselForLanding(
         IF p:TAG = "lander" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
           SET hasLanderTag TO TRUE.
         }
+        IF p:TAG = "lander2" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
+          SET hasLander2Tag TO TRUE.
+        }
         IF p:TAG = "reentry" AND IS_SEPARATOR(p) {
           IF taggedReentry < 0 { SET taggedReentry TO p:STAGE. }
         }
@@ -219,7 +224,7 @@ async function scanVesselForLanding(
           }
         }
       }
-      PRINT "SCAN|" + hasBrakeTag + "|" + hasLanderTag + "|" + taggedReentry + "|" + coreLegsSep + "|" + coreShieldSep.
+      PRINT "SCAN|" + hasBrakeTag + "|" + hasLanderTag + "|" + hasLander2Tag + "|" + taggedReentry + "|" + coreLegsSep + "|" + coreShieldSep.
     }
   `.trim().replaceAll('\n', ' ');
 
@@ -228,17 +233,18 @@ async function scanVesselForLanding(
 
   // No landing legs
   if (rawOutput.endsWith('NOLEGS')) {
-    return { hasLandingLegs: false, landingLegStage: null, hasBrakeTag: false, hasLanderTag: false, jettisonStage: null, reentryStage: null };
+    return { hasLandingLegs: false, landingLegStage: null, hasBrakeTag: false, hasLanderTag: false, hasLander2Tag: false, jettisonStage: null, reentryStage: null };
   }
 
-  // Parse SCAN result: hasBrakeTag|hasLanderTag|taggedReentry|aboveLegsSep|aboveShieldSep
-  const scanMatch = rawOutput.match(/SCAN\|(True|False)\|(True|False)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/i);
+  // Parse SCAN result: hasBrakeTag|hasLanderTag|hasLander2Tag|taggedReentry|aboveLegsSep|aboveShieldSep
+  const scanMatch = rawOutput.match(/SCAN\|(True|False)\|(True|False)\|(True|False)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/i);
   if (scanMatch) {
     const hasBrakeTag = scanMatch[1].toLowerCase() === 'true';
     const hasLanderTag = scanMatch[2].toLowerCase() === 'true';
-    const taggedReentry = parseInt(scanMatch[3]);
-    const aboveLegsSep = parseInt(scanMatch[4]);
-    const aboveShieldSep = parseInt(scanMatch[5]);
+    const hasLander2Tag = scanMatch[3].toLowerCase() === 'true';
+    const taggedReentry = parseInt(scanMatch[4]);
+    const aboveLegsSep = parseInt(scanMatch[5]);
+    const aboveShieldSep = parseInt(scanMatch[6]);
 
     // Determine jettison stage (fallback for non-tagged designs)
     // Used when no 'brake' tag - separates by stage before braking burn
@@ -257,7 +263,7 @@ async function scanVesselForLanding(
       reentryStage = aboveShieldSep;
     }
 
-    return { hasLandingLegs: true, landingLegStage: null, hasBrakeTag, hasLanderTag, jettisonStage, reentryStage };
+    return { hasLandingLegs: true, landingLegStage: null, hasBrakeTag, hasLanderTag, hasLander2Tag, jettisonStage, reentryStage };
   }
 
   return {
@@ -265,6 +271,7 @@ async function scanVesselForLanding(
     landingLegStage: null,
     hasBrakeTag: false,
     hasLanderTag: false,
+    hasLander2Tag: false,
     jettisonStage: null,
     reentryStage: null,
     error: `Failed to parse vessel scan: ${rawOutput.slice(-50)}`,
@@ -1246,6 +1253,10 @@ export const landTool: ToolDefinition = {
         primaryTag = 'brake';
         secondaryTag = 'lander';
         logger.progress(`[Landing] 3-stage design detected: brake→lander separation (tag-based)`);
+      } else if (vesselScan.hasLander2Tag) {
+        // Airless 2-stage with post-deorbit timing: no brake, just lander2 after deorbit burn
+        secondaryTag = 'lander2';
+        logger.progress(`[Landing] 2-stage design detected: lander2 separation after deorbit burn`);
       } else {
         // Airless 2-stage: stage-based single separation
         separationStage = vesselScan.jettisonStage;
@@ -1437,7 +1448,7 @@ export const landTool: ToolDefinition = {
           SET _wasDeorbit TO FALSE.
           WHEN TRUE THEN {
             LOCAL stat IS ADDONS:MJ:LANDING:STATUS.
-            IF stat:CONTAINS("deorbit burn") {
+            IF (stat:CONTAINS("Doing") OR stat:CONTAINS("Executing")) AND stat:CONTAINS("deorbit") {
               SET _wasDeorbit TO TRUE.
             } ELSE IF _wasDeorbit {
               SET WARP TO 0. WAIT 0.5.
@@ -1451,6 +1462,11 @@ export const landTool: ToolDefinition = {
                 } ELSE IF p:HASMODULE("ModuleAnchoredDecoupler") {
                   LOCAL m IS p:GETMODULE("ModuleAnchoredDecoupler").
                   IF m:HASEVENT("Decouple") { m:DOEVENT("Decouple"). SET _firedLander TO _firedLander + 1. }
+                } ELSE IF p:HASMODULE("ModuleDockingNode") {
+                  LOCAL m IS p:GETMODULE("ModuleDockingNode").
+                  IF m:HASEVENT("Undock") { m:DOEVENT("Undock"). SET _firedLander TO _firedLander + 1. }
+                  ELSE IF m:HASEVENT("UndockSameVessel") { m:DOEVENT("UndockSameVessel"). SET _firedLander TO _firedLander + 1. }
+                  ELSE IF m:HASEVENT("Decouple") { m:DOEVENT("Decouple"). SET _firedLander TO _firedLander + 1. }
                 }
                 WAIT 0.
               }
@@ -1458,6 +1474,8 @@ export const landTool: ToolDefinition = {
               WAIT 5.
               SET SHIP:CONTROL:FORE TO 0.
               RCS OFF.
+              WAIT 3.
+              SET WARP TO 1.
               RETURN FALSE.
             }
             PRESERVE.
