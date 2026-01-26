@@ -54,6 +54,37 @@ const RCS_PULSE_COUNT_MAX = 10; // max pulses per poll (large burns, large error
 const RCS_PULSE_COUNT_MIN = 1; // min pulses per poll (small burns, small error)
 const RCS_PULSE_OFF_TIME = 0.3; // seconds - pause between pulses
 
+// ============================================================================
+// Alignment Target Types
+// ============================================================================
+
+/** Target direction for alignment */
+export type AlignmentTarget = 'maneuver' | 'prograde' | 'retrograde';
+
+/**
+ * Get kOS expressions for alignment target.
+ * Returns the vector expression for LOCK STEERING and angle check expression.
+ */
+function getAlignmentExpressions(target: AlignmentTarget): { vector: string; angleCheck: string } {
+  switch (target) {
+    case 'maneuver':
+      return {
+        vector: 'NEXTNODE:BURNVECTOR',
+        angleCheck: 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)',
+      };
+    case 'prograde':
+      return {
+        vector: 'SHIP:VELOCITY:ORBIT:NORMALIZED',
+        angleCheck: 'VANG(SHIP:FACING:FOREVECTOR, SHIP:VELOCITY:ORBIT:NORMALIZED)',
+      };
+    case 'retrograde':
+      return {
+        vector: '-SHIP:VELOCITY:ORBIT:NORMALIZED',
+        angleCheck: 'VANG(SHIP:FACING:FOREVECTOR, -SHIP:VELOCITY:ORBIT:NORMALIZED)',
+      };
+  }
+}
+
 /**
  * Limit engine thrust for small burns.
  * Prevents overshooting by reducing thrust output.
@@ -188,24 +219,24 @@ const FINE_TUNE_MAX_ATTEMPTS = 15;      // Max attempts per direction (increased
 const FINE_TUNE_THRUST_LIMIT = 15;      // Engine thrust limit %
 
 /**
- * Align ship to maneuver node burn vector using LOCK STEERING with RCS pulse assist.
- *
- * Uses interpreter-defined WHEN trigger for RCS pulsing. Triggers defined in scripts
- * get garbage collected when program ends, but interpreter-defined triggers persist.
+ * Align ship to a target direction using LOCK STEERING with RCS pulse assist.
  *
  * Features:
  * - 2x physics warp to speed up rotation
- * - Dynamic RCS thrust limiting for small burns (scales with dV and heading error)
+ * - Adaptive RCS pulse duration and count (scales with dV and heading error)
+ * - Supports maneuver node, prograde, or retrograde alignment
  *
  * @param conn - kOS connection
- * @param targetError - Target alignment error in degrees (default 1.0)
+ * @param target - Alignment target: 'maneuver', 'prograde', or 'retrograde'
+ * @param targetError - Target alignment error in degrees (default 5)
  * @param timeout - Timeout in milliseconds (default 60000)
- * @param burnDv - Burn delta-v in m/s (for RCS limiting, optional)
+ * @param burnDv - Burn delta-v in m/s (for RCS scaling, optional)
  * @param logger - Logger for progress messages (optional)
  * @returns Alignment result with final error angle
  */
 async function runAlignScript(
   conn: KosConnection,
+  target: AlignmentTarget = 'maneuver',
   targetError = 5,
   timeout = 60_000,
   burnDv?: number,
@@ -214,13 +245,28 @@ async function runAlignScript(
   const startTime = Date.now();
   const _log = logger ?? nullLogger; // Reserved for future progress logging
 
-  // Enable 2x physics warp to speed up rotation
+  // Get kOS expressions for the target direction
+  const { vector, angleCheck } = getAlignmentExpressions(target);
+
+  // Check if already aligned - skip alignment entirely if within target error
+  const initialCheck = await conn.queue(`PRINT ROUND(${angleCheck}, 2).`, 3000);
+  const initialAngle = parseFloat(initialCheck.output.trim());
+  if (!isNaN(initialAngle) && initialAngle <= targetError) {
+    return {
+      success: true,
+      method: 'KOS',
+      errorAngle: initialAngle,
+      output: `Already aligned (${initialAngle}°)`,
+    };
+  }
+
+  // Enable 2x physics warp to speed up rotation (will drop to 1x when error < 30°)
   await conn.raw('SET KUNIVERSE:TIMEWARP:MODE TO "PHYSICS". SET WARP TO 1.', 3000);
 
   // Start alignment: LOCK STEERING only (no WHEN trigger)
   // RCS pulses are sent from TypeScript poll loop with calculated duration
   // Freeze the up vector once so roll doesn't fight during alignment
-  const alignCmd = 'SAS OFF. SET frozenUp TO SHIP:UP:VECTOR. LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, frozenUp).';
+  const alignCmd = `SAS OFF. SET frozenUp TO SHIP:UP:VECTOR. LOCK STEERING TO LOOKDIRUP(${vector}, frozenUp).`;
   await conn.queue(alignCmd, 5000);
 
   // Poll until aligned or timeout
@@ -229,7 +275,7 @@ async function runAlignScript(
 
   while (Date.now() - startTime < timeout) {
     const result = await conn.queue(
-      'PRINT ROUND(VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR), 2).',
+      `PRINT ROUND(${angleCheck}, 2).`,
       3000
     );
     lastOutput = result.output;
@@ -247,6 +293,11 @@ async function runAlignScript(
           errorAngle,
           output: `Aligned to ${errorAngle}°`,
         };
+      }
+
+      // Drop physics warp when close to aligned for more precise control
+      if (angle < 30) {
+        await conn.raw('SET WARP TO 0.', 2000);
       }
 
       // Skip RCS when error < 15° - let reaction wheels handle fine settling
@@ -298,22 +349,26 @@ async function runAlignScript(
  * @param rcsMode RCS mode for alignment (currently unused, kept for API compat)
  * @param burnDv Burn delta-v in m/s (smaller burns get shorter RCS pulses)
  */
-async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]', _rcsMode = 1, burnDv?: number): Promise<boolean> {
+async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]', _rcsMode = 1, burnDv?: number, target: AlignmentTarget = 'maneuver'): Promise<boolean> {
   const log = logger ?? nullLogger;
 
-  // Verify node exists before trying to align
-  const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
-  if (!nodeCheck.success || !nodeCheck.output.includes('True')) {
-    log.error(`${logPrefix} No maneuver node exists!`);
-    return false;
+  // Verify node exists before trying to align (only for maneuver target)
+  if (target === 'maneuver') {
+    const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
+    if (!nodeCheck.success || !nodeCheck.output.includes('True')) {
+      log.error(`${logPrefix} No maneuver node exists!`);
+      return false;
+    }
   }
 
   // Check initial angle
-  const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
-  log.progress(`${logPrefix} Aligning to burn vector (${fmtNum(initialAngle)}°)...`);
+  const { angleCheck } = getAlignmentExpressions(target);
+  const initialAngle = await queryNumber(conn, angleCheck);
+  const targetName = target === 'maneuver' ? 'burn vector' : target;
+  log.progress(`${logPrefix} Aligning to ${targetName} (${fmtNum(initialAngle)}°)...`);
 
-  // Run alignment script with RCS limiting for small burns
-  const result = await runAlignScript(conn, ALIGN_THRESHOLD, 60_000, burnDv, log);
+  // Run alignment script with RCS pulsing
+  const result = await runAlignScript(conn, target, ALIGN_THRESHOLD, 60_000, burnDv, log);
 
   if (result.success) {
     log.progress(`${logPrefix} Aligned via ${result.method} (${fmtNum(result.errorAngle)}°)`);
@@ -909,9 +964,15 @@ export async function executeNode(
           try {
             log.progress(`${logPrefix} Fine tune phase...`);
 
-            // Step 1: Align prograde using SAS (no maneuver node after burn)
-            await conn.raw('SAS ON. WAIT 0.3. SET SASMODE TO "PROGRADE". RCS ON.', 5000);
-            await delay(2000); // Wait for alignment
+            // Step 1: Align prograde using same RCS pulse logic as pre-burn alignment
+            log.progress(`${logPrefix} Aligning prograde for fine-tune...`);
+            const alignResult = await runAlignScript(conn, 'prograde', ALIGN_THRESHOLD, 30_000, dvRequired, log);
+            if (!alignResult.success) {
+              log.warn(`${logPrefix} Prograde alignment incomplete: ${alignResult.errorAngle}°`);
+            }
+
+            // Enable SAS prograde to maintain heading during fine-tune burns
+            await conn.raw('SAS ON. WAIT 0.1. SET SASMODE TO "PROGRADE". RCS OFF.', 3000);
 
             // Step 2: Set engine thrust to low limit for precision
             await conn.raw(`FOR eng IN SHIP:ENGINES { SET eng:THRUSTLIMIT TO ${FINE_TUNE_THRUST_LIMIT}. }`, 3000);
@@ -944,8 +1005,9 @@ export async function executeNode(
               rcsAttempts++;
               log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km)`);
 
-              // RCS burst retrograde (negative FORE = backward thrust while prograde-aligned)
-              await conn.raw(`SET SHIP:CONTROL:FORE TO -1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
+              // RCS burst retrograde - ensure RCS is on, then fire backward
+              // Use SHIP:CONTROL:FORE with value well above deadband (0.05)
+              await conn.raw(`RCS ON. SET SHIP:CONTROL:FORE TO -1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
               await delay(300);
 
               fineTuneResult = await fineTuneFunction(conn);
