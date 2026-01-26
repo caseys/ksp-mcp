@@ -233,8 +233,8 @@ async function queryActualPeriapsis(conn: KosConnection, retries = 3): Promise<{
       return { hasEncounter: false, periapsis: 0 };
     }
 
-    // Parse distance with units (e.g., "214.1 km", "50000 m", etc.)
-    const match = result.output.match(/ENC\|([0-9.]+)\s*(m|km|Mm|Gm)?/i);
+    // Parse distance with units (e.g., "214.1 km", "50000 m", "-9 km" for below surface)
+    const match = result.output.match(/ENC\|(-?[0-9.]+)\s*(m|km|Mm|Gm)?/i);
     if (!match) {
       // Couldn't parse - retry
       continue;
@@ -259,7 +259,9 @@ async function queryActualPeriapsis(conn: KosConnection, retries = 3): Promise<{
     }
     }
 
-    if (value > 0) {
+    // Return if we got a valid number (negative is OK - it means impact trajectory)
+    // An impact trajectory is still a valid encounter, just below surface
+    if (!Number.isNaN(value)) {
       return { hasEncounter: true, periapsis: value };
     }
   }
@@ -1007,11 +1009,17 @@ export const courseCorrectTool: ToolDefinition = {
 
         totalBurns++;
 
-        // Check actual post-burn periapsis
-        const postBurn = await queryActualPeriapsis(conn);
+        // Check actual post-burn periapsis - try MechJeb first, fall back to kOS native
+        let postBurn = await queryActualPeriapsis(conn);
         if (!postBurn.hasEncounter) {
-          const diag = await getDiagnostics(conn);
-          return ctx.errorResponse('course_correct', `Lost encounter after burn${diag}`);
+          // Fallback: use kOS native orbit checking
+          const nativePe = await queryCurrentEncounterPeriapsis(conn);
+          if (nativePe.hasPeriapsis) {
+            postBurn = { hasEncounter: true, periapsis: nativePe.periapsis };
+          } else {
+            const diag = await getDiagnostics(conn);
+            return ctx.errorResponse('course_correct', `Lost encounter after burn${diag}`);
+          }
         }
 
         actualPe = postBurn.periapsis;
@@ -1044,10 +1052,17 @@ export const courseCorrectTool: ToolDefinition = {
           inputPe = Math.max(targetDistance * 0.01, Math.min(targetDistance * 100, inputPe));
           logger?.info(`[CourseCorrect] Secant: slope=${slope.toFixed(4)}, next input=${(inputPe / 1000).toFixed(1)}km`);
         } else {
-          // First iteration: use ratio adjustment
-          const ratio = targetDistance / actualPe;
-          inputPe = inputPe * ratio;
-          logger?.info(`[CourseCorrect] Ratio: ${ratio.toFixed(3)}, next input=${(inputPe / 1000).toFixed(1)}km`);
+          // First iteration: calculate adjustment needed
+          // If actualPe is negative (impact), we need to raise significantly
+          if (actualPe <= 0) {
+            // Impact trajectory - request higher to compensate
+            inputPe = targetDistance * 2;
+            logger?.info(`[CourseCorrect] Impact trajectory (${(actualPe / 1000).toFixed(1)}km), requesting ${(inputPe / 1000).toFixed(1)}km`);
+          } else {
+            const ratio = targetDistance / actualPe;
+            inputPe = inputPe * ratio;
+            logger?.info(`[CourseCorrect] Ratio: ${ratio.toFixed(3)}, next input=${(inputPe / 1000).toFixed(1)}km`);
+          }
         }
       }
 
