@@ -117,7 +117,9 @@ async function getValidLandingTarget(conn: KosConnection): Promise<{
 interface VesselScanResult {
   hasLandingLegs: boolean;
   landingLegStage: number | null;  // Lowest stage with legs
-  jettisonStage: number | null;    // For airless: lander separation stage
+  hasBrakeTag: boolean;            // For airless 3-stage: 'brake' tagged decoupler exists
+  hasLanderTag: boolean;           // For airless 3-stage: 'lander' tagged decoupler exists
+  jettisonStage: number | null;    // Fallback: stage-based separation (above landing legs)
   reentryStage: number | null;     // For atmospheric: reentry separation stage
   error?: string;
 }
@@ -126,11 +128,12 @@ interface VesselScanResult {
  * Scan vessel structure for landing legs and decouplers.
  *
  * For AIRLESS bodies (hasAtmosphere=false):
- * - First looks for part tagged 'lander' (decoupler/separator/docking port)
- * - Falls back to separator above landing legs (walking up part tree)
+ * - 'brake' tag: separates before braking burn (drop transfer stage)
+ * - 'lander' tag: separates after braking (drop brake stage before final descent)
+ * - Falls back to separator above landing legs if no tags found
  *
  * For ATMOSPHERIC bodies (hasAtmosphere=true):
- * - First looks for part tagged 'reentry' (decoupler/separator)
+ * - 'reentry' tag: separates before atmospheric entry
  * - Falls back to separator above heat shield (walking up part tree)
  */
 async function scanVesselForLanding(
@@ -175,7 +178,8 @@ async function scanVesselForLanding(
       RETURN FALSE.
     }
     LOCAL hasLegs IS FALSE.
-    LOCAL taggedLander IS -1.
+    LOCAL hasBrakeTag IS FALSE.
+    LOCAL hasLanderTag IS FALSE.
     LOCAL taggedReentry IS -1.
     LOCAL coreLegsSep IS -1.
     LOCAL coreLegsDepth IS 9999.
@@ -190,8 +194,11 @@ async function scanVesselForLanding(
     IF NOT hasLegs { PRINT "NOLEGS". }
     ELSE {
       FOR p IN SHIP:PARTS {
+        IF (p:TAG = "brake" OR p:TAG = "break") AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
+          SET hasBrakeTag TO TRUE.
+        }
         IF p:TAG = "lander" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
-          IF taggedLander < 0 { SET taggedLander TO p:STAGE. }
+          SET hasLanderTag TO TRUE.
         }
         IF p:TAG = "reentry" AND IS_SEPARATOR(p) {
           IF taggedReentry < 0 { SET taggedReentry TO p:STAGE. }
@@ -212,7 +219,7 @@ async function scanVesselForLanding(
           }
         }
       }
-      PRINT "SCAN|" + taggedLander + "|" + taggedReentry + "|" + coreLegsSep + "|" + coreShieldSep.
+      PRINT "SCAN|" + hasBrakeTag + "|" + hasLanderTag + "|" + taggedReentry + "|" + coreLegsSep + "|" + coreShieldSep.
     }
   `.trim().replaceAll('\n', ' ');
 
@@ -221,23 +228,22 @@ async function scanVesselForLanding(
 
   // No landing legs
   if (rawOutput.endsWith('NOLEGS')) {
-    return { hasLandingLegs: false, landingLegStage: null, jettisonStage: null, reentryStage: null };
+    return { hasLandingLegs: false, landingLegStage: null, hasBrakeTag: false, hasLanderTag: false, jettisonStage: null, reentryStage: null };
   }
 
-  // Parse SCAN result: taggedLander|taggedReentry|aboveLegsSep|aboveShieldSep
-  const scanMatch = rawOutput.match(/SCAN\|([-\d]+)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/);
+  // Parse SCAN result: hasBrakeTag|hasLanderTag|taggedReentry|aboveLegsSep|aboveShieldSep
+  const scanMatch = rawOutput.match(/SCAN\|(True|False)\|(True|False)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/i);
   if (scanMatch) {
-    const taggedLander = parseInt(scanMatch[1]);
-    const taggedReentry = parseInt(scanMatch[2]);
-    const aboveLegsSep = parseInt(scanMatch[3]);
-    const aboveShieldSep = parseInt(scanMatch[4]);
+    const hasBrakeTag = scanMatch[1].toLowerCase() === 'true';
+    const hasLanderTag = scanMatch[2].toLowerCase() === 'true';
+    const taggedReentry = parseInt(scanMatch[3]);
+    const aboveLegsSep = parseInt(scanMatch[4]);
+    const aboveShieldSep = parseInt(scanMatch[5]);
 
-    // Determine jettison stage (for airless bodies)
-    // Priority: 'lander' tagged decoupler, then separator above landing legs
+    // Determine jettison stage (fallback for non-tagged designs)
+    // Used when no 'brake' tag - separates by stage before braking burn
     let jettisonStage: number | null = null;
-    if (taggedLander >= 0) {
-      jettisonStage = taggedLander;
-    } else if (aboveLegsSep >= 0) {
+    if (aboveLegsSep >= 0) {
       jettisonStage = aboveLegsSep;
     }
 
@@ -251,12 +257,14 @@ async function scanVesselForLanding(
       reentryStage = aboveShieldSep;
     }
 
-    return { hasLandingLegs: true, landingLegStage: null, jettisonStage, reentryStage };
+    return { hasLandingLegs: true, landingLegStage: null, hasBrakeTag, hasLanderTag, jettisonStage, reentryStage };
   }
 
   return {
     hasLandingLegs: false,
     landingLegStage: null,
+    hasBrakeTag: false,
+    hasLanderTag: false,
     jettisonStage: null,
     reentryStage: null,
     error: `Failed to parse vessel scan: ${rawOutput.slice(-50)}`,
@@ -264,14 +272,96 @@ async function scanVesselForLanding(
 }
 
 /**
- * Stage down to reach the target decoupler, then fire it exactly once.
- * If current stage > target: stage down to reach it, then fire
- * If current stage = target: fire it
- * If current stage < target: already past it, do nothing
+ * Activate a specific decoupler/separator by its tag name.
+ * This activates ONLY the tagged part(s), not the entire stage.
+ * Used for 3-stage designs where we need precise control.
+ *
+ * Supports: stack decouplers, radial decouplers, docking ports, fairings
+ *
+ * @param thenStage - If true, fire STAGE once after decoupling to activate
+ *                    engines/parts in the next stage without firing everything
+ */
+async function activateDecouplerByTag(
+  conn: KosConnection,
+  tag: string,
+  logger?: McpLogger,
+  thenStage: boolean = false
+): Promise<{ success: boolean; error?: string }> {
+  const log = logger ?? nullLogger;
+
+  // Use PARTSTAGGED for efficient lookup, handle all separator types
+  // Check HASEVENT before calling to handle different module states
+  const stageLogic = thenStage ? `
+    IF firedCount > 0 AND STAGE:NUMBER = startStg {
+      STAGE. WAIT 0.5.
+    }
+  ` : '';
+  const script = `
+    SET WARP TO 0.
+    RCS ON.
+    SET startStg TO STAGE:NUMBER.
+    SET firedCount TO 0.
+    FOR p IN SHIP:PARTSTAGGED("${tag}") {
+      IF p:HASMODULE("ModuleDecouple") {
+        LOCAL m IS p:GETMODULE("ModuleDecouple").
+        IF m:HASEVENT("Decouple") { m:DOEVENT("Decouple"). SET firedCount TO firedCount + 1. }
+      }
+      ELSE IF p:HASMODULE("ModuleAnchoredDecoupler") {
+        LOCAL m IS p:GETMODULE("ModuleAnchoredDecoupler").
+        IF m:HASEVENT("Decouple") { m:DOEVENT("Decouple"). SET firedCount TO firedCount + 1. }
+      }
+      ELSE IF p:HASMODULE("ModuleDockingNode") {
+        LOCAL m IS p:GETMODULE("ModuleDockingNode").
+        IF m:HASEVENT("Undock") { m:DOEVENT("Undock"). SET firedCount TO firedCount + 1. }
+        ELSE IF m:HASEVENT("UndockSameVessel") { m:DOEVENT("UndockSameVessel"). SET firedCount TO firedCount + 1. }
+        ELSE IF m:HASEVENT("Decouple") { m:DOEVENT("Decouple"). SET firedCount TO firedCount + 1. }
+      }
+      ELSE IF p:HASMODULE("ModuleProceduralFairing") {
+        LOCAL m IS p:GETMODULE("ModuleProceduralFairing").
+        IF m:HASEVENT("Deploy") { m:DOEVENT("Deploy"). SET firedCount TO firedCount + 1. }
+      }
+      WAIT 0.
+    }
+    WAIT 0.5.
+    ${stageLogic}
+    SET finalStg TO STAGE:NUMBER.
+    PRINT "SEP|${tag}|" + firedCount + "|" + startStg + "|" + finalStg.
+  `.trim().replaceAll('\n', ' ');
+
+  const result = await conn.queue(script, 30_000);
+  const output = result.output.trim();
+
+  // Parse: SEP|tagname|firedCount|startStage|finalStage
+  const match = output.match(/SEP\|[^|]+\|(\d+)\|(\d+)\|(\d+)/i);
+  if (match) {
+    const firedCount = parseInt(match[1]);
+    const startStage = parseInt(match[2]);
+    const finalStage = parseInt(match[3]);
+
+    if (firedCount > 0) {
+      const stageInfo = thenStage ? ` (stages: ${startStage}→${finalStage})` : '';
+      log.info(`[Jettison] Activated ${firedCount} '${tag}' part(s)${stageInfo}`);
+      return { success: true };
+    } else {
+      log.warn(`[Jettison] No '${tag}' parts found or none had active decouple events`);
+      return { success: false, error: `No '${tag}' parts to separate (already decoupled?)` };
+    }
+  }
+
+  log.warn(`[Jettison] Failed to parse output: ${output.slice(-100)}`);
+  return { success: false, error: 'Failed to parse separation result' };
+}
+
+/**
+ * Fire exactly ONE stage.
+ * Does NOT stage down to a target - just fires the current stage once.
+ *
+ * NOTE: This fires the ENTIRE current stage. For precise control of individual
+ * decouplers, use activateDecouplerByTag() instead.
  */
 async function jettisonStage(
   conn: KosConnection,
-  targetStage: number,
+  _targetStage: number,  // Ignored - we just fire current stage once
   logger?: McpLogger
 ): Promise<{ success: boolean; error?: string }> {
   const log = logger ?? nullLogger;
@@ -280,32 +370,18 @@ async function jettisonStage(
     SET WARP TO 0.
     RCS ON.
     SET startStage TO STAGE:NUMBER.
-    SET fired TO FALSE.
-    IF STAGE:NUMBER > ${targetStage} {
-      UNTIL STAGE:NUMBER <= ${targetStage} {
-        STAGE. WAIT 0.5.
-      }
-    }
-    IF STAGE:NUMBER = ${targetStage} {
-      STAGE. WAIT 0.5.
-      SET fired TO TRUE.
-    }
-    PRINT "STAGED|" + startStage + "|" + STAGE:NUMBER + "|" + fired.
+    STAGE. WAIT 0.5.
+    PRINT "STAGED|" + startStage + "|" + STAGE:NUMBER.
   `.trim().replaceAll('\n', ' ');
 
   const result = await conn.queue(script, 30_000);
   const output = result.output.trim();
 
-  const match = output.match(/STAGED\|(\d+)\|(\d+)\|(True|False)/i);
+  const match = output.match(/STAGED\|(\d+)\|(\d+)/i);
   if (match) {
     const startStage = parseInt(match[1]);
     const endStage = parseInt(match[2]);
-    const fired = match[3].toLowerCase() === 'true';
-    if (fired) {
-      log.info(`[Jettison] Fired stage ${targetStage} (was at ${startStage}, now at ${endStage})`);
-    } else {
-      log.info(`[Jettison] Already past stage ${targetStage} (current: ${endStage})`);
-    }
+    log.info(`[Jettison] Fired stage (was ${startStage}, now ${endStage})`);
     return { success: true };
   }
 
@@ -420,9 +496,16 @@ async function monitorLanding(
     pollIntervalMs?: number;
     logger?: McpLogger;
     deferredSeparation?: {
-      stage: number;
-      fallbackAltitude: number;  // Altitude fallback if no status-based trigger
-      hasAtmosphere?: boolean;   // Body type for separation trigger selection
+      // Tag-based separation (for 3-stage airless designs with 'brake' and 'lander' tags)
+      // When set, activates specific decouplers by tag name instead of staging
+      primaryTag?: string;      // First separation tag (e.g., 'brake') - fires at braking burn
+      primaryThenStage?: boolean; // Fire STAGE after primary tag decouple (activate engines)
+      secondaryTag?: string;    // Second separation tag (e.g., 'lander') - fires at final descent
+      secondaryThenStage?: boolean; // Fire STAGE after secondary tag decouple (activate engines)
+      // Stage-based separation (fallback for non-tagged designs)
+      stage?: number;           // Primary stage number (fires entire stage)
+      fallbackAltitude: number; // Altitude fallback if no status-based trigger
+      hasAtmosphere?: boolean;  // Body type for separation trigger selection
     };
   } = {}
 ): Promise<{ success: boolean; finalStatus: LandingStatus; error?: string }> {
@@ -442,7 +525,7 @@ async function monitorLanding(
   let lastThresholdLogTime = Date.now();  // For threshold matches: every 10s
   let lastNonThresholdLogTime = Date.now();  // For status changes: state change OR 15s
 
-  // Track deferred separation state
+  // Track deferred separation state (brake separation only - lander handled by WHEN trigger)
   let separationFired = false;
 
   // Check atmosphere once at start - physics warp only on vacuum bodies
@@ -522,7 +605,7 @@ async function monitorLanding(
         );
 
         if (shouldSeparate) {
-          const separationType = hasAtmosphere ? 'reentry' : 'lander';
+          const separationType = hasAtmosphere ? 'reentry' : (deferredSeparation.primaryTag ?? 'lander');
           log.progress(`[Landing] Preparing for ${separationType} separation...`);
 
           // Step 0: Stop any active warp first - MechJeb won't respond while warping
@@ -576,8 +659,16 @@ async function monitorLanding(
           }
 
           // Step 3: Fire separation
+          // Use tag-based activation if primaryTag is set, otherwise use stage-based
           log.progress(`[Landing] Firing ${separationType} separation...`);
-          const result = await jettisonStage(conn, deferredSeparation.stage, log);
+          let result: { success: boolean; error?: string };
+          if (deferredSeparation.primaryTag) {
+            result = await activateDecouplerByTag(conn, deferredSeparation.primaryTag, log, deferredSeparation.primaryThenStage);
+          } else if (deferredSeparation.stage != null) {
+            result = await jettisonStage(conn, deferredSeparation.stage, log);
+          } else {
+            result = { success: false, error: 'No separation tag or stage configured' };
+          }
           if (result.success) {
             log.progress('[Landing] Separated');
           } else {
@@ -616,6 +707,10 @@ async function monitorLanding(
           }
         }
 
+      // NOTE: Lander separation (secondaryTag) for 3-stage airless designs is now handled
+      // by a kOS WHEN trigger set up before monitoring starts. The trigger fires automatically
+      // when the status transitions from "deorbit burn" to something else (before braking burn).
+
         // Fallback: if we're below fallback altitude and haven't separated, do it now
         const altitude = state.status.altitude;
         if (!separationFired && altitude !== undefined && altitude <= deferredSeparation.fallbackAltitude) {
@@ -625,7 +720,15 @@ async function monitorLanding(
 
           const fallbackReason = hasAtmosphere ? 'Approaching atmosphere' : 'Approaching surface';
           log.progress(`[Landing] ${fallbackReason} - firing deferred separation...`);
-          const result = await jettisonStage(conn, deferredSeparation.stage, log);
+          // Use tag-based or stage-based separation depending on configuration
+          let result: { success: boolean; error?: string };
+          if (deferredSeparation.primaryTag) {
+            result = await activateDecouplerByTag(conn, deferredSeparation.primaryTag, log, deferredSeparation.primaryThenStage);
+          } else if (deferredSeparation.stage != null) {
+            result = await jettisonStage(conn, deferredSeparation.stage, log);
+          } else {
+            result = { success: false, error: 'No separation tag or stage configured' };
+          }
           if (result.success) {
             log.progress('[Landing] Separated');
           } else {
@@ -1119,22 +1222,36 @@ export const landTool: ToolDefinition = {
           'Vessel must have parts with ModuleLandingLeg, ModuleWheelDeployment, or ModuleWheelBase.');
       }
 
-      // Choose separation stage based on body type:
-      // - Atmospheric bodies: use reentry stage (heat shield, tagged 'reentry')
-      //   Falls back to jettison stage if no reentry stage found
-      // - Airless bodies: use jettison stage (lander separation, tagged 'lander')
+      // Choose separation method based on body type and vessel tags:
+      // - Atmospheric bodies: stage-based (reentryStage, falls back to jettisonStage)
+      // - Airless with 'brake' + 'lander' tags: tag-based two-stage separation
+      //   1. 'brake' decoupler activates before braking burn (drop transfer stage)
+      //   2. 'lander' decoupler activates at final descent (drop brake stage)
+      // - Airless without tags: stage-based single separation (jettisonStage)
       //
-      // ALL separation is now deferred to onPoll - this ensures MechJeb's course
-      // correction phase completes before we separate, saving fuel on the transfer stage.
-      let separationStage: number | null;
-      if (hasAtmosphere) {
-        separationStage = vesselScan.reentryStage ?? vesselScan.jettisonStage;
-      } else {
-        separationStage = vesselScan.jettisonStage;
-      }
+      // Tag-based activation fires ONLY the specific decoupler, not the entire stage.
+      // ALL separation is deferred to onPoll - ensures MechJeb course correction completes first.
+      let separationStage: number | null = null;
+      let primaryTag: string | undefined;
+      let secondaryTag: string | undefined;
 
-      if (separationStage !== null) {
-        logger.progress(`[Landing] Separation deferred to descent phase (stage ${separationStage})`);
+      if (hasAtmosphere) {
+        // Atmospheric: stage-based (reentry or jettison)
+        separationStage = vesselScan.reentryStage ?? vesselScan.jettisonStage;
+        if (separationStage !== null) {
+          logger.progress(`[Landing] Separation deferred to descent phase (stage ${separationStage})`);
+        }
+      } else if (vesselScan.hasBrakeTag && vesselScan.hasLanderTag) {
+        // Airless 3-stage: tag-based two-stage separation
+        primaryTag = 'brake';
+        secondaryTag = 'lander';
+        logger.progress(`[Landing] 3-stage design detected: brake→lander separation (tag-based)`);
+      } else {
+        // Airless 2-stage: stage-based single separation
+        separationStage = vesselScan.jettisonStage;
+        if (separationStage !== null) {
+          logger.progress(`[Landing] Separation deferred to descent phase (stage ${separationStage})`);
+        }
       }
       // Note: No immediate separation - all separation handled in monitorLanding onPoll
 
@@ -1312,12 +1429,61 @@ export const landTool: ToolDefinition = {
       const status = await getLandingStatus(conn);
       logger.progress(`[Landing] ${status.status}`);
 
+      // Set up WHEN trigger for lander separation (3-stage airless designs only)
+      // This fires automatically when deorbit burn ends, before braking burn starts
+      if (secondaryTag && !hasAtmosphere) {
+        logger.progress(`[Landing] Setting up lander separation trigger...`);
+        const triggerScript = `
+          SET _wasDeorbit TO FALSE.
+          WHEN TRUE THEN {
+            LOCAL stat IS ADDONS:MJ:LANDING:STATUS.
+            IF stat:CONTAINS("deorbit burn") {
+              SET _wasDeorbit TO TRUE.
+            } ELSE IF _wasDeorbit {
+              SET WARP TO 0. WAIT 0.5.
+              RCS ON.
+              SET SHIP:CONTROL:FORE TO 1.
+              SET _firedLander TO 0.
+              FOR p IN SHIP:PARTSTAGGED("${secondaryTag}") {
+                IF p:HASMODULE("ModuleDecouple") {
+                  LOCAL m IS p:GETMODULE("ModuleDecouple").
+                  IF m:HASEVENT("Decouple") { m:DOEVENT("Decouple"). SET _firedLander TO _firedLander + 1. }
+                } ELSE IF p:HASMODULE("ModuleAnchoredDecoupler") {
+                  LOCAL m IS p:GETMODULE("ModuleAnchoredDecoupler").
+                  IF m:HASEVENT("Decouple") { m:DOEVENT("Decouple"). SET _firedLander TO _firedLander + 1. }
+                }
+                WAIT 0.
+              }
+              IF _firedLander > 0 { WAIT 0.5. STAGE. }
+              WAIT 5.
+              SET SHIP:CONTROL:FORE TO 0.
+              RCS OFF.
+              RETURN FALSE.
+            }
+            PRESERVE.
+          }
+        `.trim().replaceAll('\n', ' ');
+        try {
+          await conn.queue(triggerScript, 5000);
+          logger.progress(`[Landing] Lander separation trigger armed`);
+        } catch (e) {
+          logger.warn(`[Landing] Failed to set up lander trigger: ${e}`);
+        }
+      }
+
       // If wait=true, monitor until completion
       if (wait) {
-        // Always pass separation config if we have a stage - separation is deferred to onPoll
+        // Always pass separation config if we have a stage or tag - separation is deferred to onPoll
         // for ALL landings now (ensures course correction happens before separation)
-        const deferredSepConfig = separationStage !== null ? {
-          stage: separationStage,
+        const hasSeparation = separationStage !== null || primaryTag !== undefined;
+        const deferredSepConfig = hasSeparation ? {
+          // Tag-based separation for 3-stage designs
+          primaryTag,
+          primaryThenStage: true,  // Stage once after decouple to activate engines
+          secondaryTag,
+          secondaryThenStage: true,  // Stage once after decouple to activate engines
+          // Stage-based separation for 2-stage and atmospheric designs
+          stage: separationStage ?? undefined,
           // Fallback altitude: atmosphere height + 20km for atmospheric bodies,
           // or 50km for airless bodies (well before braking burn)
           fallbackAltitude: hasAtmosphere ? (highAltAtmHeight || 70_000) + 20_000 : 50_000,
