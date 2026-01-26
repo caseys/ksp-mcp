@@ -285,8 +285,8 @@ async function runAlignScript(
       errorAngle = angle;
 
       if (angle <= targetError) {
-        // Aligned - cleanup: restore warp and unlock all controls
-        await conn.raw('SET WARP TO 0. SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
+        // Aligned - cleanup: restore warp mode and unlock all controls
+        await conn.raw('SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS". SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
         return {
           success: true,
           method: 'KOS',
@@ -297,7 +297,7 @@ async function runAlignScript(
 
       // Drop physics warp when close to aligned for more precise control
       if (angle < 30) {
-        await conn.raw('SET WARP TO 0.', 2000);
+        await conn.raw('SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS".', 2000);
       }
 
       // Skip RCS when error < 15° - let reaction wheels handle fine settling
@@ -324,8 +324,8 @@ async function runAlignScript(
     await new Promise((resolve) => setTimeout(resolve, 2500));
   }
 
-  // Timeout - cleanup: restore warp and unlock all controls
-  await conn.raw('SET WARP TO 0. SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
+  // Timeout - cleanup: restore warp mode and unlock all controls
+  await conn.raw('SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS". SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
   console.error(`[execute-node] Alignment timeout, final error: ${errorAngle}°`);
   return {
     success: false,
