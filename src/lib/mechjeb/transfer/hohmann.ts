@@ -3,17 +3,37 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, queryTargetEncounterInfo, queryWrongEncounterDetails, sanitizeError, type ManeuverResult } from '../shared.js';
-import { rcsFineTune, createPeriapsisQuery } from '../execute-node.js';
+import { queryNodeInfo, queryTargetEncounterInfo, queryWrongEncounterDetails, sanitizeError, parseNumber, type ManeuverResult } from '../shared.js';
+import type { FineTuneFunction } from '../execute-node.js';
 import { clearNodes } from '../../kos/nodes.js';
-import { delay } from '../../utils/progress.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITING_ONLY_REQUIREMENTS } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import { z } from 'zod';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
-import { formatTime,  fmtVel } from '../../utils/format.js';
+import { formatTime, fmtVel } from '../../utils/format.js';
+
+/**
+ * Create a fine tune function for Hohmann transfers.
+ * Returns signed error: negative = undershoot (need prograde), positive = overshoot (need retrograde)
+ */
+function createHohmannFineTune(targetPe: number): FineTuneFunction {
+  return async (conn: KosConnection): Promise<number> => {
+    // Query current periapsis in target SOI using MechJeb
+    const result = await conn.queue('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
+    if (!result.success) {
+      return 0; // Can't query - assume at target
+    }
+    const periapsis = parseNumber(result.output.trim());
+    if (periapsis === null || periapsis <= 0) {
+      return 0; // No encounter or invalid - consider at target
+    }
+
+    // Return signed error: negative = undershoot, positive = overshoot
+    return periapsis - targetPe;
+  };
+}
 
 /**
  * Result from a single transfer attempt (before retry logic)
@@ -530,10 +550,26 @@ export const hohmannTransferTool: ToolDefinition = {
       const mode = (args.mode as string | undefined) ?? 'rendezvous';
       const rendezvous = mode === 'rendezvous';
 
+      // Query target body's atmosphere height for fine-tuning (only for body targets)
+      let fineTuneFunction: FineTuneFunction | undefined;
+      if (args.execute) {
+        const atmResult = await conn.queue(
+          'IF HASTARGET AND TARGET:ISTYPE("Body") { PRINT TARGET:ATM:HEIGHT. } ELSE { PRINT -1. }',
+          3000
+        );
+        if (atmResult.success) {
+          const atmHeight = parseNumber(atmResult.output.trim()) ?? 0;
+          // Target periapsis: 40km above atmosphere (or 40km if no atmosphere)
+          const targetPe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+          fineTuneFunction = createHohmannFineTune(targetPe);
+        }
+      }
+
       // Note: Using hardcoded defaults for timeRef/capture - MechJeb does not have working capture logic
       const result = await orchestrator.hohmannTransfer('COMPUTED', false, {
         target,
         execute: args.execute as boolean,
+        fineTuneFunction,
         logger,
         callerTool: 'hohmann_transfer',
         rendezvous,
@@ -545,61 +581,8 @@ export const hohmannTransferTool: ToolDefinition = {
           ? 'Burn complete'
           : `${nodeCount} node(s): ${result.deltaV != null ? fmtVel(result.deltaV) : '?'}, in ${formatTime(result.timeToNode ?? 0)}`;
 
-        // Query current encounter info for guidance
-        const encounterInfo = await queryTargetEncounterInfo(conn);
-
-        // Post-burn RCS fine-tune: IMPROVE accuracy after main burn executes
-        // Only applies when burn was executed and we have an encounter that needs refinement
-        let didFineTune = false;
-        if (result.executed && encounterInfo?.targetType === 'body') {
-          const currentPe = encounterInfo.periapsisInTargetSOI ?? 0;
-          const atmosphereHeight = encounterInfo.atmosphereHeight ?? 0;
-
-          // Acceptable range: 40km (or atmo+40km) to 1000km
-          const minSafePe = atmosphereHeight > 0 ? atmosphereHeight + 40_000 : 40_000;
-          const maxAcceptablePe = 1_000_000; // 1000km
-
-          // Fine-tune target: minimum safe altitude
-          const targetPe = minSafePe;
-
-          // Fine-tune if periapsis is outside acceptable range
-          const needsFineTune = currentPe < minSafePe || currentPe > maxAcceptablePe;
-
-          if (needsFineTune) {
-            const atmNote = atmosphereHeight > 0 ? ` (atmo: ${(atmosphereHeight / 1000).toFixed(0)}km)` : '';
-            logger.info?.(`[Hohmann] Post-burn Pe: ${(currentPe / 1000).toFixed(0)}km${atmNote}, fine-tuning to ${targetPe / 1000}km...`);
-
-            // Align and enable RCS for fine-tuning
-            await conn.raw('SAS ON. WAIT 0.3. SET SASMODE TO "PROGRADE". RCS ON.', 5000);
-            await delay(2000);
-
-            const fineTuneResult = await rcsFineTune(conn, {
-              queryProperty: createPeriapsisQuery(),
-              targetValue: targetPe,
-              controlAxis: 'fore',
-              directionStrategy: 'higher-means-negative',
-              tolerance: { relative: 0.25 },
-              limits: { maxPulses: 15, maxReversals: 3 },
-              logger,
-              logPrefix: 'Hohmann',
-            });
-
-            // Cleanup RCS
-            await conn.raw('SET SHIP:CONTROL:FORE TO 0. RCS OFF.', 3000);
-            didFineTune = true;
-
-            if (fineTuneResult.success) {
-              const finalPeKm = (fineTuneResult.finalValue / 1000).toFixed(0);
-              text += `\nRCS fine-tuned: ${(currentPe / 1000).toFixed(0)}km → ${finalPeKm}km`;
-              logger.progress?.(`[Hohmann] Fine-tuned to ${finalPeKm}km (${fineTuneResult.pulsesUsed} pulses)`);
-            } else {
-              logger.info?.(`[Hohmann] Fine-tune incomplete: ${fineTuneResult.reason}`);
-            }
-          }
-        }
-
-        // Re-query encounter info if fine-tuning occurred (to get updated periapsis)
-        const finalEncounterInfo = didFineTune ? await queryTargetEncounterInfo(conn) : encounterInfo;
+        // Query encounter info for guidance (fine-tuning is done by execute-node if configured)
+        const finalEncounterInfo = await queryTargetEncounterInfo(conn);
 
         if (finalEncounterInfo && finalEncounterInfo.targetType === 'body') {
           const peAlt = finalEncounterInfo.periapsisInTargetSOI ?? 0;

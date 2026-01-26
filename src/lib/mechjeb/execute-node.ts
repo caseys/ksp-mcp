@@ -15,7 +15,6 @@ import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
-import { runAlignScript } from '../../utils/kos-scripts.js';
 import { invalidateStatusCache } from './telemetry.js';
 export interface ExecuteNodeResult {
   success: boolean;
@@ -41,116 +40,19 @@ export interface ExecuteNodeProgress {
 }
 
 // ============================================================================
-// RCS Fine-Tune System - Reusable orbital property adjustment via RCS pulses
-// ============================================================================
-
-/** Control axis for RCS pulses */
-export type ControlAxis = 'fore' | 'starboard' | 'top';
-// fore = prograde/retrograde
-// starboard = normal (left/right)
-// top = radial (up/down)
-
-/** Property query function - returns current value or null if unavailable */
-export type PropertyQuery = (conn: KosConnection) => Promise<number | null>;
-
-/** Direction strategy for initial pulse direction */
-export type DirectionStrategy =
-  | 'higher-means-negative'  // If value > target, pulse negative (-1) - default for periapsis
-  | 'higher-means-positive'  // If value > target, pulse positive (+1)
-  | ((current: number, target: number) => 1 | -1);  // Custom function
-
-/** Configuration for RCS fine-tuning */
-export interface FineTuneConfig {
-  /** Function to query current property value (returns meters/degrees/etc) */
-  queryProperty: PropertyQuery;
-
-  /** Target value in base units */
-  targetValue: number;
-
-  /** Control axis (default: 'fore') */
-  controlAxis?: ControlAxis;
-
-  /** How to determine initial pulse direction (default: 'higher-means-negative') */
-  directionStrategy?: DirectionStrategy;
-
-  /** Tolerance - property is "good enough" when within this */
-  tolerance?: {
-    absolute?: number;  // e.g., 1000 (meters)
-    relative?: number;  // e.g., 0.25 (25% of target)
-  };
-
-  /** Limits for termination */
-  limits?: {
-    maxPulses?: number;      // Default: 20
-    maxReversals?: number;   // Default: 3
-  };
-
-  /** Pulse duration tuning */
-  pulse?: {
-    initial?: number;   // Default: 0.05s (50ms)
-    min?: number;       // Default: 0.01s (10ms)
-    max?: number;       // Default: 0.25s (250ms)
-  };
-
-  /** Logger for progress messages */
-  logger?: McpLogger;
-
-  /** Prefix for log messages (default: 'FineTune') */
-  logPrefix?: string;
-}
-
-/** Result from RCS fine-tuning */
-export interface FineTuneResult {
-  success: boolean;
-  finalValue: number;
-  targetValue: number;
-  pulsesUsed: number;
-  reason: 'tolerance' | 'maxPulses' | 'maxReversals' | 'lostProperty' | 'error';
-  error?: string;
-}
-
-// ============================================================================
-// Property Query Helpers - Pre-built queries for common orbital properties
-// ============================================================================
-
-/**
- * Parse a value with units (e.g., "214.1 km", "50000 m", "1.2 Mm")
- * Returns null if parsing fails.
- */
-function parseUnitValue(output: string): number | null {
-  const match = output.match(/([0-9.]+)\s*(m|km|Mm|Gm)?/i);
-  if (!match) return null;
-
-  let value = parseFloat(match[1]);
-  const unit = (match[2] || 'm').toLowerCase();
-
-  switch (unit) {
-    case 'km': value *= 1000; break;
-    case 'mm': value *= 1_000_000; break;
-    case 'gm': value *= 1_000_000_000; break;
-  }
-
-  return value;
-}
-
-/** Query periapsis in target SOI (for body encounters) */
-async function queryPeriapsis(conn: KosConnection): Promise<number | null> {
-  const result = await conn.queue('PRINT ADDONS:MJ:INFO:TPERI.', 3000);
-  if (!result.success) return null;
-  return parseUnitValue(result.output);
-}
-
-/** Get a PropertyQuery for periapsis in target SOI */
-export function createPeriapsisQuery(): PropertyQuery {
-  return queryPeriapsis;
-}
-
-// ============================================================================
 // Thrust Limiting for Small Burns
 // ============================================================================
 
 const SMALL_BURN_THRESHOLD = 10; // m/s - burns below this get thrust limiting
 const SMALL_BURN_THRUST_LIMIT = 12; // percent - conservative limit for precision
+
+// RCS pulse configuration constants
+const RCS_PULSE_DV_THRESHOLD = 10; // m/s - burns below this get shorter/fewer RCS pulses
+const RCS_PULSE_DURATION_MAX = 0.25; // seconds - maximum pulse duration
+const RCS_PULSE_DURATION_MIN = 0.03; // seconds - minimum pulse duration
+const RCS_PULSE_COUNT_MAX = 5; // max pulses per poll (large burns, large error)
+const RCS_PULSE_COUNT_MIN = 1; // min pulses per poll (small burns, small error)
+const RCS_PULSE_OFF_TIME = 0.3; // seconds - pause between pulses
 
 /**
  * Limit engine thrust for small burns.
@@ -195,180 +97,77 @@ async function restoreEngineThrust(conn: KosConnection, logger?: McpLogger): Pro
 }
 
 // ============================================================================
-// RCS Fine-Tune Core Function
+// RCS Pulse Duration for Small Burns
 // ============================================================================
 
 /**
- * Get the kOS control suffix for a control axis.
+ * Calculate RCS pulse duration based on burn delta-v and heading error.
+ *
+ * Shorter pulses = gentler RCS assist = less trajectory disturbance for small burns.
+ *
+ * Base duration (from dV):
+ * - dV >= 10 m/s: 0.25s (full pulses)
+ * - dV < 10 m/s: scales down to 0.03s at dV < 1 m/s
+ *
+ * Error reduction (when error < 15 degrees):
+ * - Multiplies base by (error/15) to reduce pulse as we approach alignment
+ * - Minimum 0.03s to maintain effectiveness
  */
-function getControlSuffix(axis: ControlAxis): string {
-  switch (axis) {
-    case 'fore': return 'FORE';
-    case 'starboard': return 'STARBOARD';
-    case 'top': return 'TOP';
+function calculateRcsPulseDuration(burnDv: number, headingError: number): number {
+  // Base duration from burn delta-v
+  let baseDuration: number;
+  if (burnDv >= RCS_PULSE_DV_THRESHOLD) {
+    baseDuration = RCS_PULSE_DURATION_MAX;
+  } else if (burnDv <= 1) {
+    baseDuration = RCS_PULSE_DURATION_MIN;
+  } else {
+    // Linear scale: 10 m/s -> 0.25s, 1 m/s -> 0.03s
+    const dvFactor = (burnDv - 1) / (RCS_PULSE_DV_THRESHOLD - 1);
+    baseDuration = RCS_PULSE_DURATION_MIN + dvFactor * (RCS_PULSE_DURATION_MAX - RCS_PULSE_DURATION_MIN);
   }
+
+  // Error-based reduction when < 15 degrees
+  if (headingError < 15) {
+    const errorFactor = Math.max(headingError / 15, 0.12); // Min 12% of base
+    baseDuration *= errorFactor;
+  }
+
+  return Math.max(RCS_PULSE_DURATION_MIN, baseDuration);
 }
 
 /**
- * Fine-tune an orbital property using RCS pulses.
+ * Calculate number of RCS pulses per poll based on burn delta-v and heading error.
  *
- * Pre-requisites:
- * - RCS must be enabled before calling
- * - SAS should be ON and set appropriately for the control axis
- * - Any maneuver nodes should be removed (we're adjusting actual orbit)
+ * Fewer pulses = less aggressive pulsing = gentler alignment for small burns.
  *
- * @param conn kOS connection
- * @param config Fine-tune configuration
+ * Base count (from dV):
+ * - dV >= 10 m/s: 5 pulses per poll
+ * - dV < 10 m/s: scales down to 1 pulse at dV < 1 m/s
+ *
+ * Error reduction (when error < 15 degrees):
+ * - Reduces pulse count as we approach alignment
+ * - Minimum 1 pulse
  */
-export async function rcsFineTune(
-  conn: KosConnection,
-  config: FineTuneConfig
-): Promise<FineTuneResult> {
-  const {
-    queryProperty,
-    targetValue,
-    controlAxis = 'fore',
-    directionStrategy = 'higher-means-negative',
-    tolerance = { relative: 0.25 },
-    limits = { maxPulses: 20, maxReversals: 3 },
-    pulse = { initial: 0.05, min: 0.01, max: 0.25 },
-    logger,
-    logPrefix = 'FineTune',
-  } = config;
-
-  const log = logger ?? nullLogger;
-  const controlSuffix = getControlSuffix(controlAxis);
-
-  // Calculate tolerance value
-  const toleranceValue = tolerance.absolute ?? (tolerance.relative ?? 0.25) * targetValue;
-
-  // Get initial value
-  let currentValue = await queryProperty(conn);
-  if (currentValue === null) {
-    return {
-      success: false,
-      finalValue: 0,
-      targetValue,
-      pulsesUsed: 0,
-      reason: 'lostProperty',
-      error: 'Could not read initial property value',
-    };
-  }
-
-  // Determine initial direction
-  let direction: 1 | -1;
-  if (typeof directionStrategy === 'function') {
-    direction = directionStrategy(currentValue, targetValue);
-  } else if (directionStrategy === 'higher-means-positive') {
-    direction = currentValue > targetValue ? 1 : -1;
+function calculatePulseCount(burnDv: number, headingError: number): number {
+  // Base count from burn delta-v
+  let baseCount: number;
+  if (burnDv >= RCS_PULSE_DV_THRESHOLD) {
+    baseCount = RCS_PULSE_COUNT_MAX;
+  } else if (burnDv <= 1) {
+    baseCount = RCS_PULSE_COUNT_MIN;
   } else {
-    // 'higher-means-negative' (default)
-    direction = currentValue > targetValue ? -1 : 1;
+    // Linear scale: 10 m/s -> 5, 1 m/s -> 1
+    const dvFactor = (burnDv - 1) / (RCS_PULSE_DV_THRESHOLD - 1);
+    baseCount = RCS_PULSE_COUNT_MIN + dvFactor * (RCS_PULSE_COUNT_MAX - RCS_PULSE_COUNT_MIN);
   }
 
-  let lastValue = currentValue;
-  let wrongWayCount = 0;
-  let pulseCount = 0;
-  let pulseDuration = pulse.initial ?? 0.05;
-  const minPulse = pulse.min ?? 0.01;
-  const maxPulse = pulse.max ?? 0.25;
-  const maxPulses = limits.maxPulses ?? 20;
-  const maxReversals = limits.maxReversals ?? 3;
-
-  while (pulseCount < maxPulses) {
-    currentValue = await queryProperty(conn);
-
-    // Check if we lost the property (returns null or invalid)
-    if (currentValue === null || currentValue <= 0) {
-      log.warn(`[${logPrefix}] Lost property! Reversing direction and retrying...`);
-      direction = direction === 1 ? -1 : 1;
-      wrongWayCount++;
-      await delay(500);
-      currentValue = await queryProperty(conn);
-      if ((currentValue === null || currentValue <= 0) && wrongWayCount > 2) {
-        log.warn(`[${logPrefix}] Property lost after ${wrongWayCount} reversals, stopping`);
-        return {
-          success: false,
-          finalValue: lastValue,
-          targetValue,
-          pulsesUsed: pulseCount,
-          reason: 'lostProperty',
-        };
-      }
-      if (currentValue === null || currentValue <= 0) continue;
-    }
-
-    const error = Math.abs(currentValue - targetValue);
-
-    // Check if within tolerance
-    if (error <= toleranceValue) {
-      log.progress(`[${logPrefix}] RCS done: ${(currentValue / 1000).toFixed(0)}km (${pulseCount} pulse${pulseCount !== 1 ? 's' : ''})`);
-      return {
-        success: true,
-        finalValue: currentValue,
-        targetValue,
-        pulsesUsed: pulseCount,
-        reason: 'tolerance',
-      };
-    }
-
-    // Check if last pulse made things worse
-    if (pulseCount > 0 && lastValue > 0) {
-      const lastError = Math.abs(lastValue - targetValue);
-      if (error > lastError + 1000) { // Got worse by more than 1km
-        log.progress(`[${logPrefix}] RCS: wrong direction (${(lastValue / 1000).toFixed(0)}→${(currentValue / 1000).toFixed(0)}km), reversing`);
-        direction = direction === 1 ? -1 : 1;
-        wrongWayCount++;
-        if (wrongWayCount > maxReversals) {
-          log.warn(`[${logPrefix}] Too many direction reversals, stopping`);
-          return {
-            success: false,
-            finalValue: currentValue,
-            targetValue,
-            pulsesUsed: pulseCount,
-            reason: 'maxReversals',
-          };
-        }
-      }
-    }
-
-    // Pulse RCS
-    await conn.raw(`SET SHIP:CONTROL:${controlSuffix} TO ${direction}. WAIT ${pulseDuration.toFixed(3)}. SET SHIP:CONTROL:${controlSuffix} TO 0.`);
-    pulseCount++;
-    lastValue = currentValue;
-
-    await delay(200);
-
-    // Check new value and adjust pulse duration
-    const newValue = await queryProperty(conn);
-    if (newValue !== null && newValue > 0) {
-      const changePerPulse = Math.abs(newValue - currentValue);
-
-      // Log every few pulses
-      if (pulseCount <= 2 || pulseCount % 3 === 0) {
-        log.progress(`[${logPrefix}] RCS: ${(newValue / 1000).toFixed(0)}km (dir=${direction > 0 ? '+' : '-'})`);
-      }
-
-      // Adjust pulse duration based on change rate
-      if (changePerPulse > error * 0.5) {
-        pulseDuration = Math.max(minPulse, pulseDuration * 0.5);
-      } else if (changePerPulse < error * 0.05 && pulseDuration < maxPulse) {
-        pulseDuration = Math.min(maxPulse, pulseDuration * 1.5);
-      }
-
-      currentValue = newValue;
-    }
+  // Error-based reduction when < 15 degrees
+  if (headingError < 15) {
+    const errorFactor = Math.max(headingError / 15, 0.2); // Min 20% of base
+    baseCount *= errorFactor;
   }
 
-  // Max pulses reached
-  log.warn(`[${logPrefix}] Max pulses (${maxPulses}) reached`);
-  return {
-    success: false,
-    finalValue: currentValue ?? lastValue,
-    targetValue,
-    pulsesUsed: pulseCount,
-    reason: 'maxPulses',
-  };
+  return Math.max(RCS_PULSE_COUNT_MIN, Math.round(baseCount));
 }
 
 // Configuration
@@ -383,21 +182,122 @@ const ALIGN_THRESHOLD = 3; // degrees - consider aligned below this
 // WARPALIGN stuck detection configuration
 const WARPALIGN_STUCK_THRESHOLD = 3; // Warn after 3 polls with no angle change (~6 seconds)
 
+// Fine tune phase configuration
+const FINE_TUNE_ENGINE_BURST_MS = 100;  // Short engine pulse duration
+const FINE_TUNE_RCS_BURST_MS = 50;      // RCS pulse duration
+const FINE_TUNE_MAX_ATTEMPTS = 3;       // Max attempts per direction
+const FINE_TUNE_THRUST_LIMIT = 15;      // Engine thrust limit %
+
 /**
- * Align ship to maneuver node using mcp-align.ks script.
+ * Align ship to maneuver node burn vector using LOCK STEERING with RCS pulse assist.
  *
- * The script handles:
- * - SAS MANEUVER detection and fallback to kOS steering
- * - Physics warp for faster rotation
- * - RCS assist modes
+ * Uses interpreter-defined WHEN trigger for RCS pulsing. Triggers defined in scripts
+ * get garbage collected when program ends, but interpreter-defined triggers persist.
+ *
+ * Features:
+ * - 2x physics warp to speed up rotation
+ * - Dynamic RCS thrust limiting for small burns (scales with dV and heading error)
+ *
+ * @param conn - kOS connection
+ * @param targetError - Target alignment error in degrees (default 1.0)
+ * @param timeout - Timeout in milliseconds (default 60000)
+ * @param burnDv - Burn delta-v in m/s (for RCS limiting, optional)
+ * @param logger - Logger for progress messages (optional)
+ * @returns Alignment result with final error angle
+ */
+async function runAlignScript(
+  conn: KosConnection,
+  targetError = 1,
+  timeout = 60_000,
+  burnDv?: number,
+  logger?: McpLogger
+): Promise<{ success: boolean; method: 'SAS' | 'KOS'; errorAngle: number; output: string }> {
+  const startTime = Date.now();
+  const _log = logger ?? nullLogger; // Reserved for future progress logging
+
+  // Enable 2x physics warp to speed up rotation
+  await conn.raw('SET KUNIVERSE:TIMEWARP:MODE TO "PHYSICS". SET WARP TO 1.', 3000);
+
+  // Start alignment: LOCK STEERING only (no WHEN trigger)
+  // RCS pulses are sent from TypeScript poll loop with calculated duration
+  // Uses LOOKDIRUP to maintain roll orientation
+  const alignCmd = 'SAS OFF. LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, SHIP:FACING:TOPVECTOR).';
+  await conn.queue(alignCmd, 5000);
+
+  // Poll until aligned or timeout
+  let errorAngle = 180;
+  let lastOutput = '';
+
+  while (Date.now() - startTime < timeout) {
+    const result = await conn.queue(
+      'PRINT ROUND(VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR), 2).',
+      3000
+    );
+    lastOutput = result.output;
+
+    const angle = parseFloat(result.output.trim());
+    if (!isNaN(angle)) {
+      errorAngle = angle;
+
+      if (angle <= targetError) {
+        // Aligned - cleanup: restore warp
+        await conn.raw('SET WARP TO 0. SET RCS TO FALSE.', 2000);
+        await conn.queue('UNLOCK STEERING.', 3000);
+        return {
+          success: true,
+          method: 'KOS',
+          errorAngle,
+          output: `Aligned to ${errorAngle}°`,
+        };
+      }
+
+      // Send RCS pulses with duration and count based on burn dV and heading error
+      // Shorter/fewer pulses for small burns and small errors = gentler assist
+      const pulseDuration = calculateRcsPulseDuration(burnDv ?? 100, angle);
+      const pulseCount = calculatePulseCount(burnDv ?? 100, angle);
+
+      // Build command for N pulses in one kOS execution (no round-trips between pulses)
+      let pulseCmd = '';
+      for (let i = 0; i < pulseCount; i++) {
+        pulseCmd += `SET RCS TO TRUE. WAIT ${pulseDuration.toFixed(3)}. SET RCS TO FALSE.`;
+        if (i < pulseCount - 1) {
+          pulseCmd += ` WAIT ${RCS_PULSE_OFF_TIME}. `;
+        }
+      }
+      await conn.raw(pulseCmd, 5000);
+    }
+
+    // Wait before next poll
+    await new Promise((resolve) => setTimeout(resolve, 2500));
+  }
+
+  // Timeout - cleanup
+  await conn.raw('SET WARP TO 0. SET RCS TO FALSE.', 2000);
+  await conn.queue('UNLOCK STEERING.', 3000);
+  console.error(`[execute-node] Alignment timeout, final error: ${errorAngle}°`);
+  return {
+    success: false,
+    method: 'KOS',
+    errorAngle,
+    output: lastOutput,
+  };
+}
+
+/**
+ * Align ship to maneuver node using LOCK STEERING + RCS pulse assist.
+ *
+ * Features:
+ * - 2x physics warp for faster rotation
+ * - Dynamic RCS pulse duration (shorter pulses for small burns/small errors)
  * - Watchdog for stuck steering
  *
  * @param conn kOS connection
  * @param logger Optional MCP logger for progress updates
  * @param logPrefix Prefix for log messages (e.g., '[Maneuver]')
- * @param rcsMode RCS mode for alignment (0=off, 1=on, 2=burst, 3=pulse)
+ * @param rcsMode RCS mode for alignment (currently unused, kept for API compat)
+ * @param burnDv Burn delta-v in m/s (smaller burns get shorter RCS pulses)
  */
-async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]', rcsMode = 1): Promise<boolean> {
+async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = '[Maneuver]', _rcsMode = 1, burnDv?: number): Promise<boolean> {
   const log = logger ?? nullLogger;
 
   // Verify node exists before trying to align
@@ -411,8 +311,8 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   const initialAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR)');
   log.progress(`${logPrefix} Aligning to burn vector (${fmtNum(initialAngle)}°)...`);
 
-  // Run alignment script
-  const result = await runAlignScript(conn, rcsMode, true);
+  // Run alignment script with RCS limiting for small burns
+  const result = await runAlignScript(conn, 1, 60_000, burnDv, log);
 
   if (result.success) {
     log.progress(`${logPrefix} Aligned via ${result.method} (${fmtNum(result.errorAngle)}°)`);
@@ -427,6 +327,15 @@ async function alignToNode(conn: KosConnection, logger?: McpLogger, logPrefix = 
   }
 }
 
+/**
+ * Fine tune function type.
+ * Returns a number representing distance from goal:
+ * - < 0: Goal not met (undershoot), need prograde thrust
+ * - = 0: Perfect, no action needed
+ * - > 0: Overshot goal, need retrograde RCS
+ */
+export type FineTuneFunction = (conn: KosConnection) => Promise<number>;
+
 export interface ExecuteNodeOptions {
   timeoutMs?: number;
   pollIntervalMs?: number;
@@ -435,6 +344,7 @@ export interface ExecuteNodeOptions {
   callerTool?: string; // Name of tool that initiated execution (for logging context)
   noRcsAlign?: boolean; // If true, don't use RCS during alignment (for small burns where RCS would affect trajectory)
   targetPeriapsis?: number; // Target periapsis in meters (for RCS fine-tuning mode)
+  fineTuneFunction?: FineTuneFunction; // Optional post-burn fine-tuning function
 }
 
 /**
@@ -462,6 +372,7 @@ export async function executeNode(
     callerTool,
     noRcsAlign = false,
     targetPeriapsis: _targetPeriapsis, // Unused until RCS refinement re-enabled
+    fineTuneFunction,
   } = options;
 
   const log = logger ?? nullLogger;
@@ -537,7 +448,7 @@ export async function executeNode(
   let aligned = false;
 
   for (let alignAttempt = 1; alignAttempt <= MAX_ALIGN_ATTEMPTS; alignAttempt++) {
-    const alignResult = await alignToNode(conn, logger, logPrefix, rcsMode);
+    const alignResult = await alignToNode(conn, logger, logPrefix, rcsMode, dvRequired);
 
     if (alignResult) {
       aligned = true;
@@ -722,7 +633,17 @@ export async function executeNode(
     log.warn(`${logPrefix} MechJeb executor not enabled, retrying...`);
     await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
     await delay(500);
+
+    // Second verification
+    const verifyAgain = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
+    if (!verifyAgain.output.includes('True')) {
+      log.error(`${logPrefix} MechJeb executor FAILED to enable`);
+    }
   }
+
+  // Log initial MechJeb state
+  const initialState = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE.', 2000);
+  log.progress(`${logPrefix} MechJeb: ${initialState.output.trim()}`);
 
   // Poll state interface for burn monitoring
   interface BurnPollState {
@@ -749,7 +670,8 @@ export async function executeNode(
       log.progress(`${logPrefix} Retry attempt ${attempt}/${MAX_RETRIES}`);
       try {
         await stopWarp(conn);
-        await conn.raw('SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+        // Unlock steering before re-enabling MechJeb - kOS steering can conflict
+        await conn.raw('UNLOCK STEERING. SAS OFF. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
       } catch {
         // May be in blackout - MechJeb will continue executing autonomously
         log.progress(`${logPrefix} No signal - executing autonomously`);
@@ -776,16 +698,12 @@ export async function executeNode(
       };
     }
 
-    // Track last valid state for fallback during parsing errors
-    let lastValidState: BurnPollState | null = null;
-    let parseFailureCount = 0;
-    const MAX_PARSE_FAILURES = 10; // After this many failures, assume state is stale and check node directly
-
     // WARPALIGN stuck detection - track when MechJeb goes back to alignment after burn started
     let burnEverStarted = false;
     let warpAlignStartTime: number | null = null;
     let lastWarpAlignAngle: number | null = null;
     let warpAlignStuckCount = 0;
+    let alignedWaitingCount = 0; // Count polls while aligned but MechJeb stuck in WARPALIGN
 
     // Wait for burn completion using pollWithBlackoutResilience
     const result = await pollWithBlackoutResilience<BurnPollState>({
@@ -805,28 +723,14 @@ export async function executeNode(
         );
 
         if (!progressResult.success) {
-          parseFailureCount++;
-          if (lastValidState) return lastValidState;
-          return { noNode: false, dvRemaining: 999, executorEnabled: true, executorState: 'WARPALIGN', burnComplete: false, executorStopped: false, nodeEta: 0 };
+          throw new Error('MechJeb query failed');
         }
 
         // Parse "enabled|state|dv|eta" format
         const progressMatch = progressResult.output.match(/(True|False)\|(\w+)\|([\d.]+)\|(-?\d+)/i);
         if (!progressMatch) {
-          parseFailureCount++;
-          if (parseFailureCount >= MAX_PARSE_FAILURES) {
-            log.warn(`${logPrefix} Parse failures detected, assuming burn complete...`);
-            // After many parse failures, assume we're done (node may have been consumed)
-            return { noNode: true, dvRemaining: 0, executorEnabled: false, executorState: 'IDLE', burnComplete: true, executorStopped: false, nodeEta: 0 };
-          }
-          if (lastValidState) {
-            return lastValidState;
-          }
-          return { noNode: false, dvRemaining: 999, executorEnabled: true, executorState: 'WARPALIGN', burnComplete: false, executorStopped: false, nodeEta: 0 };
+          throw new Error(`MechJeb parse failed: ${progressResult.output.slice(0, 80)}`);
         }
-
-        // Successful parse - reset failure counter
-        parseFailureCount = 0;
 
         const executorEnabled = progressMatch[1].toLowerCase() === 'true';
         const executorState = progressMatch[2];
@@ -846,9 +750,7 @@ export async function executeNode(
           }
         }
 
-        const state = { noNode: false, dvRemaining, executorEnabled, executorState, burnComplete, executorStopped, nodeEta };
-        lastValidState = state; // Save for fallback
-        return state;
+        return { noNode: false, dvRemaining, executorEnabled, executorState, burnComplete, executorStopped, nodeEta };
       },
 
       // Include executorIdle in isDone check - MechJeb going IDLE means it's done (for better or worse)
@@ -872,6 +774,7 @@ export async function executeNode(
           burnEverStarted = true;
           warpAlignStartTime = null; // Reset WARPALIGN tracking when burning
           warpAlignStuckCount = 0;
+          alignedWaitingCount = 0;
         }
 
         // Space-themed status messages based on MechJeb executor state
@@ -880,10 +783,12 @@ export async function executeNode(
         case 'LEAD': {
           statusMsg = `Ignition in ${formatTime(state.nodeEta)}`;
           warpAlignStartTime = null; // Reset when in LEAD
+          alignedWaitingCount = 0;
           break;
         }
         case 'BURN': {
           statusMsg = `Burn: ${fmtVel(state.dvRemaining)} to go`;
+          alignedWaitingCount = 0;
           break;
         }
         case 'WARPALIGN': {
@@ -910,10 +815,24 @@ export async function executeNode(
               statusMsg = `Burn: ${fmtVel(state.dvRemaining)} to go (realigning)`;
               warpAlignStuckCount = 0; // Reset stuck counter
             } else if (currentAngle < ALIGN_THRESHOLD) {
-              // Aligned but MechJeb still in WARPALIGN state - just wait for ignition
-              statusMsg = `Aligned, awaiting ignition`;
+              // Aligned but MechJeb still in WARPALIGN state
+              alignedWaitingCount++;
               warpAlignStuckCount = 0;
+
+              if (alignedWaitingCount >= 4) {
+                // Been aligned for too long (~10s) but MechJeb won't start - try to kick it
+                log.warn(`${logPrefix} Aligned but MechJeb not starting - attempting recovery`);
+                try {
+                  // Disable and re-enable MechJeb executor to reset its state
+                  await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO FALSE. WAIT 0.5. SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+                } catch { /* ignore */ }
+                alignedWaitingCount = 0;
+                statusMsg = `Aligned, restarting executor`;
+              } else {
+                statusMsg = `Aligned, awaiting ignition`;
+              }
             } else {
+              alignedWaitingCount = 0; // Reset when not aligned
               // Check for stuck alignment (angle not changing)
               if (lastWarpAlignAngle !== null) {
                 const angleChange = Math.abs(currentAngle - lastWarpAlignAngle);
@@ -981,11 +900,67 @@ export async function executeNode(
           try { await restoreEngineThrust(conn, log); } catch { /* ignore */ }
         }
 
-        // RCS refinement for small burns - DISABLED
-        // Causes oscillation issues with distant target corrections.
-        // The prograde/retrograde direction strategy doesn't map cleanly to
-        // periapsis changes due to orbital geometry at distant intercepts.
-        // TODO: Re-enable after reworking direction strategy for course corrections
+        // Fine tune phase - optional precision adjustment using engine + RCS
+        if (fineTuneFunction) {
+          try {
+            log.progress(`${logPrefix} Fine tune phase...`);
+
+            // Step 1: Align prograde with RCS pulse assist
+            await runAlignScript(conn);
+
+            // Step 2: Set engine thrust to low limit for precision
+            await conn.raw(`FOR eng IN SHIP:ENGINES { SET eng:THRUSTLIMIT TO ${FINE_TUNE_THRUST_LIMIT}. }`, 3000);
+
+            // Step 3: Query initial error
+            let fineTuneResult = await fineTuneFunction(conn);
+            let engineAttempts = 0;
+
+            // Step 4: Prograde engine bursts for undershoot (result < 0)
+            while (fineTuneResult < 0 && engineAttempts < FINE_TUNE_MAX_ATTEMPTS) {
+              engineAttempts++;
+              log.progress(`${logPrefix} Engine burst ${engineAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km)`);
+
+              // Brief engine burn while aligned prograde
+              await conn.raw(`LOCK THROTTLE TO 1. WAIT ${FINE_TUNE_ENGINE_BURST_MS / 1000}. LOCK THROTTLE TO 0.`, 3000);
+              await delay(500);
+
+              fineTuneResult = await fineTuneFunction(conn);
+            }
+
+            // Step 5: Retrograde RCS bursts for overshoot (result > 0)
+            if (fineTuneResult > 0) {
+              // Align retrograde for RCS correction
+              await conn.raw('SAS ON. WAIT 0.3. SET SASMODE TO "RETROGRADE". RCS ON.', 5000);
+              await delay(1500);
+
+              let rcsAttempts = 0;
+              while (fineTuneResult > 0 && rcsAttempts < FINE_TUNE_MAX_ATTEMPTS) {
+                rcsAttempts++;
+                log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: +${Math.round(fineTuneResult / 1000)}km)`);
+
+                // RCS burst (positive FORE when retrograde = effective retrograde thrust)
+                await conn.raw(`SET SHIP:CONTROL:FORE TO 1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
+                await delay(300);
+
+                fineTuneResult = await fineTuneFunction(conn);
+              }
+
+              // Cleanup RCS controls
+              await conn.raw('SET SHIP:CONTROL:FORE TO 0. RCS OFF.', 2000);
+            }
+
+            const finalErrorKm = Math.round(fineTuneResult / 1000);
+            log.progress(`${logPrefix} Fine tune complete (error: ${finalErrorKm >= 0 ? '+' : ''}${finalErrorKm}km)`);
+
+          } catch (err) {
+            log.warn(`${logPrefix} Fine tune error: ${err instanceof Error ? err.message : err}`);
+          }
+
+          // Restore engine thrust to 100%
+          try {
+            await conn.raw('FOR eng IN SHIP:ENGINES { SET eng:THRUSTLIMIT TO 100. }', 3000);
+          } catch { /* ignore */ }
+        }
 
         // Enable SAS prograde to maintain heading and avoid RCS drift affecting trajectory
         try {

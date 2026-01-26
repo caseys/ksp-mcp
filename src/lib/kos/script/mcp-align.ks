@@ -1,218 +1,25 @@
-// ==================================================
-// mcp-align.ks
+// =======================================
+// DEPRECATED - Alignment is now done inline from TypeScript
+// =======================================
 //
-// Align vessel to maneuver node with smart RCS control.
+// The alignment approach that works reliably:
 //
-// Strategy:
-//   1) Normalize control (no SAS, no steering)
-//   2) Try SAS MANEUVER first (crewed vessels)
-//   3) Fall back to kOS LOCK STEERING if needed
-//   4) Adaptive RCS thrust based on angular velocity
-//   5) Stuck detection with full restart
-//   6) Freeze final attitude with SAS STABILITY
+// 1. WHEN triggers defined in SCRIPTS get garbage collected when program ends
+// 2. WHEN triggers defined from INTERPRETER persist
 //
-// PARAMETERS:
-//   RCS_MODE (0-3) - ascending aggressiveness
-//     0 = do not touch RCS
-//     1 = short burst at start + end (lightest)
-//     2 = pulsed + adaptive RCS (medium)
-//     3 = continuous + adaptive RCS (strongest)
+// So alignment is done by sending commands directly from TypeScript, not via RUNPATH:
 //
-//   USE_SAS (BOOLEAN)
-//     TRUE  = allow SAS MANEUVER attempt
-//     FALSE = force kOS steering
-// ==================================================
+//   SAS OFF.
+//   LOCK STEERING TO NEXTNODE:BURNVECTOR.
+//   WHEN HASNODE AND VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR) > 1 THEN {
+//       SET RCS TO NOT RCS.  // Toggle RCS on/off (pulse)
+//       WAIT 0.25.           // Pulse interval
+//       PRESERVE.            // Keep firing until condition becomes false
+//   }
+//
+// The trigger self-stops when error < 1 degree (condition becomes false).
+// Then cleanup with: UNLOCK STEERING. SET RCS TO FALSE.
+//
+// See: src/utils/kos-scripts.ts runAlignScript()
 
-
-// ------------------ parameters ------------------
-PARAMETER RCS_MODE IS 0.
-PARAMETER USE_SAS IS TRUE.
-
-
-// ------------------ helper functions ------------------
-FUNCTION SET_RCS_POWER {
-    PARAMETER pct.
-    FOR part IN SHIP:PARTS {
-        IF part:HASMODULE("ModuleRCSFX") {
-            part:GETMODULE("ModuleRCSFX"):SETFIELD("thrust limiter", pct).
-        }
-    }
-}
-
-FUNCTION DO_ALIGN {
-    // Try SAS MANEUVER first (crewed vessels only)
-    IF USE_SAS AND HASNODE AND SHIP:CREW:LENGTH > 0 {
-        SET SAS TO TRUE. WAIT 0.
-        SET SASMODE TO "MANEUVER". WAIT 0.
-        IF SASMODE = "MANEUVER" {
-            PRINT "ALIGN: SAS MANEUVER active".
-            RETURN "SAS".
-        }
-    }
-
-    // Fallback: kOS steering
-    PRINT "ALIGN: kOS steering".
-    SET SAS TO FALSE. WAIT 0.
-    LOCK STEERING TO NEXTNODE:BURNVECTOR.
-    RETURN "KOS".
-}
-
-
-// ------------------ save state ------------------
-LOCAL origSAS IS SAS.
-
-
-// ------------------ enter physics warp x2 ------------------
-SET KUNIVERSE:TIMEWARP:MODE TO "PHYSICS".
-WAIT 0.
-SET KUNIVERSE:TIMEWARP:RATE TO 1.    // 2x physics warp
-WAIT 0.
-PRINT "ALIGN: physics warp x2 engaged".
-
-
-// ------------------ normalize control ------------------
-UNLOCK STEERING.
-SET SAS TO FALSE.
-WAIT 0.
-
-
-// ------------------ RCS setup ------------------
-IF RCS_MODE >= 1 {
-    SET_RCS_POWER(100).
-}
-IF RCS_MODE = 1 {
-    // Mode 1: brief burst at start only
-    SET RCS TO TRUE.
-    WAIT 0.05.
-    SET RCS TO FALSE.
-} ELSE IF RCS_MODE = 2 {
-    // Mode 2: initial pulse burst
-    SET RCS TO TRUE.
-    WAIT 0.05.
-    SET RCS TO FALSE.
-} ELSE IF RCS_MODE = 3 {
-    // Mode 3: continuous RCS
-    SET RCS TO TRUE.
-}
-
-
-// ==================================================
-// Main alignment loop with restart capability
-// ==================================================
-LOCAL alignAttempts IS 0.
-LOCAL maxAttempts IS 3.
-LOCAL aligned IS FALSE.
-LOCAL method IS "KOS".
-
-// Capture initial error for precision RCS trigger
-LOCAL initialError IS VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR).
-LOCAL precisionThreshold IS initialError * 0.15.
-
-// Precision RCS control: halve RCS power when error < 15% of initial
-// Fires once during alignment to reduce overshoot
-IF RCS_MODE >= 1 AND precisionThreshold > 1 {
-    WHEN VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR) < precisionThreshold THEN {
-        SET_RCS_POWER(50).
-        PRINT "ALIGN: RCS halved for precision".
-    }
-}
-
-UNTIL alignAttempts >= maxAttempts {
-    SET alignAttempts TO alignAttempts + 1.
-    SET method TO DO_ALIGN().
-
-    LOCAL stuckTime IS 0.
-    LOCAL lastAngle IS 999.
-    LOCAL tStart IS TIME:SECONDS.
-
-
-    // Alignment loop (30 second timeout per attempt)
-    UNTIL TIME:SECONDS - tStart > 30 {
-        LOCAL errAngle IS VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR).
-        LOCAL angVel IS SHIP:ANGULARVEL:MAG.
-
-        // Success - aligned within 1 degree
-        IF errAngle < 1 {
-            PRINT "ALIGN: " + method + " aligned (" + ROUND(errAngle, 1) + " deg)".
-            SET aligned TO TRUE.
-            BREAK.
-        }
-
-        // Adaptive RCS thrust control (all RCS modes)
-        IF RCS_MODE >= 1 {
-            IF angVel > 0.1 {
-                SET_RCS_POWER(25).       // Fast rotation - prevent overshoot
-            } ELSE IF angVel > 0.05 {
-                SET_RCS_POWER(50).       // Medium rotation
-            } ELSE IF angVel < 0.01 AND errAngle > 5 {
-                SET_RCS_POWER(100).      // Stuck with large error - full power
-            } ELSE {
-                SET_RCS_POWER(75).       // Normal operation
-            }
-        }
-
-        // Mode 2: pulse RCS on/off each iteration
-        IF RCS_MODE = 2 {
-            SET RCS TO TRUE.
-            WAIT 0.05.
-            SET RCS TO FALSE.
-        }
-
-        // Stuck detection: no angle change + low angular velocity
-        IF ABS(errAngle - lastAngle) < 0.1 AND angVel < 0.005 AND errAngle > 2 {
-            SET stuckTime TO stuckTime + 0.2.
-            IF stuckTime > 2.0 {
-                PRINT "ALIGN: stuck, restarting (attempt " + alignAttempts + "/" + maxAttempts + ")".
-                UNLOCK STEERING.
-                SET_RCS_POWER(100).
-                WAIT 0.2.
-                BREAK.  // Exit inner loop, retry with DO_ALIGN
-            }
-        } ELSE {
-            SET stuckTime TO 0.
-        }
-
-        SET lastAngle TO errAngle.
-        WAIT 0.2.
-    }
-
-    IF aligned { BREAK. }
-}
-
-
-// ------------------ RCS end burst (mode 1) ------------------
-IF RCS_MODE = 1 {
-    SET RCS TO TRUE.
-    WAIT 0.025.
-}
-
-
-// ------------------ turn off RCS ------------------
-// RCS off after alignment - MechJeb handles the burn
-IF RCS_MODE >= 1 {
-    SET_RCS_POWER(100).  // Reset thrust limit for future use
-}
-SET RCS TO FALSE.
-WAIT 0.
-
-
-// ------------------ restore SAS (freeze attitude) ------------------
-SET SAS TO origSAS.
-WAIT 0.
-IF origSAS {
-    SET SASMODE TO "STABILITY".
-    WAIT 0.
-}
-
-
-// ------------------ clean warp exit ------------------
-SET KUNIVERSE:TIMEWARP:MODE TO "RAILS".
-WAIT 0.
-SET KUNIVERSE:TIMEWARP:RATE TO 0.
-WAIT 0.
-
-
-// ------------------ report final state ------------------
-LOCAL finalError IS ROUND(VANG(SHIP:FACING:FOREVECTOR, NEXTNODE:BURNVECTOR), 1).
-CLEARSCREEN.
-PRINT "ALIGN_COMPLETE:" + method + ":" + finalError.
+PRINT "This script is deprecated. See comments for new approach.".

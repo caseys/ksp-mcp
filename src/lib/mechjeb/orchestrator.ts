@@ -52,6 +52,8 @@ import type { McpLogger } from '../tool-types.js';
 /**
  * Options for maneuver orchestration.
  */
+import type { FineTuneFunction } from './execute-node.js';
+
 export interface ManeuverOptions {
   /** Target name (body or vessel) to set before planning. If omitted, uses current target. */
   target?: string;
@@ -69,6 +71,8 @@ export interface ManeuverOptions {
   xFromNowSeconds?: number;
   /** Target periapsis in meters (for RCS fine-tuning in course corrections). */
   targetPeriapsis?: number;
+  /** Optional post-burn fine-tuning function. Returns error: negative = undershoot, 0 = perfect, positive = overshoot. */
+  fineTuneFunction?: FineTuneFunction;
 }
 
 /**
@@ -103,7 +107,8 @@ export async function withTargetAndExecute(
   planFn: () => Promise<ManeuverResult>,
   logger?: McpLogger,
   callerTool?: string,
-  targetPeriapsis?: number
+  targetPeriapsis?: number,
+  fineTuneFunction?: FineTuneFunction
 ): Promise<OrchestratedResult> {
 
   // Handle target setting if provided (skip 'auto' - that should be resolved by caller)
@@ -146,7 +151,7 @@ export async function withTargetAndExecute(
   }
 
   // Execute the node
-  const execResult = await executeNode(conn, { logger, callerTool, targetPeriapsis });
+  const execResult = await executeNode(conn, { logger, callerTool, targetPeriapsis, fineTuneFunction });
 
   if (!execResult.success) {
     return {
@@ -385,7 +390,7 @@ export class ManeuverOrchestrator {
     capture: boolean = false,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool, rendezvous = true } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, rendezvous = true, fineTuneFunction } = options ?? {};
 
     // Get the target name for post-execution validation
     // We need this before execution since TARGET might change
@@ -400,7 +405,9 @@ export class ManeuverOrchestrator {
     const result = await withTargetAndExecute(this.conn, target, targetType, execute, () =>
       hohmannTransfer(this.conn, timeRef, capture, rendezvous),
       logger,
-      callerTool
+      callerTool,
+      undefined,  // targetPeriapsis
+      fineTuneFunction
     );
 
     // If planning failed or not executed, return as-is
