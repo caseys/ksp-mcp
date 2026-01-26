@@ -765,6 +765,10 @@ async function monitorLanding(
         if (statusText) {
           log.progress(`[Landing] ${statusText}`);
           lastNonThresholdLogTime = now;
+        } else if (timeElapsed) {
+          // Send heartbeat even for silent statuses to keep MCP connection alive
+          log.progress(`[Landing] ${rawStatus}`);
+          lastNonThresholdLogTime = now;
         }
       }
 
