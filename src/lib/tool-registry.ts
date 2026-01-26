@@ -84,7 +84,7 @@ import { statusTool } from './mechjeb/telemetry.js';
 import { clearNodesTool } from './kos/nodes.js';
 import { warpTool } from './kos/warp.js';
 import { crashAvoidanceTool } from './kos/crash-avoidance.js';
-import { loadSaveTool, listSavesTool, quicksaveTool } from './kos/kuniverse.js';
+import { loadSaveTool, listSavesTool, quicksaveTool, listShipsTool, loadShipTool, switchVesselTool } from './kos/kuniverse.js';
 import { runScriptTool } from './kos/run-script.js';
 
 // Connection tools
@@ -105,6 +105,7 @@ const GUARD_EXEMPT_TOOLS = new Set([
   'get_target_info',
   'get_targets',
   'list_saves',
+  'list_ships',
   'list_cpus',
   'abort_operation',
   'continue_operation',
@@ -144,6 +145,9 @@ export const allTools: ToolDefinition[] = [
   loadSaveTool,
   listSavesTool,
   quicksaveTool,
+  listShipsTool,
+  loadShipTool,
+  switchVesselTool,
 
   // === TIER -1 - Low-level Orbital (Hidden from LLM) ===
   crashAvoidanceTool,
