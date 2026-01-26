@@ -4,7 +4,8 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, queryWrongEncounterDetails, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, queryWrongEncounterDetails, parseNumber, type ManeuverResult } from '../shared.js';
+import type { FineTuneFunction } from '../execute-node.js';
 import { getTargetValidationInfo, type TargetInfo } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS, getVesselStateInfo } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
@@ -437,6 +438,82 @@ async function handleDetourScenario(
 // periapsis changes at distant targets due to orbital geometry. Instead,
 // use iterative MechJeb course correction nodes.
 
+// ============================================================================
+// Fine-Tune Function for Course Corrections
+// ============================================================================
+
+/**
+ * Create a fine tune function for course corrections to body targets.
+ * Queries target's atmosphere to determine optimal periapsis range.
+ */
+async function createCourseCorrectFineTune(
+  conn: KosConnection,
+  _targetName: string
+): Promise<FineTuneFunction | undefined> {
+  // Query target body's atmosphere height
+  const atmResult = await conn.queue(
+    'IF HASTARGET AND TARGET:ISTYPE("Body") { PRINT TARGET:ATM:HEIGHT. } ELSE { PRINT -1. }',
+    3000
+  );
+
+  if (!atmResult.success) {
+    return undefined;
+  }
+
+  const atmHeight = parseNumber(atmResult.output.trim()) ?? 0;
+  const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+  const maxOptimalPe = minSafePe + 50_000;
+
+  // Return fine-tune function that checks periapsis against optimal range
+  return async (conn: KosConnection): Promise<number> => {
+    // Query periapsis from current trajectory (after burn, no node)
+    // Use marker concatenation to avoid matching echo in output
+    const result = await conn.queue(
+      'IF SHIP:ORBIT:HASNEXTPATCH { PRINT "["+"PE"+"]" + ROUND(SHIP:ORBIT:NEXTPATCH:PERIAPSIS). } ELSE { PRINT "["+"NOENC"+"]". }',
+      3000
+    );
+
+    if (!result.success) {
+      console.error('[fine-tune] Query failed:', result.output);
+      return 0;
+    }
+
+    // Check for no encounter
+    if (result.output.includes('[NOENC]')) {
+      console.error('[fine-tune] No encounter detected');
+      return 0;
+    }
+
+    // Parse periapsis from [PE]<value> format
+    const match = result.output.match(/\[PE\](-?\d+)/);
+    if (!match) {
+      console.error('[fine-tune] Failed to parse periapsis from:', result.output);
+      return 0;
+    }
+
+    const periapsis = parseInt(match[1]);
+    console.error(`[fine-tune] Periapsis: ${periapsis}m, optimal range: [${minSafePe}, ${maxOptimalPe}]`);
+
+    // In optimal range - no adjustment needed
+    if (periapsis >= minSafePe && periapsis <= maxOptimalPe) {
+      console.error('[fine-tune] In optimal range, no adjustment needed');
+      return 0;
+    }
+
+    // Below optimal (including negative/impact): need prograde
+    if (periapsis < minSafePe) {
+      const error = periapsis - minSafePe;
+      console.error(`[fine-tune] Below optimal, error: ${error}m (need prograde)`);
+      return error;
+    }
+
+    // Above optimal: need retrograde
+    const error = periapsis - maxOptimalPe;
+    console.error(`[fine-tune] Above optimal, error: ${error}m (need retrograde)`);
+    return error;
+  };
+}
+
 /**
  * Query diagnostic info for error messages (TWR, body, gravitational parameter).
  * Returns formatted string to append to error messages.
@@ -827,6 +904,15 @@ export const courseCorrectTool: ToolDefinition = {
       let actualPe = 0;
       let totalBurns = 0;
 
+      // Create fine-tune function for body targets when executing
+      let fineTuneFunction: FineTuneFunction | undefined;
+      if (shouldExecute) {
+        const targetInfo = await getTargetValidationInfo(conn);
+        if (targetInfo && (targetInfo.class === 'moon' || targetInfo.class === 'planet')) {
+          fineTuneFunction = await createCourseCorrectFineTune(conn, target ?? targetInfo.name);
+        }
+      }
+
       for (let burn = 0; burn < MAX_BURNS; burn++) {
         logger?.info(`[CourseCorrect] Burn ${burn + 1}/${MAX_BURNS}: requesting ${(inputPe / 1000).toFixed(1)}km`);
 
@@ -835,6 +921,7 @@ export const courseCorrectTool: ToolDefinition = {
           execute: shouldExecute,
           logger,
           callerTool: 'course_correct',
+          fineTuneFunction,
         });
 
         // If no encounter on first try, do smart transfer (works for moons, planets, vessels)

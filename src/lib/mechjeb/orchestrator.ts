@@ -474,12 +474,13 @@ export class ManeuverOrchestrator {
     finalPeA: number,
     options?: ManeuverOptions
   ): Promise<OrchestratedResult> {
-    const { target, targetType = 'auto', execute = true, logger, callerTool } = options ?? {};
+    const { target, targetType = 'auto', execute = true, logger, callerTool, fineTuneFunction } = options ?? {};
     return withTargetAndExecute(this.conn, target, targetType, execute, () =>
       courseCorrection(this.conn, finalPeA, logger),
       logger,
       callerTool,
-      finalPeA  // Pass target periapsis for RCS fine-tuning
+      finalPeA,  // Pass target periapsis for RCS fine-tuning
+      fineTuneFunction  // Pass through to executeNode
     );
   }
 
