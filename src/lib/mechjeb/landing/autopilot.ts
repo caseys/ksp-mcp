@@ -1471,6 +1471,29 @@ export const landTool: ToolDefinition = {
         }
       }
 
+      // Set up WHEN trigger for post-landing stabilization
+      // This fires when SHIP:STATUS becomes "LANDED" and enables SAS radial-out + RCS
+      // to prevent the lander from tipping over after touchdown
+      {
+        const stabilizeTrigger = `
+          WHEN SHIP:STATUS = "LANDED" OR SHIP:STATUS = "SPLASHED" THEN {
+            SAS ON.
+            RCS ON.
+            SET SASMODE TO "RADIALOUT".
+            WAIT 10.
+            SET SASMODE TO "STABILITYASSIST".
+            RCS OFF.
+            RETURN FALSE.
+          }
+        `.trim().replaceAll('\n', ' ');
+        try {
+          await conn.queue(stabilizeTrigger, 5000);
+          logger.progress(`[Landing] SAS out of detent`);
+        } catch (e) {
+          logger.warn(`[Landing] Failed to arm attitude hold: ${e}`);
+        }
+      }
+
       // If wait=true, monitor until completion
       if (wait) {
         // Always pass separation config if we have a stage or tag - separation is deferred to onPoll
