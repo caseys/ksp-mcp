@@ -265,7 +265,7 @@ export async function validateNodeInCurrentPatch(
     'IF HASNODE AND SHIP:ORBIT:HASNEXTPATCH { ' +
     '  SET np TO SHIP:ORBIT:NEXTPATCH. ' +
     '  IF np:TRANSITION = "ENCOUNTER" OR np:TRANSITION = "ESCAPE" { ' +
-    '    PRINT NEXTNODE:ETA + "|" + (np:STARTTIME - TIME:SECONDS). ' +
+    '    PRINT NEXTNODE:ETA + "|" + SHIP:ORBIT:NEXTPATCHETA. ' +
     '  } ELSE { PRINT "OK". } ' +
     '} ELSE { PRINT "OK". }',
     3000

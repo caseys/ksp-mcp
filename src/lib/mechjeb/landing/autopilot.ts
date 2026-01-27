@@ -531,6 +531,7 @@ async function monitorLanding(
   let consecutiveDisabledCount = 0;
   let lastThresholdLogTime = Date.now();  // For threshold matches: every 10s
   let lastNonThresholdLogTime = Date.now();  // For status changes: state change OR 15s
+  let consecutiveSameStatusCount = 0;  // Track repeated status for warp nudging
 
   // Track deferred separation state (brake separation only - lander handled by WHEN trigger)
   let separationFired = false;
@@ -845,6 +846,26 @@ async function monitorLanding(
       const now = Date.now();
       const stateChanged = rawStatus !== lastStatusText;
       const timeElapsed = now - lastNonThresholdLogTime >= 15_000;
+
+      // Track consecutive same status for warp nudging
+      // When MechJeb is waiting (e.g., "Executing low orbit plane change"), nudge warp forward
+      if (stateChanged) {
+        consecutiveSameStatusCount = 0;
+      } else {
+        consecutiveSameStatusCount++;
+        // After seeing same status twice, nudge warp by 1 (max 4x)
+        if (consecutiveSameStatusCount >= 2) {
+          try {
+            const warpCheck = await conn.queue('PRINT WARP.', 2000);
+            const currentWarp = parseInt(warpCheck.output.match(/(\d+)/)?.[1] ?? '0');
+            if (currentWarp < 4) {
+              await conn.raw(`SET WARP TO ${currentWarp + 1}.`, 2000);
+              log.info(`[Landing] Nudging warp to ${currentWarp + 1}x (waiting for MechJeb)`);
+            }
+          } catch { /* ignore warp errors */ }
+          consecutiveSameStatusCount = 0; // Reset after nudge
+        }
+      }
 
       if (stateChanged || timeElapsed) {
         lastStatusText = rawStatus;
@@ -1439,6 +1460,12 @@ export const landTool: ToolDefinition = {
       // Get status after starting
       const status = await getLandingStatus(conn);
       logger.progress(`[Landing] ${status.status}`);
+
+      // Set up staging trigger for multi-stage landing
+      await conn.queue(
+        'WHEN STAGE:DELTAV:CURRENT < 1 THEN { STAGE. PRINT "Auto-staged during landing". }',
+        3000
+      );
 
       // Set up WHEN trigger for lander separation (3-stage airless designs only)
       // This fires automatically when deorbit burn ends, before braking burn starts
