@@ -13,6 +13,7 @@ import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
+import { SocketTransport } from '../../transport/socket-transport.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 import { invalidateStatusCache } from './telemetry.js';
@@ -605,6 +606,35 @@ export async function executeNode(
     await limitEngineThrust(conn, SMALL_BURN_THRUST_LIMIT, log);
   }
 
+  // Set up post-burn blackout recovery: warp forward after burn completes
+  // so TypeScript can regain communication if vessel is behind a body.
+  //
+  // Detection: dV dropped (burn happened) AND MechJeb idle AND flag not cleared.
+  // TypeScript clears _MCP_POST_BURN_WARP when it handles post-burn normally.
+  // If TypeScript can't communicate (blackout), flag stays set and trigger warps.
+  // 10-second delay lets TypeScript clear the flag if it has connection.
+  await conn.raw(
+    `SET _MCP_PRE_BURN_DV TO SHIP:DELTAV:CURRENT. ` +
+    `SET _MCP_POST_BURN_WARP TO TRUE. ` +
+    `WHEN SHIP:DELTAV:CURRENT < _MCP_PRE_BURN_DV - 10 AND ADDONS:MJ:NODE:STATE = "IDLE" AND _MCP_POST_BURN_WARP THEN { ` +
+      `WAIT 10. ` +
+      `IF _MCP_POST_BURN_WARP { ` +
+        `PRINT "Post-burn warp to restore radio". ` +
+        `SET _MCP_WARP_COUNT TO 0. ` +
+        `UNTIL HOMECONNECTION:ISCONNECTED OR NOT _MCP_POST_BURN_WARP OR _MCP_WARP_COUNT > 20 { ` +
+          `SET _MCP_WARP_COUNT TO _MCP_WARP_COUNT + 1. ` +
+          `PRINT "Warp " + _MCP_WARP_COUNT + " - no radio contact". ` +
+          `KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + 300). ` +
+          `WAIT UNTIL KUNIVERSE:TIMEWARP:WARP = 0. ` +
+          `WAIT 15. ` +
+        `} ` +
+        `IF HOMECONNECTION:ISCONNECTED { PRINT "Radio contact restored!". } ` +
+        `SET _MCP_POST_BURN_WARP TO FALSE. ` +
+      `} ` +
+    `}`,
+    3000
+  );
+
   // Enable MechJeb executor BEFORE warp — vessel may enter radio blackout on arrival
   // Disable MechJeb's autowarp so it doesn't interfere with our WARPTO
   await conn.raw('SET ADDONS:MJ:NODE:AUTOWARP TO FALSE.', 3000);
@@ -637,18 +667,129 @@ export async function executeNode(
     const warpTargetSeconds = nodeEta - warpLeadTime;
     await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
 
+    // Suppress resetConnection() during warp — blackout recovery needs the TCP
+    // socket alive. Without this, queue() → comsTest() failure → resetConnection()
+    // closes the socket and nulls the transport before we can watch for recovery.
+    conn.suppressReset = true;
+    const transport = conn.getTransport();
+
     // Wait for warp to complete (poll until ETA is close or warp stops)
     let warpAttempts = 0;
-    let consecutiveFailures = 0;
     let lastLoggedEta = nodeEta;
     let lastLogTime = Date.now();
-    const maxWarpAttempts = 240; // Max 10 minutes of warp checking (2.5s poll interval)
-    const maxConsecutiveFailures = 12; // Exit after 30s of failures (assume warp done or connection lost)
+    let signalLost = false;
+    const maxWarpAttempts = 240;
 
     while (warpAttempts < maxWarpAttempts) {
       await delay(2500);
+
+      // Early blackout detection: check buffer for "Signal lost" text
+      // kOS sends this during blackout — appears in transport buffer automatically
+      if (!signalLost && transport) {
+        const buf = transport.peekBuffer();
+        if (buf.includes('Signal lost')) {
+          signalLost = true;
+          log.progress(`${logPrefix} Blackout detected (Signal lost) — launching probe...`);
+        }
+      }
+
+      // On signal loss: stop queue() calls, launch probe immediately
+      if (signalLost) {
+        const cpuId = conn.getState().cpuId;
+        let recovered = false;
+
+        // Spawn independent probe connection
+        const probe = new SocketTransport(config.kos.host, config.kos.port);
+        try {
+          await probe.init();
+          await probe.waitFor('Choose a CPU', 5000);
+          log.progress(`${logPrefix} Probe: kOS alive, selecting CPU ${cpuId}...`);
+
+          await probe.send(String(cpuId) + '\r\n');
+          await new Promise(r => setTimeout(r, 1000));
+          await probe.read(); // Clear attach output + Signal lost text
+
+          // Poll with concatenated markers — echo won't contain complete marker
+          for (let i = 0; i < 300; i++) {
+            await delay(1000);
+
+            // Check original transport for "Choose a CPU" (radio returned)
+            if (transport?.isOpen()) {
+              const origBuf = transport.peekBuffer();
+              if (origBuf.includes('Choose a CPU')) {
+                log.progress(`${logPrefix} Original connection: radio returned! Reattaching...`);
+                await transport.read();
+                await transport.send(String(cpuId) + '\r\n');
+                await new Promise(r => setTimeout(r, 500));
+                await transport.read();
+                // Verify with concatenated marker
+                const vMarker = `BL_${Date.now()}`;
+                await transport.send(`PRINT "["+"${vMarker}"+"]".\n`);
+                try {
+                  await transport.waitFor(`[${vMarker}]`, 3000);
+                  recovered = true;
+                  break;
+                } catch {
+                  log.warn(`${logPrefix} Reattach verify failed`);
+                }
+              }
+            }
+
+            // Probe: send PRINT with concatenated marker
+            const ts = Date.now();
+            await probe.send(`PRINT "["+"PROBE_${ts}"+"]".\n`);
+            try {
+              await probe.waitFor(`[PROBE_${ts}]`, 2000);
+              log.progress(`${logPrefix} Probe: radio returned!`);
+              // Wait for original connection to get "Choose a CPU"
+              await delay(3000);
+              // Check original again
+              if (transport?.isOpen()) {
+                const origBuf = transport.peekBuffer();
+                if (origBuf.includes('Choose a CPU')) {
+                  await transport.read();
+                  await transport.send(String(cpuId) + '\r\n');
+                  await new Promise(r => setTimeout(r, 500));
+                  await transport.read();
+                  const vMarker = `BL_${Date.now()}`;
+                  await transport.send(`PRINT "["+"${vMarker}"+"]".\n`);
+                  try {
+                    await transport.waitFor(`[${vMarker}]`, 3000);
+                    recovered = true;
+                  } catch { /* verify failed */ }
+                }
+              }
+              if (!recovered) {
+                // Probe says radio is back but original didn't recover — still ok
+                log.progress(`${logPrefix} Probe confirmed radio, original transport needs reconnect`);
+                recovered = true;
+              }
+              break;
+            } catch {
+              // Still in blackout
+            }
+
+            if (i % 10 === 9) {
+              log.progress(`${logPrefix} Still in blackout... (${i + 1}s)`);
+            }
+          }
+        } catch (err) {
+          log.warn(`${logPrefix} Probe failed: ${err instanceof Error ? err.message : String(err)}`);
+        } finally {
+          await probe.close().catch(() => {});
+        }
+
+        if (recovered) {
+          log.progress(`${logPrefix} Signal reacquired — burn complete`);
+          try { await transport?.send?.('SET _MCP_POST_BURN_WARP TO FALSE.\n'); } catch { /* ignore */ }
+        } else {
+          log.warn(`${logPrefix} Could not reacquire signal after 5 minutes`);
+        }
+        break;
+      }
+
+      // Normal warp polling with queue()
       try {
-        // Query node status and warp level (NOT MechJeb state - it's not enabled yet)
         const statusResult = await conn.queue(
           'PRINT HASNODE + "|" + WARP + "|" + (CHOOSE NEXTNODE:ETA IF HASNODE ELSE 0).',
           2000
@@ -658,17 +799,17 @@ export async function executeNode(
         const warpLevel = parseNumber(parts[1] || '0');
         const currentEta = parseNumber(parts[2] || '0');
 
-        consecutiveFailures = 0; // Reset on successful query
-
-        // If node is gone — but verify with a second check to avoid false negatives from garbled output
+        // If node appears gone — verify with a second check
         if (!hasNode) {
           await delay(500);
           const recheck = await conn.queue('PRINT HASNODE.', 2000);
-          if (!recheck.success || !recheck.output.includes('True')) {
+          if (recheck.success && recheck.output.includes('False')) {
             log.progress(`${logPrefix} Node gone during warp`);
             break;
           }
-          // False negative — node still exists, continue warp loop
+          if (!recheck.success) {
+            throw new Error('Connection lost during HASNODE recheck');
+          }
         }
 
         // Exit if ETA is low enough
@@ -677,39 +818,33 @@ export async function executeNode(
           break;
         }
 
-        // Exit if warp stopped (warp level = 0 means we've arrived)
+        // Exit if warp stopped
         if (warpLevel === 0 && warpAttempts > 2) {
           log.progress(`${logPrefix} Warp complete, ${formatTime(currentEta)} to ignition`);
           break;
         }
 
-        // Log if ETA changed significantly OR every 15 seconds
+        // Log progress
         const now = Date.now();
         const etaChanged = Math.abs(currentEta - lastLoggedEta) > 30;
         const timeElapsed = now - lastLogTime >= 15_000;
-
         if (etaChanged || timeElapsed) {
           log.progress(`${logPrefix} Warping... ignition in ${formatTime(currentEta)}`);
           lastLoggedEta = currentEta;
           lastLogTime = now;
         }
       } catch {
-        // May be in blackout during warp - that's fine
-        consecutiveFailures++;
-        if (consecutiveFailures >= maxConsecutiveFailures) {
-          // Too many consecutive failures - assume warp complete or failed, proceed to burn phase
-          log.progress(`${logPrefix} Warp query timeout - proceeding to burn phase`);
-          break;
-        }
-        const now = Date.now();
-        if (now - lastLogTime >= 15_000) {
-          log.progress(`${logPrefix} Warp in progress (no signal)`);
-          lastLogTime = now;
-        }
+        // queue() failed — signal lost, stop calling queue()
+        signalLost = true;
+        log.progress(`${logPrefix} Signal lost (queue failed) — launching probe...`);
+        continue;
       }
       warpAttempts++;
     }
   }
+
+  // Re-enable normal reset behavior
+  conn.suppressReset = false;
 
   // Best-effort post-warp cleanup (may fail in blackout — that's OK, MechJeb is already enabled)
   await conn.raw('RCS OFF.', 2000).catch(() => {});
@@ -957,6 +1092,9 @@ export async function executeNode(
       const state = result.result;
 
       if (state.noNode || state.burnComplete) {
+        // Clear post-burn warp flag — we have connection, no need for kOS WHEN trigger to warp
+        try { await conn.raw('SET _MCP_POST_BURN_WARP TO FALSE.', 2000); } catch { /* ignore */ }
+
         // All cleanup commands wrapped in try/catch to prevent stalls if connection dies
         try { await stopWarp(conn); } catch { /* ignore */ }
 

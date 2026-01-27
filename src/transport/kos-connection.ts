@@ -85,6 +85,10 @@ export class KosConnection {
   // Command serialization lock to prevent interleaved commands
   private commandLock: Promise<void> = Promise.resolve();
 
+  // When true, resetConnection() skips closing the transport.
+  // Used during blackout recovery to preserve the TCP socket for watching.
+  private _suppressReset = false;
+
   constructor(options: KosConnectionOptions = {}) {
     this.options = {
       host: options.host ?? config.kos.host,
@@ -281,7 +285,15 @@ export class KosConnection {
    * Unlike forceReleaseLock(), this avoids garbled output by ensuring
    * no in-flight commands can interfere with subsequent commands.
    */
+  /** Suppress resetConnection() from closing the transport (for blackout recovery) */
+  set suppressReset(value: boolean) { this._suppressReset = value; }
+
   resetConnection(): void {
+    // When suppressed, skip closing transport — blackout recovery needs the socket alive
+    if (this._suppressReset) {
+      return;
+    }
+
     // Close transport to kill any pending I/O
     if (this.transport) {
       this.transport.close().catch(() => {});
@@ -632,6 +644,57 @@ export class KosConnection {
       // Timeout or error - couldn't detach, vessel likely crashed
       return false;
     }
+  }
+
+  /**
+   * Recover from radio blackout by reattaching to the CPU.
+   *
+   * During blackout, the kOS telnet server detaches the CPU session
+   * ("Detaching from CPU") but the TCP socket stays alive. This method
+   * uses the existing socket to: Ctrl+D back to CPU menu → reattach → verify.
+   *
+   * @returns true if recovered and commands work, false if still in blackout
+   */
+  async recoverFromBlackout(): Promise<boolean> {
+    if (!this.transport || !this.transport.isOpen()) {
+      return false;
+    }
+    const cpuId = this.state.cpuId;
+    if (!cpuId) return false;
+
+    // During blackout: session stays attached, commands echo but no output.
+    // When radio returns: kOS kicks us back to "Choose a CPU" menu.
+    // So recovery = detect menu in buffer → reattach → verify.
+
+    // Step 1: Check outputBuffer for CPU menu — kOS sends "Choose a CPU"
+    // when radio returns. SocketTransport populates outputBuffer automatically
+    // via the socket 'data' event, so peekBuffer sees it instantly.
+    const buffer = this.transport.peekBuffer?.() ?? '';
+    if (!buffer.includes('Choose a CPU')) {
+      return false; // Still in blackout — instant, no bytes sent
+    }
+    await this.transport.read(); // Clear the buffered menu
+    await this.transport.send(String(cpuId) + '\r\n');
+    await new Promise(r => setTimeout(r, 500));
+    await this.transport.read(); // Clear attach output
+
+    // Step 3: Verify with raw PRINT (no queue/markers)
+    const marker = `MCP_BL_${Date.now()}`;
+    await this.transport.send(`PRINT "${marker}".\n`);
+    try {
+      const response = await this.transport.waitFor(marker, 3000);
+      if (response.includes(marker)) {
+        this.state.connected = true;
+        this.state.lastError = null;
+        this.lastComsTestPass = 0;
+        return true;
+      }
+    } catch {
+      // Reattach failed
+    }
+
+    this.state.connected = false;
+    return false;
   }
 
   /**
