@@ -441,15 +441,20 @@ export async function executeNode(
   }
 
   // Safety: reject nodes with negative periapsis (crash trajectory)
-  const nodePeResult = await conn.queue('PRINT ROUND(NEXTNODE:ORBIT:PERIAPSIS).', 3000);
-  const nodePeM = Number.parseFloat(nodePeResult.success ? nodePeResult.output.match(/[-\d.]+/)?.[0] ?? '0' : '0');
-  if (nodePeM < 0) {
-    await clearNodes(conn);
-    return {
-      success: false,
-      nodesExecuted: 0,
-      error: `Planned node results in periapsis ${Math.round(nodePeM / 1000)}km below surface. Aborting — node would crash into body.`,
-    };
+  // Only check on elliptical orbits — NEXTNODE:ORBIT:PERIAPSIS errors on hyperbolic
+  const preNodeEcc = await queryNumber(conn, 'ORBIT:ECCENTRICITY');
+  if (preNodeEcc < 1) {
+    const nodePeResult = await conn.queue('PRINT ROUND(NEXTNODE:ORBIT:PERIAPSIS).', 3000);
+    const nodePeM = Number.parseFloat(nodePeResult.success ? nodePeResult.output.match(/[-\d.]+/)?.[0] ?? '0' : '0');
+    if (nodePeM < 0) {
+      log.info(`${logPrefix} Node periapsis: ${Math.round(nodePeM / 1000)}km — clearing crash node`);
+      await clearNodes(conn);
+      return {
+        success: false,
+        nodesExecuted: 0,
+        error: `Planned node results in periapsis ${Math.round(nodePeM / 1000)}km below surface. Aborting — node would crash into body.`,
+      };
+    }
   }
 
   // Get initial node count
@@ -600,10 +605,24 @@ export async function executeNode(
     await limitEngineThrust(conn, SMALL_BURN_THRUST_LIMIT, log);
   }
 
+  // Enable MechJeb executor BEFORE warp — vessel may enter radio blackout on arrival
+  // Disable MechJeb's autowarp so it doesn't interfere with our WARPTO
+  await conn.raw('SET ADDONS:MJ:NODE:AUTOWARP TO FALSE.', 3000);
+  log.progress(`${logPrefix} Enabling MechJeb node executor...`);
+  await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+  await delay(500);
+
+  // Verify MechJeb is enabled
+  const verifyEnable = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
+  if (!verifyEnable.output.includes('True')) {
+    log.warn(`${logPrefix} MechJeb executor not enabled, retrying...`);
+    await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
+    await delay(500);
+  }
+
   // Warp to node if it's far away and warp is enabled
   // Warp target: node time - (burn time / 2) - 15 seconds for alignment
   // This ensures we arrive 15s before the burn should START (not before node time)
-  // IMPORTANT: Do NOT enable MechJeb until after warp - it interferes with time warp
   await stopWarp(conn);
   await conn.raw('UNLOCK STEERING. SAS OFF.', 3000);
 
@@ -613,6 +632,7 @@ export async function executeNode(
 
   if (nodeEta > warpLeadTime + 10 && config.warp.onRails) {
     log.progress(`${logPrefix} Helm, course set for maneuver. Ignition in ${formatTime(nodeEta)}... Engage!`);
+    log.info(`${logPrefix} Warp params: nodeEta=${Math.round(nodeEta)}s, halfBurn=${Math.round(halfBurn)}s, leadTime=${Math.round(warpLeadTime)}s, warpFor=${Math.round(nodeEta - warpLeadTime)}s`);
 
     const warpTargetSeconds = nodeEta - warpLeadTime;
     await conn.raw(`KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + ${warpTargetSeconds}).`, 5000);
@@ -640,10 +660,15 @@ export async function executeNode(
 
         consecutiveFailures = 0; // Reset on successful query
 
-        // If node is gone, burn already happened (shouldn't happen without MechJeb, but check anyway)
+        // If node is gone — but verify with a second check to avoid false negatives from garbled output
         if (!hasNode) {
-          log.progress(`${logPrefix} Burn complete`);
-          break;
+          await delay(500);
+          const recheck = await conn.queue('PRINT HASNODE.', 2000);
+          if (!recheck.success || !recheck.output.includes('True')) {
+            log.progress(`${logPrefix} Node gone during warp`);
+            break;
+          }
+          // False negative — node still exists, continue warp loop
         }
 
         // Exit if ETA is low enough
@@ -686,36 +711,16 @@ export async function executeNode(
     }
   }
 
-  // Ensure RCS is off after alignment (MechJeb will control it during burn)
-  await conn.raw('RCS OFF.', 2000);
+  // Best-effort post-warp cleanup (may fail in blackout — that's OK, MechJeb is already enabled)
+  await conn.raw('RCS OFF.', 2000).catch(() => {});
 
-  // Lock roll to prevent MechJeb from inducing roll during burn
-  // Uses current top vector to maintain current roll orientation
-  await conn.raw('LOCK STEERING TO LOOKDIRUP(NEXTNODE:BURNVECTOR, SHIP:FACING:TOPVECTOR).', 3000);
-
-  // NOW enable MechJeb executor - after warp is complete
-  // This ensures burn will complete even if we warp into a blackout zone
-  // MechJeb runs on the vessel autonomously once enabled
-  await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
-  await delay(500); // Give MechJeb time to initialize
-
-  // Verify MechJeb is actually enabled
-  const verifyEnable = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
-  if (!verifyEnable.output.includes('True')) {
-    log.warn(`${logPrefix} MechJeb executor not enabled, retrying...`);
-    await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
-    await delay(500);
-
-    // Second verification
-    const verifyAgain = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED.', 2000);
-    if (!verifyAgain.output.includes('True')) {
-      log.error(`${logPrefix} MechJeb executor FAILED to enable`);
+  // Log MechJeb state (best-effort — may be in blackout)
+  try {
+    const initialState = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE.', 2000);
+    if (initialState.success) {
+      log.progress(`${logPrefix} MechJeb: ${initialState.output.trim()}`);
     }
-  }
-
-  // Log initial MechJeb state
-  const initialState = await conn.queue('PRINT ADDONS:MJ:NODE:ENABLED + "|" + ADDONS:MJ:NODE:STATE.', 2000);
-  log.progress(`${logPrefix} MechJeb: ${initialState.output.trim()}`);
+  } catch { /* blackout */ }
 
   // Poll state interface for burn monitoring
   interface BurnPollState {

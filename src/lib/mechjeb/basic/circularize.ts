@@ -219,17 +219,17 @@ export const circularizeTool: ToolDefinition = {
       const orchestrator = new ManeuverOrchestrator(conn);
 
       // Auto-detect best timeRef if 'auto'
+      // Re-query ecc and Pe since orbit may have changed after crash avoidance
       let timeRef = args.timeRef as string;
       if (timeRef === 'auto') {
+        // Query ecc and Pe first (safe on any orbit) — do NOT query ETA:APOAPSIS on hyperbolic orbits
         const orbitInfo = await conn.queue(
-          'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ETA:APOAPSIS + "|" + ETA:PERIAPSIS + "|" + ROUND(PERIAPSIS).',
+          'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ROUND(PERIAPSIS).',
           2000
         );
         const parts = orbitInfo.success ? orbitInfo.output.split('|').map(s => s.trim()) : [];
         const ecc = Number.parseFloat(parts[0] ?? '0');
-        const etaApo = Number.parseFloat(parts[1] ?? '0');
-        const etaPe = Number.parseFloat(parts[2] ?? '0');
-        const currentPe = Number.parseFloat(parts[3]?.match(/[\d.-]+/)?.[0] ?? '0');
+        const currentPe = Number.parseFloat(parts[1]?.match(/[\d.-]+/)?.[0] ?? '0');
 
         if (ecc >= 1) {
           timeRef = 'PERIAPSIS';  // Hyperbolic orbit - no apoapsis
@@ -253,6 +253,11 @@ export const circularizeTool: ToolDefinition = {
             logger.progress(`[Circularize] Periapsis lowered, proceeding with circularization`);
           }
         } else {
+          // Elliptical orbit — safe to query ETA:APOAPSIS
+          const etaInfo = await conn.queue('PRINT ETA:APOAPSIS + "|" + ETA:PERIAPSIS.', 2000);
+          const etaParts = etaInfo.success ? etaInfo.output.split('|').map(s => s.trim()) : [];
+          const etaApo = Number.parseFloat(etaParts[0] ?? '0');
+          const etaPe = Number.parseFloat(etaParts[1] ?? '0');
           timeRef = etaApo < etaPe ? 'APOAPSIS' : 'PERIAPSIS';  // Nearest apse
         }
       }

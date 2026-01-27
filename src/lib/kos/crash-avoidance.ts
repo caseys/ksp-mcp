@@ -14,7 +14,6 @@ import { queryNumber, unlockControls } from '../mechjeb/shared.js';
 import { delay } from '../utils/progress.js';
 import { fmtDist, fmtVel } from '../utils/format.js';
 import { areWorkaroundsEnabled } from '../../config/workarounds.js';
-import { executeNode } from '../mechjeb/execute-node.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 
 export interface CrashAvoidanceResult {
@@ -101,41 +100,6 @@ async function checkLandingDeltaV(conn: KosConnection): Promise<{dvLand: number,
   }
 
   return { dvLand, dvOrbit, landingCheaper };
-}
-
-/**
- * Attempt to circularize after crash avoidance.
- * Skips if apoapsis is negative or orbit is hyperbolic (uses PERIAPSIS in that case).
- */
-async function attemptCircularize(
-  conn: KosConnection,
-  currentAp: number,
-  log: McpLogger
-): Promise<boolean> {
-  // Pick timeRef: never use APOAPSIS if it's negative or doesn't exist
-  const ecc = await queryNumber(conn, 'ORBIT:ECCENTRICITY');
-  const timeRef = (ecc >= 1 || currentAp < 0) ? 'PERIAPSIS' : 'APOAPSIS';
-
-  log.info(`[CrashAvoidance] Circularize at ${timeRef} (ecc=${ecc.toFixed(3)}, Ap=${(currentAp / 1000).toFixed(1)}km)`);
-
-  const circResult = await conn.queue(
-    `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("${timeRef}").`,
-    10_000
-  );
-
-  if (!circResult.output.includes('True')) {
-    log.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
-    return false;
-  }
-
-  log.progress('[CrashAvoidance] Circularization node created, executing...');
-  const execResult = await executeNode(conn, { logger: log });
-  if (execResult.success) {
-    log.progress('[CrashAvoidance] Circularization complete!');
-    return true;
-  }
-  log.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
-  return false;
 }
 
 /**
@@ -241,7 +205,7 @@ export async function crashAvoidance(
   let currentPe = initialPe;
   let burnSuccess = false;
   let lastThrottle = -1;
-  let circularized = false;
+  const circularized = false;
 
   // Set up throttle control variable in kOS
   await conn.raw('SET MCP_THR TO 0.', 2000);
@@ -284,22 +248,11 @@ export async function crashAvoidance(
       }
     }
 
-    // Check if safe - if so, transition to circularization
+    // Check if safe — stop burn and return to caller for circularization
     if (isSafe) {
       log.progress(`[CrashAvoidance] Safe! ${safetyLabel} > ${(targetPeriapsis / 1000).toFixed(1)}km target`);
-
-      // Stop throttle
       await conn.raw('SET MCP_THR TO 0.', 2000);
       await unlockControls(conn);
-
-      // Only attempt circularization if Pe is positive (above surface)
-      if (currentPe > 0) {
-        log.progress('[CrashAvoidance] Transitioning to circularization...');
-        const circOk = await attemptCircularize(conn, currentAp, log);
-        if (circOk) {
-          circularized = true;
-        }
-      }
       burnSuccess = true;
       break;
     }
@@ -308,16 +261,9 @@ export async function crashAvoidance(
     // This happens when navmode switches and SAS RADIALOUT changes direction
     const upAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR)');
     if (upAngle > HORIZONTAL_ANGLE_THRESHOLD && currentPe > 0) {
-      log.progress(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), Pe safe — transitioning to circularization...`);
-
-      // Stop throttle
+      log.progress(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), Pe safe — stopping burn`);
       await conn.raw('SET MCP_THR TO 0.', 2000);
       await unlockControls(conn);
-
-      const circOk = await attemptCircularize(conn, currentAp, log);
-      if (circOk) {
-        circularized = true;
-      }
       burnSuccess = true;
       break;
     }
