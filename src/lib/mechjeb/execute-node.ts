@@ -16,6 +16,7 @@ import { stopWarp } from '../kos/warp.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 import { invalidateStatusCache } from './telemetry.js';
+import { clearNodes } from '../kos/nodes.js';
 export interface ExecuteNodeResult {
   success: boolean;
   nodesExecuted: number;
@@ -437,6 +438,18 @@ export async function executeNode(
   const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
   if (!nodeCheck.success || !nodeCheck.output.includes('True')) {
     return { success: false, nodesExecuted: 0, error: 'No maneuver node found' };
+  }
+
+  // Safety: reject nodes with negative periapsis (crash trajectory)
+  const nodePeResult = await conn.queue('PRINT ROUND(NEXTNODE:ORBIT:PERIAPSIS).', 3000);
+  const nodePeM = Number.parseFloat(nodePeResult.success ? nodePeResult.output.match(/[-\d.]+/)?.[0] ?? '0' : '0');
+  if (nodePeM < 0) {
+    await clearNodes(conn);
+    return {
+      success: false,
+      nodesExecuted: 0,
+      error: `Planned node results in periapsis ${Math.round(nodePeM / 1000)}km below surface. Aborting — node would crash into body.`,
+    };
   }
 
   // Get initial node count

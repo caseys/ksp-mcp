@@ -104,6 +104,41 @@ async function checkLandingDeltaV(conn: KosConnection): Promise<{dvLand: number,
 }
 
 /**
+ * Attempt to circularize after crash avoidance.
+ * Skips if apoapsis is negative or orbit is hyperbolic (uses PERIAPSIS in that case).
+ */
+async function attemptCircularize(
+  conn: KosConnection,
+  currentAp: number,
+  log: McpLogger
+): Promise<boolean> {
+  // Pick timeRef: never use APOAPSIS if it's negative or doesn't exist
+  const ecc = await queryNumber(conn, 'ORBIT:ECCENTRICITY');
+  const timeRef = (ecc >= 1 || currentAp < 0) ? 'PERIAPSIS' : 'APOAPSIS';
+
+  log.info(`[CrashAvoidance] Circularize at ${timeRef} (ecc=${ecc.toFixed(3)}, Ap=${(currentAp / 1000).toFixed(1)}km)`);
+
+  const circResult = await conn.queue(
+    `SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("${timeRef}").`,
+    10_000
+  );
+
+  if (!circResult.output.includes('True')) {
+    log.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
+    return false;
+  }
+
+  log.progress('[CrashAvoidance] Circularization node created, executing...');
+  const execResult = await executeNode(conn, { logger: log });
+  if (execResult.success) {
+    log.progress('[CrashAvoidance] Circularization complete!');
+    return true;
+  }
+  log.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
+  return false;
+}
+
+/**
  * Emergency burn to raise periapsis above target altitude.
  *
  * Uses RCS and SAS to point radial-out, then burns at full throttle
@@ -252,69 +287,38 @@ export async function crashAvoidance(
     // Check if safe - if so, transition to circularization
     if (isSafe) {
       log.progress(`[CrashAvoidance] Safe! ${safetyLabel} > ${(targetPeriapsis / 1000).toFixed(1)}km target`);
-      log.progress('[CrashAvoidance] Transitioning to circularization...');
 
       // Stop throttle
       await conn.raw('SET MCP_THR TO 0.', 2000);
       await unlockControls(conn);
 
-      // Create circularization node at apoapsis
-      const circResult = await conn.queue(
-        'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("APOAPSIS").',
-        10_000
-      );
-
-      if (circResult.output.includes('True')) {
-        log.progress('[CrashAvoidance] Circularization node created, executing...');
-        const execResult = await executeNode(conn, { logger: log });
-        if (execResult.success) {
-          log.progress('[CrashAvoidance] Circularization complete!');
-          burnSuccess = true;
+      // Only attempt circularization if Pe is positive (above surface)
+      if (currentPe > 0) {
+        log.progress('[CrashAvoidance] Transitioning to circularization...');
+        const circOk = await attemptCircularize(conn, currentAp, log);
+        if (circOk) {
           circularized = true;
-        } else {
-          log.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
-          burnSuccess = true; // Still safe, just didn't circularize
         }
-      } else {
-        log.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
-        burnSuccess = true; // Still safe, just didn't circularize
       }
+      burnSuccess = true;
       break;
     }
 
     // Monitor angle to UP to detect when ship is tilting toward horizontal
     // This happens when navmode switches and SAS RADIALOUT changes direction
     const upAngle = await queryNumber(conn, 'VANG(SHIP:FACING:FOREVECTOR, SHIP:UP:FOREVECTOR)');
-    if (upAngle > HORIZONTAL_ANGLE_THRESHOLD) {
-      log.progress(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), transitioning to circularization...`);
+    if (upAngle > HORIZONTAL_ANGLE_THRESHOLD && currentPe > 0) {
+      log.progress(`[CrashAvoidance] Ship horizontal (${upAngle.toFixed(1)}°), Pe safe — transitioning to circularization...`);
 
       // Stop throttle
       await conn.raw('SET MCP_THR TO 0.', 2000);
       await unlockControls(conn);
 
-      log.info(`[CrashAvoidance] Current apoapsis: ${(currentAp / 1000).toFixed(1)} km`);
-
-      // Create circularization node at apoapsis
-      const circResult = await conn.queue(
-        'SET PLANNER TO ADDONS:MJ:MANEUVERPLANNER. PRINT PLANNER:CIRCULARIZE("APOAPSIS").',
-        10_000
-      );
-
-      if (circResult.output.includes('True')) {
-        log.progress('[CrashAvoidance] Circularization node created, executing...');
-
-        // Execute the circularization burn
-        const execResult = await executeNode(conn, { logger: log });
-        if (execResult.success) {
-          log.progress('[CrashAvoidance] Circularization complete!');
-          burnSuccess = true;
-          circularized = true;
-        } else {
-          log.error(`[CrashAvoidance] Circularization failed: ${execResult.error}`);
-        }
-      } else {
-        log.error(`[CrashAvoidance] Failed to create circularization node: ${circResult.output}`);
+      const circOk = await attemptCircularize(conn, currentAp, log);
+      if (circOk) {
+        circularized = true;
       }
+      burnSuccess = true;
       break;
     }
 

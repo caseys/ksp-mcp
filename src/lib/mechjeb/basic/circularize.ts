@@ -10,7 +10,7 @@ import { clearNodes } from '../../kos/nodes.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema } from '../../tool-types.js';
-import { formatTime,  fmtVel } from '../../utils/format.js';
+import { formatTime, fmtVel, fmtDist } from '../../utils/format.js';
 
 /**
  * Create a maneuver node to circularize the orbit.
@@ -173,24 +173,47 @@ export const circularizeTool: ToolDefinition = {
       // Clear any leftover nodes from failed operations
       await clearNodes(conn);
 
-      // Check if already circular - return early to prevent loop
-      // Use both eccentricity AND altitude ratio to determine if circular
-      const orbitCheck = await conn.queue(
-        'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(APOAPSIS/1000) + "|" + ROUND(PERIAPSIS/1000).',
+      // Check orbit shape — query Pe and ecc first (APOAPSIS may not exist on crash/hyperbolic orbits)
+      const peEccCheck = await conn.queue(
+        'PRINT ROUND(ORBIT:ECCENTRICITY, 4) + "|" + ROUND(PERIAPSIS).',
         2000
       );
-      const parts = orbitCheck.success ? orbitCheck.output.split('|').map(s => s.trim()) : [];
-      const currentEcc = Number.parseFloat(parts[0]?.match(/[\d.]+/)?.[0] ?? '1');
-      const apoKm = Number.parseFloat(parts[1] ?? '0');
-      const peKm = Number.parseFloat(parts[2] ?? '0');
+      const peEccParts = peEccCheck.success ? peEccCheck.output.split('|').map(s => s.trim()) : [];
+      const currentEcc = Number.parseFloat(peEccParts[0]?.match(/[\d.]+/)?.[0] ?? '1');
+      const peM = Number.parseFloat(peEccParts[1]?.match(/[-\d.]+/)?.[0] ?? '-1');
 
-      // Consider circular if: ecc < 0.02 OR (ecc < 0.1 AND altitudes within 15%)
-      const altRatio = peKm > 0 ? apoKm / peKm : 999;
-      const isCircular = currentEcc < 0.02 || (currentEcc < 0.1 && altRatio < 1.18 && altRatio > 0.85);
+      const peKm = peM / 1000;
+      logger.info(`[Circularize] Orbit check: ecc=${currentEcc}, Pe=${Math.round(peKm)}km`);
 
-      if (isCircular) {
-        return ctx.successResponse('circularize',
-          `Orbit is already circular (${apoKm}km x ${peKm}km, ecc=${currentEcc.toFixed(4)}). No circularization needed.`);
+      // Crash trajectory — raise periapsis first via emergency burn
+      // Negative Pe means sub-surface impact trajectory
+      if (peM < 0) {
+        logger.progress(`[Circularize] Crash trajectory (Pe=${Math.round(peKm)}km) — running crash avoidance`);
+        const { crashAvoidance } = await import('../../kos/crash-avoidance.js');
+        const avoidResult = await crashAvoidance(conn, { logger });
+
+        if (!avoidResult.success) {
+          return ctx.errorResponse('circularize', `Crash avoidance failed: ${avoidResult.error}`);
+        }
+        if (avoidResult.circularized) {
+          let text = `Crash avoidance + circularization complete.`;
+          text += await formatResultingOrbit(conn);
+          return ctx.successResponse('circularize', text);
+        }
+        logger.progress(`[Circularize] Pe raised to ${fmtDist(avoidResult.finalPeriapsis ?? 0)}, proceeding with circularization`);
+      }
+
+      // Check if already circular - safe to query APOAPSIS now (not crash trajectory)
+      if (currentEcc < 0.1) {
+        const apoCheck = await conn.queue('PRINT ROUND(APOAPSIS/1000).', 2000);
+        const apoKm = Number.parseFloat(apoCheck.success ? apoCheck.output.match(/[-\d.]+/)?.[0] ?? '0' : '0');
+        const altRatio = peKm > 0 ? apoKm / peKm : 999;
+        const isCircular = currentEcc < 0.02 || (altRatio < 1.18 && altRatio > 0.85);
+
+        if (isCircular) {
+          return ctx.successResponse('circularize',
+            `Orbit is already circular (${apoKm}km x ${peKm}km, ecc=${currentEcc.toFixed(4)}). No circularization needed.`);
+        }
       }
 
       const orchestrator = new ManeuverOrchestrator(conn);
