@@ -14,6 +14,7 @@ import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
 import { SocketTransport } from '../../transport/socket-transport.js';
+import { forceDisconnect, ensureConnected } from '../../transport/connection-tools.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 import { invalidateStatusCache } from './telemetry.js';
@@ -419,9 +420,10 @@ export interface ExecuteNodeOptions {
  * @returns ExecuteNodeResult with success status and delta-v info
  */
 export async function executeNode(
-  conn: KosConnection,
+  connParam: KosConnection,
   options: ExecuteNodeOptions = {}
 ): Promise<ExecuteNodeResult> {
+  let conn = connParam;
   const {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
@@ -659,6 +661,7 @@ export async function executeNode(
   const nodeEta = await queryNumber(conn, 'NEXTNODE:ETA');
   const alignmentBuffer = 15; // Extra time for alignment before burn starts
   const warpLeadTime = halfBurn + alignmentBuffer;
+  let hadBlackoutRecovery = false;
 
   if (nodeEta > warpLeadTime + 10 && config.warp.onRails) {
     log.progress(`${logPrefix} Helm, course set for maneuver. Ignition in ${formatTime(nodeEta)}... Engage!`);
@@ -780,7 +783,8 @@ export async function executeNode(
         }
 
         if (recovered) {
-          log.progress(`${logPrefix} Signal reacquired — burn complete`);
+          log.progress(`${logPrefix} Signal reacquired`);
+          hadBlackoutRecovery = true;
           try { await transport?.send?.('SET _MCP_POST_BURN_WARP TO FALSE.\n'); } catch { /* ignore */ }
         } else {
           log.warn(`${logPrefix} Could not reacquire signal after 5 minutes`);
@@ -845,6 +849,17 @@ export async function executeNode(
 
   // Re-enable normal reset behavior
   conn.suppressReset = false;
+
+  // After blackout recovery, original transport is broken — force fresh connection
+  if (hadBlackoutRecovery) {
+    try {
+      await forceDisconnect();
+      conn = await ensureConnected();
+      log.progress(`${logPrefix} Reconnected after blackout`);
+    } catch (err) {
+      log.warn(`${logPrefix} Reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
 
   // Best-effort post-warp cleanup (may fail in blackout — that's OK, MechJeb is already enabled)
   await conn.raw('RCS OFF.', 2000).catch(() => {});
