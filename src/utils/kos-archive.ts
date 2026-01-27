@@ -21,7 +21,7 @@ import { getActiveBroadcastLogger } from './mcp-logger.js';
  */
 function logArchive(level: 'info' | 'warn' | 'error', msg: string): void {
   console.error(msg);
-  getActiveBroadcastLogger()?.[level](msg);
+  getActiveBroadcastLogger()?.progress(msg);
 }
 
 // Cached paths (discovered once per session)
@@ -50,6 +50,7 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
     if (existsSync(envRoot)) {
       cachedKspRoot = envRoot;
       kspRootChecked = true;
+      logArchive('info', `[kos-archive] KSPROOT: ${cachedKspRoot} (source: KSP_ROOT env var)`);
       return cachedKspRoot;
     }
     // Env var set but path doesn't exist - warn once
@@ -64,6 +65,7 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
       if (root && existsSync(root)) {
         cachedKspRoot = root;
         kspRootChecked = true;
+        logArchive('info', `[kos-archive] KSPROOT: ${cachedKspRoot} (source: ADDONS:MJ:KSPROOT)`);
         return cachedKspRoot;
       }
     }
@@ -141,6 +143,7 @@ export async function writeToArchive(
     }
 
     // Write file directly
+    logArchive('info', `[kos-archive] Writing to archive: ${fullPath}`);
     await writeFile(fullPath, content, 'utf-8');
 
     return true;
@@ -205,6 +208,7 @@ export async function deployScript(
 
   // Fall back to terminal transfer (slow but reliable)
   // Works for both archive (0:/) and local (1:/) paths
+  logArchive('info', `[kos-archive] Deploying ${kosPath} via terminal transfer (line-by-line)`);
   try {
     // Ensure parent directory exists
     const parentPath = kosPath.slice(0, Math.max(0, kosPath.lastIndexOf('/')));

@@ -9,7 +9,7 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { ToolDefinition, ToolContext } from './tool-types.js';
 import { getKosOperation, clearKosOperation } from '../utils/kos-operation-state.js';
 import { getOperationProgressFromKosOp } from './mechjeb/telemetry.js';
-import { addBroadcastSubscriber, getActiveBroadcastLogger } from '../utils/mcp-logger.js';
+import { addBroadcastSubscriber, getActiveBroadcastLogger, createLogger } from '../utils/mcp-logger.js';
 
 // Import tool definitions from lib files
 
@@ -240,6 +240,10 @@ export function registerAllTools(server: McpServer, context: ToolContext): void 
             }
           }
         }
+
+        // Ensure broadcast logger is initialized before handler runs
+        // (so deploy/archive progress logs are visible during ensureConnected)
+        createLogger(extra);
 
         // Execute tool handler
         const result = await tool.handler(args as Record<string, unknown>, context, extra);

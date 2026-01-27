@@ -753,8 +753,7 @@ export class KosConnection {
    */
   private async printInstalledVersions(): Promise<void> {
     const statusVer = await this.getInstalledVersion('1:/mcp_status.ks');
-    const alignVer = await this.getInstalledVersion('1:/mcp_align.ks');
-    console.error(`[kos-connection] Installed: mcp_status=${statusVer}, mcp_align=${alignVer}`);
+    console.error(`[kos-connection] Installed: mcp_status=${statusVer}`);
   }
 
   /**

@@ -38,6 +38,11 @@ export interface Transport {
   close(): Promise<void>;
 
   /**
+   * Peek at the current output buffer without consuming it.
+   */
+  peekBuffer(): string;
+
+  /**
    * Check if transport is open/active
    */
   isOpen(): boolean;
@@ -88,6 +93,10 @@ export abstract class BaseTransport implements Transport {
     }
 
     throw new Error(`Timeout waiting for pattern: ${pattern}`);
+  }
+
+  peekBuffer(): string {
+    return this.buffer;
   }
 
   isOpen(): boolean {

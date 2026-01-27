@@ -10,7 +10,7 @@
 
 import type { KosConnection } from '../transport/kos-connection.js';
 import { deployScript } from './kos-archive.js';
-import { getScript, getScriptVersion, deployKosScript } from './kos-scripts.js';
+import { getScript, getScriptVersion } from './kos-scripts.js';
 import { getActiveBroadcastLogger } from './mcp-logger.js';
 
 /**
@@ -19,12 +19,13 @@ import { getActiveBroadcastLogger } from './mcp-logger.js';
  */
 function logDeploy(level: 'info' | 'warn' | 'error', msg: string): void {
   console.error(msg);
-  getActiveBroadcastLogger()?.[level](msg);
+  getActiveBroadcastLogger()?.progress(msg);
 }
 
-// Script names and paths
+// Script name and paths
 const STATUS_SCRIPT = 'mcp-status.ks';
-const ALIGN_SCRIPT = 'mcp-align.ks';
+const STATUS_PATH = '0:/mcp_status.ks';
+const LOCAL_STATUS_PATH = '1:/mcp_status.ks';
 
 // Cache: once scripts are verified this session, skip re-checking
 let scriptsVerified = false;
@@ -36,10 +37,6 @@ let scriptsVerified = false;
 export function resetScriptsVerified(): void {
   scriptsVerified = false;
 }
-
-// Status script paths
-const STATUS_PATH = '0:/mcp_status.ks';
-const LOCAL_STATUS_PATH = '1:/mcp_status.ks';
 
 export interface DeployResult {
   success: boolean;
@@ -71,35 +68,66 @@ export async function copyStatusToLocal(conn: KosConnection): Promise<boolean> {
 }
 
 /**
+ * Read the version string from a deployed script's first line.
+ * Returns the version hash or null if not found/readable.
+ */
+async function getScriptVersionFromPath(
+  conn: KosConnection,
+  localPath: string
+): Promise<string | null> {
+  try {
+    const result = await conn.queue(
+      `IF EXISTS("${localPath}") { LOCAL lines IS OPEN("${localPath}"):READALL. LOCAL iter IS lines:ITERATOR. IF iter:NEXT { PRINT iter:VALUE. } ELSE { PRINT "[EMPTY]". } } ELSE { PRINT "[NO_FILE]". }`,
+      3000
+    );
+    if (!result.success) return null;
+    const content = result.output.trim();
+    if (content === '[NO_FILE]' || content === '[EMPTY]') return null;
+    const versionMatch = content.match(/\/\/\s*version:\s*(\w+)/);
+    return versionMatch?.[1] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Ensure status script is deployed and available.
  *
  * Checks version via first-line comment and redeploys if outdated.
  */
 export async function ensureStatusScript(conn: KosConnection): Promise<boolean> {
   const statusVersion = getScriptVersion(STATUS_SCRIPT);
+  logDeploy('info', `[deploy] Current status script version: ${statusVersion}`);
 
   // Check local version first (faster, works during blackout)
-  const localVersionOk = await checkScriptVersion(conn, LOCAL_STATUS_PATH, statusVersion);
-  if (localVersionOk) {
-    return true; // Local exists with correct version
+  const localVersion = await getScriptVersionFromPath(conn, LOCAL_STATUS_PATH);
+  logDeploy('info', `[deploy] Ship volume 1 status script version: ${localVersion ?? 'not found'}`);
+
+  if (localVersion === statusVersion) {
+    logDeploy('info', `[deploy] Local version matches - no deployment needed`);
+    return true;
   }
 
   // Check archive version
-  const archiveVersionOk = await checkScriptVersion(conn, STATUS_PATH, statusVersion);
-  if (!archiveVersionOk) {
+  const archiveVersion = await getScriptVersionFromPath(conn, STATUS_PATH);
+  logDeploy('info', `[deploy] Archive (volume 0) status script version: ${archiveVersion ?? 'not found'}`);
+
+  if (archiveVersion !== statusVersion) {
     // Archive missing or outdated - deploy fresh
-    logDeploy('info', `[deploy] Deploying status script (need: ${statusVersion})`);
+    logDeploy('info', `[deploy] Deploying status script to archive (need: ${statusVersion})`);
     const deployResult = await deployStatusScript(conn);
     if (!deployResult.success) {
       logDeploy('error', `[deploy] Failed to deploy status script: ${deployResult.error}`);
       return false;
     }
+    logDeploy('info', `[deploy] Deployed status script via ${deployResult.method}`);
   }
 
   // Copy to local volume for blackout resilience
+  logDeploy('info', `[deploy] Copying status script from archive (volume 0) to local (volume 1)`);
   const copied = await copyStatusToLocal(conn);
   if (copied) {
-    logDeploy('info', '[deploy] Copied status script to local');
+    logDeploy('info', '[deploy] Copied status script to local volume 1');
   } else {
     logDeploy('warn', '[deploy] Failed to copy status script to local');
     // Not fatal - archive version still works
@@ -108,124 +136,26 @@ export async function ensureStatusScript(conn: KosConnection): Promise<boolean> 
   return true;
 }
 
-// ============================================================================
-// All Scripts Deployment
-// ============================================================================
-
-// Align script paths
-const ALIGN_ARCHIVE_PATH = '0:/mcp_align.ks';
-const ALIGN_LOCAL_PATH = '1:/mcp_align.ks';
-
-/**
- * Check if a script exists with the correct version by reading first line.
- * Scripts have version embedded as: // version: <hash>
- *
- * Uses queue() for clean output extraction without echo interference.
- */
-async function checkScriptVersion(
-  conn: KosConnection,
-  localPath: string,
-  expectedVersion: string
-): Promise<boolean> {
-  try {
-    // Use queue() for clean output - no manual markers needed
-    // Iterator pattern: READALL gives FileContent, ITERATOR walks lines
-    const result = await conn.queue(
-      `IF EXISTS("${localPath}") { LOCAL lines IS OPEN("${localPath}"):READALL. LOCAL iter IS lines:ITERATOR. IF iter:NEXT { PRINT iter:VALUE. } ELSE { PRINT "[EMPTY]". } } ELSE { PRINT "[NO_FILE]". }`,
-      3000
-    );
-
-    if (!result.success) {
-      // Connection issue - return false to trigger deploy check
-      return false;
-    }
-
-    const content = result.output.trim();
-    if (content === '[NO_FILE]' || content === '[EMPTY]') {
-      return false;
-    }
-
-    // Look for version comment: // version: <hash>
-    const versionMatch = content.match(/\/\/\s*version:\s*(\w+)/);
-    const foundVersion = versionMatch?.[1] ?? null;
-
-    if (foundVersion !== expectedVersion) {
-      logDeploy('info', `[deploy] Version mismatch ${localPath}: found=${foundVersion ?? 'none'}, expected=${expectedVersion}`);
-    }
-
-    return foundVersion === expectedVersion;
-  } catch (err) {
-    logDeploy('error', `[deploy] Version check error ${localPath}: ${err}`);
-    return false;
-  }
-}
-
 /**
  * Ensure all MCP scripts are deployed with correct versions.
  * Call this at startup/connection time to avoid deployment during operations.
  *
  * @param conn - kOS connection
- * @returns Object with deployment status for each script
+ * @returns true if scripts are deployed successfully
  */
-export async function ensureAllScripts(conn: KosConnection): Promise<{
-  status: boolean;
-  align: boolean;
-}> {
+export async function ensureAllScripts(conn: KosConnection): Promise<boolean> {
   // Skip if already verified this session
   if (scriptsVerified) {
-    return { status: true, align: true };
+    return true;
   }
 
-  // Deploy status script
   const statusOk = await ensureStatusScript(conn);
 
-  // Deploy align script with version check
-  // Check BOTH local and archive paths to avoid unnecessary redeployment
-  const alignVersion = getScriptVersion(ALIGN_SCRIPT);
-  const alignLocalOk = await checkScriptVersion(conn, ALIGN_LOCAL_PATH, alignVersion);
-  let alignOk = false;
-
-  if (alignLocalOk) {
-    // Local version is correct - nothing to do
-    alignOk = true;
-  } else {
-    // Local missing or wrong version - check archive before redeploying
-    const alignArchiveOk = await checkScriptVersion(conn, ALIGN_ARCHIVE_PATH, alignVersion);
-
-    if (alignArchiveOk) {
-      // Archive has correct version, just need to copy to local
-      try {
-        await conn.raw(`COPYPATH("${ALIGN_ARCHIVE_PATH}", "${ALIGN_LOCAL_PATH}").`, 3000);
-
-        // Verify copy succeeded
-        const verifyResult = await conn.queue(`PRINT EXISTS("${ALIGN_LOCAL_PATH}").`, 3000);
-        if (verifyResult.success && verifyResult.output.includes('True')) {
-          logDeploy('info', '[deploy] Copied align script to local');
-        } else {
-          logDeploy('warn', '[deploy] Failed to copy align script to local');
-        }
-        alignOk = true; // Archive still works even if local copy failed
-      } catch (err) {
-        logDeploy('warn', `[deploy] Failed to copy align script to local: ${err}`);
-        alignOk = true; // Archive still works
-      }
-    } else {
-      // Archive missing or outdated - full redeploy needed
-      logDeploy('info', `[deploy] Deploying align script (need: ${alignVersion})`);
-      const alignResult = await deployKosScript(conn, ALIGN_SCRIPT, ALIGN_ARCHIVE_PATH, ALIGN_LOCAL_PATH);
-      alignOk = alignResult.success;
-      if (!alignResult.success) {
-        logDeploy('error', `[deploy] Failed to deploy align script: ${alignResult.error}`);
-      }
-    }
-  }
-
-  // Cache result if both scripts are OK
-  if (statusOk && alignOk) {
+  if (statusOk) {
     scriptsVerified = true;
   }
 
-  return { status: statusOk, align: alignOk };
+  return statusOk;
 }
 
 // Re-export for external use

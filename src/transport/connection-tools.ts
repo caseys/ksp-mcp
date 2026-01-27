@@ -126,9 +126,18 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
   );
 
   if (conn.isConnected() && !needsReconnect) {
-    // Already connected - let actual commands fail if there's a problem
-    return conn;
+    // Check if kOS dropped us back to CPU menu (e.g. save reload)
+    const buffer = conn.getTransport()?.peekBuffer() ?? '';
+    if (buffer.includes('Choose a CPU')) {
+      // kOS returned to menu — fall through to reconnect
+      resetScriptsVerified();
+    } else {
+      return conn;
+    }
   }
+
+  // Reconnecting - reset script verification cache so deploy check runs
+  resetScriptsVerified();
 
   // Connect (or reconnect) with merged options
   try {
@@ -144,9 +153,9 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
     // Pre-deploy all scripts at connection time to avoid mid-operation delays
     const conn = getConnection();
     try {
-      const scriptResults = await ensureAllScripts(conn);
-      if (!scriptResults.status || !scriptResults.align) {
-        console.error(`[connection] Script deployment: status=${scriptResults.status}, align=${scriptResults.align}`);
+      const scriptsOk = await ensureAllScripts(conn);
+      if (!scriptsOk) {
+        console.error(`[connection] Script deployment failed`);
       }
     } catch (err) {
       // Non-fatal - scripts may deploy lazily if needed
