@@ -1183,8 +1183,8 @@ export const landTool: ToolDefinition = {
         const orbitInfo = await ctx.getBasicOrbitInfo(conn);
         const currentPe = orbitInfo?.periapsis ?? 0;
 
-        // Consider orbit "too high" if periapsis is more than 20km above ideal
-        const TOO_HIGH_MARGIN = 20_000; // 20km margin
+        // Consider orbit "too high" if periapsis is more than 500km above ideal
+        const TOO_HIGH_MARGIN = 500_000; // 500km margin
         const isTooHigh = currentPe > idealOrbitAlt + TOO_HIGH_MARGIN;
 
         if (isTooHigh) {

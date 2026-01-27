@@ -510,6 +510,8 @@ export class AscentHandle {
         } else if ((state.status).includes('Vertical ascent') && statusChanged) {
           if (this.turnRoll !== 0) {
             newStatus=`[Ascent] Roll program: ${this.turnRoll}deg`;
+          } else {
+            newStatus=`[Ascent] Roll program: ${this.turnRoll}deg`;
           }
         } else if ((state.status).includes('Gravity turn') && statusChanged) {
           newStatus=`[Ascent] Pitching over at ${formatOrbit(state.apoapsis, state.periapsis)}`;
@@ -732,6 +734,8 @@ export class AscentProgram {
     }
     if (settings.turnRoll !== undefined) {
       commands.push(`SET ${AG}:TURNROLL TO ${settings.turnRoll}.`);
+    } else {
+      commands.push(`SET ${AG}:TURNROLL TO 90.`);
     }
 
     // Launch mode settings (for Launch to Plane / Launch to Rendezvous)
