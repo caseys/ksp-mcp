@@ -121,38 +121,30 @@ interface VesselScanResult {
   hasBrakeTag: boolean;            // For airless 3-stage: 'brake' tagged decoupler exists
   hasLanderTag: boolean;           // For airless 3-stage: 'lander' tagged decoupler exists
   hasLander2Tag: boolean;          // For airless 2-stage: 'lander2' tagged decoupler (post-deorbit timing)
-  jettisonStage: number | null;    // Fallback: stage-based separation (above landing legs)
-  reentryStage: number | null;     // For atmospheric: reentry separation stage
+  reentryStage: number | null;     // For atmospheric: 'reentry' tagged separation stage
   error?: string;
 }
 
 /**
- * Scan vessel structure for landing legs and decouplers.
+ * Scan vessel structure for landing legs and tagged decouplers.
  *
- * For AIRLESS bodies (hasAtmosphere=false):
+ * Tag-based separation (requires kOS part tags on decouplers):
  * - 'brake' tag: separates before braking burn (drop transfer stage)
  * - 'lander' tag: separates after braking (drop brake stage before final descent)
- * - Falls back to separator above landing legs if no tags found
- *
- * For ATMOSPHERIC bodies (hasAtmosphere=true):
+ * - 'lander2' tag: separates after deorbit burn (2-stage post-deorbit timing)
  * - 'reentry' tag: separates before atmospheric entry
- * - Falls back to separator above heat shield (walking up part tree)
+ *
+ * Vessels without tags will not have automatic separation.
  */
 async function scanVesselForLanding(
   conn: KosConnection,
   _hasAtmosphere: boolean = false
 ): Promise<VesselScanResult> {
-  // Find separators on core stack (closest to root), not radial attachments
-  // For lander: separator closest to root that has landing legs below it
-  // For reentry: separator closest to root that has heat shield below it
+  // Scan vessel for landing legs and tagged separators (brake, lander, lander2, reentry)
   const script = `
     FUNCTION IS_LANDING_LEG {
       PARAMETER p.
       RETURN p:HASMODULE("ModuleLandingLeg") OR p:HASMODULE("ModuleWheelDeployment") OR p:HASMODULE("ModuleWheelBase").
-    }
-    FUNCTION IS_HEAT_SHIELD {
-      PARAMETER p.
-      RETURN p:HASMODULE("ModuleAblator").
     }
     FUNCTION IS_SEPARATOR {
       PARAMETER p.
@@ -162,70 +154,29 @@ async function scanVesselForLanding(
       PARAMETER p.
       RETURN p:STAGE >= 0 AND p:HASMODULE("ModuleDockingNode").
     }
-    FUNCTION DEPTH_FROM_ROOT {
-      PARAMETER p.
-      LOCAL d IS 0.
-      LOCAL cur IS p.
-      UNTIL cur:PARENT:ISTYPE("String") { SET d TO d + 1. SET cur TO cur:PARENT. }
-      RETURN d.
-    }
-    FUNCTION IS_ANCESTOR_OF {
-      PARAMETER ancestor.
-      PARAMETER descendant.
-      LOCAL cur IS descendant.
-      UNTIL cur:ISTYPE("String") {
-        IF cur = ancestor { RETURN TRUE. }
-        SET cur TO cur:PARENT.
-      }
-      RETURN FALSE.
-    }
     LOCAL hasLegs IS FALSE.
     LOCAL hasBrakeTag IS FALSE.
     LOCAL hasLanderTag IS FALSE.
     LOCAL hasLander2Tag IS FALSE.
     LOCAL taggedReentry IS -1.
-    LOCAL coreLegsSep IS -1.
-    LOCAL coreLegsDepth IS 9999.
-    LOCAL coreShieldSep IS -1.
-    LOCAL coreShieldDepth IS 9999.
-    LOCAL legList IS LIST().
-    LOCAL shieldList IS LIST().
     FOR p IN SHIP:PARTS {
-      IF IS_LANDING_LEG(p) { SET hasLegs TO TRUE. legList:ADD(p). }
-      IF IS_HEAT_SHIELD(p) { shieldList:ADD(p). }
+      IF IS_LANDING_LEG(p) { SET hasLegs TO TRUE. }
+      IF (p:TAG = "brake" OR p:TAG = "break") AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
+        SET hasBrakeTag TO TRUE.
+      }
+      IF p:TAG = "lander" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
+        SET hasLanderTag TO TRUE.
+      }
+      IF p:TAG = "lander2" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
+        SET hasLander2Tag TO TRUE.
+      }
+      IF p:TAG = "reentry" AND IS_SEPARATOR(p) {
+        IF taggedReentry < 0 { SET taggedReentry TO p:STAGE. }
+      }
     }
     IF NOT hasLegs { PRINT "NOLEGS". }
     ELSE {
-      FOR p IN SHIP:PARTS {
-        IF (p:TAG = "brake" OR p:TAG = "break") AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
-          SET hasBrakeTag TO TRUE.
-        }
-        IF p:TAG = "lander" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
-          SET hasLanderTag TO TRUE.
-        }
-        IF p:TAG = "lander2" AND (IS_SEPARATOR(p) OR IS_DOCKING_PORT(p)) {
-          SET hasLander2Tag TO TRUE.
-        }
-        IF p:TAG = "reentry" AND IS_SEPARATOR(p) {
-          IF taggedReentry < 0 { SET taggedReentry TO p:STAGE. }
-        }
-        IF IS_SEPARATOR(p) OR IS_DOCKING_PORT(p) {
-          LOCAL d IS DEPTH_FROM_ROOT(p).
-          FOR leg IN legList {
-            IF IS_ANCESTOR_OF(p, leg) AND d < coreLegsDepth {
-              SET coreLegsDepth TO d.
-              SET coreLegsSep TO p:STAGE.
-            }
-          }
-          FOR sh IN shieldList {
-            IF IS_ANCESTOR_OF(p, sh) AND d < coreShieldDepth {
-              SET coreShieldDepth TO d.
-              SET coreShieldSep TO p:STAGE.
-            }
-          }
-        }
-      }
-      PRINT "SCAN|" + hasBrakeTag + "|" + hasLanderTag + "|" + hasLander2Tag + "|" + taggedReentry + "|" + coreLegsSep + "|" + coreShieldSep.
+      PRINT "SCAN|" + hasBrakeTag + "|" + hasLanderTag + "|" + hasLander2Tag + "|" + taggedReentry.
     }
   `.trim().replaceAll('\n', ' ');
 
@@ -234,37 +185,20 @@ async function scanVesselForLanding(
 
   // No landing legs
   if (rawOutput.endsWith('NOLEGS')) {
-    return { hasLandingLegs: false, landingLegStage: null, hasBrakeTag: false, hasLanderTag: false, hasLander2Tag: false, jettisonStage: null, reentryStage: null };
+    return { hasLandingLegs: false, landingLegStage: null, hasBrakeTag: false, hasLanderTag: false, hasLander2Tag: false, reentryStage: null };
   }
 
-  // Parse SCAN result: hasBrakeTag|hasLanderTag|hasLander2Tag|taggedReentry|aboveLegsSep|aboveShieldSep
-  const scanMatch = rawOutput.match(/SCAN\|(True|False)\|(True|False)\|(True|False)\|([-\d]+)\|([-\d]+)\|([-\d]+)$/i);
+  // Parse SCAN result: hasBrakeTag|hasLanderTag|hasLander2Tag|taggedReentry
+  const scanMatch = rawOutput.match(/SCAN\|(True|False)\|(True|False)\|(True|False)\|([-\d]+)$/i);
   if (scanMatch) {
     const hasBrakeTag = scanMatch[1].toLowerCase() === 'true';
     const hasLanderTag = scanMatch[2].toLowerCase() === 'true';
     const hasLander2Tag = scanMatch[3].toLowerCase() === 'true';
     const taggedReentry = parseInt(scanMatch[4]);
-    const aboveLegsSep = parseInt(scanMatch[5]);
-    const aboveShieldSep = parseInt(scanMatch[6]);
 
-    // Determine jettison stage (fallback for non-tagged designs)
-    // Used when no 'brake' tag - separates by stage before braking burn
-    let jettisonStage: number | null = null;
-    if (aboveLegsSep >= 0) {
-      jettisonStage = aboveLegsSep;
-    }
+    const reentryStage = taggedReentry >= 0 ? taggedReentry : null;
 
-    // Determine reentry stage (for atmospheric bodies) - priority order
-    // This is the stage to fire BEFORE reentry to separate transfer/service module
-    // Priority: 'reentry' tagged decoupler, then separator above heat shield
-    let reentryStage: number | null = null;
-    if (taggedReentry >= 0) {
-      reentryStage = taggedReentry;
-    } else if (aboveShieldSep >= 0) {
-      reentryStage = aboveShieldSep;
-    }
-
-    return { hasLandingLegs: true, landingLegStage: null, hasBrakeTag, hasLanderTag, hasLander2Tag, jettisonStage, reentryStage };
+    return { hasLandingLegs: true, landingLegStage: null, hasBrakeTag, hasLanderTag, hasLander2Tag, reentryStage };
   }
 
   return {
@@ -273,7 +207,6 @@ async function scanVesselForLanding(
     hasBrakeTag: false,
     hasLanderTag: false,
     hasLander2Tag: false,
-    jettisonStage: null,
     reentryStage: null,
     error: `Failed to parse vessel scan: ${rawOutput.slice(-50)}`,
   };
@@ -1246,12 +1179,13 @@ export const landTool: ToolDefinition = {
           'Vessel must have parts with ModuleLandingLeg, ModuleWheelDeployment, or ModuleWheelBase.');
       }
 
-      // Choose separation method based on body type and vessel tags:
-      // - Atmospheric bodies: stage-based (reentryStage, falls back to jettisonStage)
-      // - Airless with 'brake' + 'lander' tags: tag-based two-stage separation
+      // Choose separation method based on vessel tags:
+      // - 'reentry' tag (atmospheric): stage-based separation before reentry
+      // - 'brake' + 'lander' tags (airless 3-stage): tag-based two-stage separation
       //   1. 'brake' decoupler activates before braking burn (drop transfer stage)
       //   2. 'lander' decoupler activates at final descent (drop brake stage)
-      // - Airless without tags: stage-based single separation (jettisonStage)
+      // - 'lander2' tag (airless 2-stage): tag-based separation after deorbit burn
+      // - No tags: no separation (single-stage lander)
       //
       // Tag-based activation fires ONLY the specific decoupler, not the entire stage.
       // ALL separation is deferred to onPoll - ensures MechJeb course correction completes first.
@@ -1259,12 +1193,10 @@ export const landTool: ToolDefinition = {
       let primaryTag: string | undefined;
       let secondaryTag: string | undefined;
 
-      if (hasAtmosphere) {
-        // Atmospheric: stage-based (reentry or jettison)
-        separationStage = vesselScan.reentryStage ?? vesselScan.jettisonStage;
-        if (separationStage !== null) {
-          logger.progress(`[Landing] Separation deferred to descent phase (stage ${separationStage})`);
-        }
+      if (hasAtmosphere && vesselScan.reentryStage !== null) {
+        // Atmospheric with 'reentry' tagged decoupler: stage-based separation
+        separationStage = vesselScan.reentryStage;
+        logger.progress(`[Landing] Separation deferred to descent phase (stage ${separationStage})`);
       } else if (vesselScan.hasBrakeTag && vesselScan.hasLanderTag) {
         // Airless 3-stage: tag-based two-stage separation
         primaryTag = 'brake';
@@ -1274,12 +1206,6 @@ export const landTool: ToolDefinition = {
         // Airless 2-stage with post-deorbit timing: no brake, just lander2 after deorbit burn
         secondaryTag = 'lander2';
         logger.progress(`[Landing] 2-stage design detected: lander2 separation after deorbit burn`);
-      } else {
-        // Airless 2-stage: stage-based single separation
-        separationStage = vesselScan.jettisonStage;
-        if (separationStage !== null) {
-          logger.progress(`[Landing] Separation deferred to descent phase (stage ${separationStage})`);
-        }
       }
       // Note: No immediate separation - all separation handled in monitorLanding onPoll
 
