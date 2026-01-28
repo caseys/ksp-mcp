@@ -511,7 +511,7 @@ export class AscentHandle {
           if (this.turnRoll !== 0) {
             newStatus=`[Ascent] Roll program: ${this.turnRoll}deg`;
           } else {
-            newStatus=`[Ascent] Roll program: ${this.turnRoll}deg`;
+            newStatus=`[Ascent] Roll program`;
           }
         } else if ((state.status).includes('Gravity turn') && statusChanged) {
           newStatus=`[Ascent] Pitching over at ${formatOrbit(state.apoapsis, state.periapsis)}`;
@@ -521,7 +521,7 @@ export class AscentHandle {
         } else if ((state.status).includes('Coasting to circularization burn')) {
           try { await this.conn.raw('SET WARP TO 0. SET WARPMODE TO "RAILS".'); } catch { /* ignore */ }
           // Warp to circularization burn (only once)
-          if (!hasWarpedToCirc && config.warp.onRails) {
+          if (!hasWarpedToCirc) {
             hasWarpedToCirc = true;
             try {
               // Get node ETA and warp to 15s before burn starts
@@ -851,10 +851,10 @@ export class AscentProgram {
       desiredInclination: inclination,
       autostage: autoStage,
       skipCircularization: false,  // Let MechJeb handle circularization
-      autowarp: config.warp.physicsMax > 0,  // Enable MechJeb autowarp if physics warp is enabled
-      overrideWarpToPlane: config.warp.physicsMax <= 0,  // Skip plane warp if autowarp disabled (inverse)
+      autowarp: true,  // Always enable MechJeb autowarp
+      overrideWarpToPlane: false,  // Allow MechJeb to warp to launch plane
       // Roll control: enable force roll and set angle to match inclination
-      forceRoll: inclination !== 0,  // Enable roll control for non-equatorial launches
+      forceRoll: true, // inclination !== 0,  // Enable roll control for non-equatorial launches
       verticalRoll: 0,  // Default vertical roll
       turnRoll: inclination,  // Roll angle matches target inclination
       // ALWAYS reset ALL launch mode fields to defaults - MechJeb persists stale values
@@ -990,9 +990,9 @@ export class AscentProgram {
       }
     }
   
-    // Enable warp after 20 seconds if configured via env var
+    // Enable warp after initial ascent phase
     // Use physics warp in atmosphere (required), rails warp on airless bodies (faster)
-    if (config.warp.physicsMax > 0) {
+    {
       // Check atmosphere before setting timeout (capture for closure)
       this.conn.queue('PRINT SHIP:BODY:ATM:EXISTS.', 2000)
         .then(result => {

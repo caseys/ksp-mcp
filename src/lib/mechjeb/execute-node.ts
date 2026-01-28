@@ -9,7 +9,6 @@ import type { KosConnection } from '../../transport/kos-connection.js';
 import { queryNumber, unlockControls, parseNumber } from './shared.js';
 import { delay } from '../utils/progress.js';
 import { formatTime, fmtNum, fmtVel } from '../utils/format.js';
-import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
@@ -637,7 +636,8 @@ export async function executeNode(
   );
 
   // Enable MechJeb executor BEFORE warp — vessel may enter radio blackout on arrival
-  // Disable MechJeb's autowarp so it doesn't interfere with our WARPTO
+  // Always disable MechJeb's autowarp — we handle warp ourselves via KUNIVERSE:TIMEWARP:WARPTO
+  // MechJeb's autowarp is unreliable and can cause extra delays when it takes over
   await conn.raw('SET ADDONS:MJ:NODE:AUTOWARP TO FALSE.', 3000);
   log.progress(`${logPrefix} Enabling MechJeb node executor...`);
   await conn.raw('SET ADDONS:MJ:NODE:ENABLED TO TRUE.', 5000);
@@ -662,7 +662,7 @@ export async function executeNode(
   const warpLeadTime = halfBurn + alignmentBuffer;
   let hadBlackoutRecovery = false;
 
-  if (nodeEta > warpLeadTime + 10 && config.warp.onRails) {
+  if (nodeEta > warpLeadTime + 10) {
     log.progress(`${logPrefix} Helm, course set for maneuver. Ignition in ${formatTime(nodeEta)}... Engage!`);
     log.info(`${logPrefix} Warp params: nodeEta=${Math.round(nodeEta)}s, halfBurn=${Math.round(halfBurn)}s, leadTime=${Math.round(warpLeadTime)}s, warpFor=${Math.round(nodeEta - warpLeadTime)}s`);
 
