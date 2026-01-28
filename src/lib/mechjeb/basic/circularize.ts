@@ -9,7 +9,7 @@ import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/vali
 import { clearNodes } from '../../kos/nodes.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import type { ToolDefinition } from '../../tool-types.js';
-import { executeSchema } from '../../tool-types.js';
+import { executeSchema, distanceSchema } from '../../tool-types.js';
 import { formatTime, fmtVel, fmtDist } from '../../utils/format.js';
 
 /**
@@ -152,6 +152,9 @@ export const circularizeTool: ToolDefinition = {
   name: 'circularize',
   description: 'Circularize to a stable orbit in current SOI.  Used after warp to SOI or launch to orbit.',
   inputSchema: {
+    altitude: distanceSchema
+      .optional()
+      .describe('Target circular orbit altitude in meters. If omitted, circularizes at current altitude.'),
     timeRef: z.union([z.enum(['APOAPSIS', 'PERIAPSIS', 'X_FROM_NOW']), z.literal('auto')])
       .optional()
       .default('auto')
@@ -185,26 +188,45 @@ export const circularizeTool: ToolDefinition = {
       const peKm = peM / 1000;
       logger.info(`[Circularize] Orbit check: ecc=${currentEcc}, Pe=${Math.round(peKm)}km`);
 
-      // Crash trajectory — raise periapsis first via emergency burn
-      // Negative Pe means sub-surface impact trajectory
-      if (peM < 0) {
-        logger.progress(`[Circularize] Crash trajectory (Pe=${Math.round(peKm)}km) — running crash avoidance`);
-        const { crashAvoidance } = await import('../../kos/crash-avoidance.js');
-        const avoidResult = await crashAvoidance(conn, { logger });
+      // Crash trajectory (negative Pe) or hyperbolic orbit (ecc >= 1)
+      // Fix periapsis first, then continue with normal circularization
+      const isCrashTrajectory = peM < 0;
+      const isHyperbolic = currentEcc >= 1;
+      const orchestrator = new ManeuverOrchestrator(conn);
 
-        if (!avoidResult.success) {
-          return ctx.errorResponse('circularize', `Crash avoidance failed: ${avoidResult.error}`);
+      if (isCrashTrajectory || isHyperbolic) {
+        const situation = isCrashTrajectory ? `Crash trajectory (Pe=${Math.round(peKm)}km)` : `Hyperbolic orbit (ecc=${currentEcc.toFixed(2)})`;
+
+        // Determine target periapsis
+        const altitudeArg = args.altitude as number | undefined;
+        const targetPe = altitudeArg ?? Math.max(peM, 100_000);  // Default to Pe or 100km minimum
+
+        logger.progress(`[Circularize] ${situation} — fixing periapsis to ${fmtDist(targetPe)}`);
+
+        // First burn: fix periapsis with time-based burn
+        const peResult = await orchestrator.adjustPeriapsis(targetPe, 'X_FROM_NOW', {
+          execute: args.execute as boolean,
+          logger,
+          callerTool: 'circularize',
+          xFromNowSeconds: isCrashTrajectory ? 30 : 60,  // More urgent for crash
+        });
+
+        if (!peResult.success) {
+          return ctx.errorResponse('circularize', peResult.error ?? 'Failed to fix periapsis');
         }
-        if (avoidResult.circularized) {
-          let text = `Crash avoidance + circularization complete.`;
-          text += await formatResultingOrbit(conn);
-          return ctx.successResponse('circularize', text);
+
+        if (!(args.execute as boolean)) {
+          return ctx.successResponse('circularize',
+            `Periapsis fix planned: ${fmtVel(peResult.deltaV ?? 0)} in T-${isCrashTrajectory ? 30 : 60}s\n` +
+            `Execute to continue with circularization.`);
         }
-        logger.progress(`[Circularize] Pe raised to ${fmtDist(avoidResult.finalPeriapsis ?? 0)}, proceeding with circularization`);
+
+        // Continue to circularization below
+        logger.progress(`[Circularize] Periapsis fixed, proceeding with circularization`);
       }
 
-      // Check if already circular - safe to query APOAPSIS now (not crash trajectory)
-      if (currentEcc < 0.1) {
+      // Check if already circular (skip if we just fixed periapsis)
+      if (!isCrashTrajectory && !isHyperbolic && currentEcc < 0.1) {
         const apoCheck = await conn.queue('PRINT ROUND(APOAPSIS/1000).', 2000);
         const apoKm = Number.parseFloat(apoCheck.success ? apoCheck.output.match(/[-\d.]+/)?.[0] ?? '0' : '0');
         const altRatio = peKm > 0 ? apoKm / peKm : 999;
@@ -216,51 +238,22 @@ export const circularizeTool: ToolDefinition = {
         }
       }
 
-      const orchestrator = new ManeuverOrchestrator(conn);
-
       // Auto-detect best timeRef if 'auto'
-      // Re-query ecc and Pe since orbit may have changed after crash avoidance
       let timeRef = args.timeRef as string;
       if (timeRef === 'auto') {
-        // Query ecc and Pe first (safe on any orbit) — do NOT query ETA:APOAPSIS on hyperbolic orbits
-        const orbitInfo = await conn.queue(
-          'PRINT SHIP:ORBIT:ECCENTRICITY + "|" + ROUND(PERIAPSIS).',
-          2000
-        );
-        const parts = orbitInfo.success ? orbitInfo.output.split('|').map(s => s.trim()) : [];
-        const ecc = Number.parseFloat(parts[0] ?? '0');
-        const currentPe = Number.parseFloat(parts[1]?.match(/[\d.-]+/)?.[0] ?? '0');
-
-        if (ecc >= 1) {
-          timeRef = 'PERIAPSIS';  // Hyperbolic orbit - no apoapsis
-
-          // If periapsis is too high (>2500km), lower it first for efficient capture
-          if (currentPe > 2_500_000) {
-            const targetPe = 250_000;  // 250km
-            logger.progress(`[Circularize] Hyperbolic with high Pe (${Math.round(currentPe/1000)}km), lowering to ${targetPe/1000}km first`);
-
-            const peResult = await orchestrator.adjustPeriapsis(targetPe, 'X_FROM_NOW', {
-              execute: true,
-              logger,
-              callerTool: 'circularize',
-              xFromNowSeconds: 60,
-            });
-
-            if (!peResult.success) {
-              return ctx.errorResponse('circularize', `Failed to lower periapsis: ${peResult.error}`);
-            }
-
-            logger.progress(`[Circularize] Periapsis lowered, proceeding with circularization`);
-          }
+        // After crash/hyperbolic fix, always circularize at periapsis
+        if (isCrashTrajectory || isHyperbolic) {
+          timeRef = 'PERIAPSIS';
         } else {
-          // Elliptical orbit — safe to query ETA:APOAPSIS
+          // Elliptical orbit — pick nearest apse
           const etaInfo = await conn.queue('PRINT ETA:APOAPSIS + "|" + ETA:PERIAPSIS.', 2000);
           const etaParts = etaInfo.success ? etaInfo.output.split('|').map(s => s.trim()) : [];
           const etaApo = Number.parseFloat(etaParts[0] ?? '0');
           const etaPe = Number.parseFloat(etaParts[1] ?? '0');
-          timeRef = etaApo < etaPe ? 'APOAPSIS' : 'PERIAPSIS';  // Nearest apse
+          timeRef = etaApo < etaPe ? 'APOAPSIS' : 'PERIAPSIS';
         }
       }
+
       const result = await orchestrator.circularize(timeRef, {
         execute: args.execute as boolean,
         logger,

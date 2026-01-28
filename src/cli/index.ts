@@ -96,7 +96,7 @@ const POSITIONAL_ARGS: Record<string, string[]> = {
   'launch': ['altitude'],
   'transfer': ['target'],
   'hohmann_transfer': ['target'],
-  'adjust_orbit': ['altitude', 'altitude'],  // Two values combine into array
+  'adjust_orbit': ['periapsis', 'apoapsis'],
   'adjust_apoapsis': ['altitude'],
   'adjust_periapsis': ['altitude'],
   'ellipticize': ['periapsis', 'apoapsis'],

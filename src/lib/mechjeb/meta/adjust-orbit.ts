@@ -1,8 +1,8 @@
 /**
  * Adjust Orbit Tool - Change orbit to target altitude(s)
  *
- * Single altitude: Set both apoapsis and periapsis to same value (circular orbit)
- * Two altitudes: Set periapsis to lower value, apoapsis to higher value
+ * periapsis only: Circular orbit at that altitude
+ * periapsis + apoapsis: Elliptical orbit with those altitudes
  */
 
 import { ManeuverOrchestrator } from '../orchestrator.js';
@@ -18,8 +18,11 @@ export const adjustOrbitTool: ToolDefinition = {
   name: 'adjust_orbit',
   description: 'Raise or lower orbit.',
   inputSchema: {
-    altitude: distanceSchema
-      .describe('Target altitude in meters. Single value for circular orbit, or [low, high] for elliptical.'),
+    periapsis: distanceSchema
+      .describe('Target periapsis altitude in meters.'),
+    apoapsis: distanceSchema
+      .optional()
+      .describe('Target apoapsis altitude in meters. If omitted, creates circular orbit at periapsis.'),
     execute: executeSchema,
   },
   annotations: {
@@ -46,20 +49,9 @@ export const adjustOrbitTool: ToolDefinition = {
         logger.progress(`[${toolName}] Warped ${formatTime(radioResult.warpedSeconds)} to radio contact`);
       }
 
-      // Parse altitude input
-      const altInput = args.altitude as number | number[];
-      let targetPe: number;
-      let targetAp: number;
-
-      if (Array.isArray(altInput)) {
-        // Two values: lower is pe, higher is ap
-        targetPe = Math.min(altInput[0], altInput[1]);
-        targetAp = Math.max(altInput[0], altInput[1]);
-      } else {
-        // Single value: circular orbit
-        targetPe = altInput;
-        targetAp = altInput;
-      }
+      // Parse altitude inputs
+      const targetPe = args.periapsis as number;
+      const targetAp = (args.apoapsis as number | undefined) ?? targetPe;  // Default to circular
 
       // Validate vessel state: must be in orbit or escaping (hyperbolic)
       const vesselValidation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, toolName);
@@ -72,11 +64,8 @@ export const adjustOrbitTool: ToolDefinition = {
       const isHyperbolic = stateInfo.eccentricity >= 1;
 
       if (isHyperbolic) {
-        // Hyperbolic trajectory: first burn adjusts periapsis
-        // If two altitudes provided, second burn at periapsis sets apoapsis (captures into orbit)
-        const hyperbolicPe = Array.isArray(altInput) ? Math.min(altInput[0], altInput[1]) : altInput;
-        const hyperbolicAp = Array.isArray(altInput) ? Math.max(altInput[0], altInput[1]) : null;
-        const hasCaptureburn = hyperbolicAp !== null && hyperbolicAp !== hyperbolicPe;
+        // Hyperbolic trajectory: first burn adjusts periapsis, second circularizes to capture
+        const hyperbolicPe = targetPe;
 
         logger.progress(`[AdjustOrbit] Hyperbolic trajectory: adjusting Pe to ${fmtDist(hyperbolicPe)}`);
 
@@ -93,43 +82,35 @@ export const adjustOrbitTool: ToolDefinition = {
         }
 
         if (!execute) {
-          let msg = `Periapsis adjustment planned: ${fmtVel(peResult.deltaV ?? 0)} in T-60s\n` +
-            `Target periapsis: ${fmtDist(hyperbolicPe)}`;
-          if (hasCaptureburn) {
-            msg += `\nNote: Execute to continue with capture burn to Ap=${fmtDist(hyperbolicAp!)}`;
-          }
+          const msg = `Periapsis adjustment planned: ${fmtVel(peResult.deltaV ?? 0)} in T-60s\n` +
+            `Target periapsis: ${fmtDist(hyperbolicPe)}\n` +
+            `Note: Execute to continue with circularization`;
           return ctx.successResponse(toolName, msg);
         }
 
         let totalDeltaV = peResult.deltaV ?? 0;
 
-        // Second burn: capture into orbit by setting apoapsis at periapsis
-        if (hasCaptureburn) {
-          logger.progress(`[AdjustOrbit] Capture burn: setting Ap to ${fmtDist(hyperbolicAp!)} at periapsis`);
+        // Second burn: circularize at periapsis to capture into orbit
+        logger.progress(`[AdjustOrbit] Capture burn: circularizing at periapsis`);
 
-          const apResult = await orchestrator.adjustApoapsis(hyperbolicAp!, 'PERIAPSIS', {
-            execute: true,
-            logger,
-            callerTool: toolName,
-          });
+        const circResult = await orchestrator.circularize('PERIAPSIS', {
+          execute: true,
+          logger,
+          callerTool: toolName,
+        });
 
-          if (!apResult.success) {
-            return ctx.errorResponse(toolName,
-              `Periapsis adjusted (${fmtVel(totalDeltaV)}), but capture burn failed: ${apResult.error}`);
-          }
-
-          totalDeltaV += apResult.deltaV ?? 0;
-
-          // Get final orbit
-          const finalOrbit = await ctx.getBasicOrbitInfo(conn);
-          return ctx.successResponse(toolName,
-            `Captured into orbit: ${fmtPeAp(finalOrbit?.periapsis ?? hyperbolicPe, finalOrbit?.apoapsis ?? hyperbolicAp!)}\n` +
-            `Total Δv: ${fmtVel(totalDeltaV)} (Pe: ${fmtVel(peResult.deltaV ?? 0)} + Ap: ${fmtVel(apResult.deltaV ?? 0)})`);
+        if (!circResult.success) {
+          return ctx.errorResponse(toolName,
+            `Periapsis adjusted (${fmtVel(totalDeltaV)}), but capture burn failed: ${circResult.error}`);
         }
 
+        totalDeltaV += circResult.deltaV ?? 0;
+
+        // Get final orbit
+        const finalOrbit = await ctx.getBasicOrbitInfo(conn);
         return ctx.successResponse(toolName,
-          `Periapsis adjusted: ${fmtVel(totalDeltaV)}\n` +
-          `Target periapsis: ${fmtDist(hyperbolicPe)}`);
+          `Captured into orbit: ${fmtPeAp(finalOrbit?.periapsis ?? hyperbolicPe, finalOrbit?.apoapsis ?? hyperbolicPe)}\n` +
+          `Total Δv: ${fmtVel(totalDeltaV)} (Pe: ${fmtVel(peResult.deltaV ?? 0)} + circ: ${fmtVel(circResult.deltaV ?? 0)})`);
       }
 
       // Get current orbit info
@@ -153,10 +134,8 @@ export const adjustOrbitTool: ToolDefinition = {
       const isCrashTrajectory = currentPe < 0 || (atmHeight > 0 && currentPe < atmHeight);
 
       if (isCrashTrajectory) {
-        // Emergency recovery: time-based burn to raise periapsis, then optional apoapsis burn
+        // Emergency recovery: time-based burn to raise periapsis, then circularize
         const crashPe = Math.max(targetPe, minSafeAlt);  // At least minimum safe
-        const crashAp = Array.isArray(altInput) ? Math.max(altInput[0], altInput[1]) : null;
-        const hasApBurn = crashAp !== null && crashAp !== crashPe;
 
         logger.progress(`[AdjustOrbit] Crash trajectory (Pe=${fmtDist(currentPe)}), emergency raise to ${fmtDist(crashPe)}`);
 
@@ -173,42 +152,34 @@ export const adjustOrbitTool: ToolDefinition = {
         }
 
         if (!execute) {
-          let msg = `Emergency periapsis raise planned: ${fmtVel(peResult.deltaV ?? 0)} in T-30s\n` +
-            `Target periapsis: ${fmtDist(crashPe)}`;
-          if (hasApBurn) {
-            msg += `\nNote: Execute to continue with apoapsis burn to ${fmtDist(crashAp!)}`;
-          }
+          const msg = `Emergency periapsis raise planned: ${fmtVel(peResult.deltaV ?? 0)} in T-30s\n` +
+            `Target periapsis: ${fmtDist(crashPe)}\n` +
+            `Note: Execute to continue with circularization`;
           return ctx.successResponse(toolName, msg);
         }
 
         let totalDeltaV = peResult.deltaV ?? 0;
 
-        // Second burn: set apoapsis at periapsis (if specified)
-        if (hasApBurn) {
-          logger.progress(`[AdjustOrbit] Setting Ap to ${fmtDist(crashAp!)} at periapsis`);
+        // Second burn: circularize at periapsis to establish orbit
+        logger.progress(`[AdjustOrbit] Circularizing at periapsis`);
 
-          const apResult = await orchestrator.adjustApoapsis(crashAp!, 'PERIAPSIS', {
-            execute: true,
-            logger,
-            callerTool: toolName,
-          });
+        const circResult = await orchestrator.circularize('PERIAPSIS', {
+          execute: true,
+          logger,
+          callerTool: toolName,
+        });
 
-          if (!apResult.success) {
-            return ctx.errorResponse(toolName,
-              `Periapsis raised (${fmtVel(totalDeltaV)}), but apoapsis burn failed: ${apResult.error}`);
-          }
-
-          totalDeltaV += apResult.deltaV ?? 0;
-
-          const finalOrbit = await ctx.getBasicOrbitInfo(conn);
-          return ctx.successResponse(toolName,
-            `Crash avoided, orbit established: ${fmtPeAp(finalOrbit?.periapsis ?? crashPe, finalOrbit?.apoapsis ?? crashAp!)}\n` +
-            `Total Δv: ${fmtVel(totalDeltaV)} (Pe: ${fmtVel(peResult.deltaV ?? 0)} + Ap: ${fmtVel(apResult.deltaV ?? 0)})`);
+        if (!circResult.success) {
+          return ctx.errorResponse(toolName,
+            `Periapsis raised (${fmtVel(totalDeltaV)}), but circularization failed: ${circResult.error}`);
         }
 
+        totalDeltaV += circResult.deltaV ?? 0;
+
+        const finalOrbit = await ctx.getBasicOrbitInfo(conn);
         return ctx.successResponse(toolName,
-          `Crash avoided: ${fmtVel(totalDeltaV)}\n` +
-          `Periapsis raised to ${fmtDist(crashPe)}`);
+          `Crash avoided, orbit established: ${fmtPeAp(finalOrbit?.periapsis ?? crashPe, finalOrbit?.apoapsis ?? crashPe)}\n` +
+          `Total Δv: ${fmtVel(totalDeltaV)} (Pe: ${fmtVel(peResult.deltaV ?? 0)} + circ: ${fmtVel(circResult.deltaV ?? 0)})`);
       }
 
       // Validate target altitudes (for normal orbits)
