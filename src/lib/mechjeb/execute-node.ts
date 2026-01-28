@@ -13,9 +13,8 @@ import { config } from '../../config/index.js';
 import { type McpLogger, nullLogger } from '../tool-types.js';
 import { clearBroadcastLogger } from '../../utils/mcp-logger.js';
 import { stopWarp } from '../kos/warp.js';
-import { SocketTransport } from '../../transport/socket-transport.js';
 import { forceDisconnect, ensureConnected } from '../../transport/connection-tools.js';
-import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
+import { pollWithBlackoutResilience, probeForRadioReturn } from '../../utils/poll-with-resilience.js';
 import { setKosOperation, clearKosOperation } from '../../utils/kos-operation-state.js';
 import { invalidateStatusCache } from './telemetry.js';
 import { clearNodes } from '../kos/nodes.js';
@@ -698,89 +697,7 @@ export async function executeNode(
 
       // On signal loss: stop queue() calls, launch probe immediately
       if (signalLost) {
-        const cpuId = conn.getState().cpuId;
-        let recovered = false;
-
-        // Spawn independent probe connection
-        const probe = new SocketTransport(config.kos.host, config.kos.port);
-        try {
-          await probe.init();
-          await probe.waitFor('Choose a CPU', 5000);
-          log.progress(`${logPrefix} Probe: kOS alive, selecting CPU ${cpuId}...`);
-
-          await probe.send(String(cpuId) + '\r\n');
-          await new Promise(r => setTimeout(r, 1000));
-          await probe.read(); // Clear attach output + Signal lost text
-
-          // Poll with concatenated markers — echo won't contain complete marker
-          for (let i = 0; i < 300; i++) {
-            await delay(1000);
-
-            // Check original transport for "Choose a CPU" (radio returned)
-            if (transport?.isOpen()) {
-              const origBuf = transport.peekBuffer();
-              if (origBuf.includes('Choose a CPU')) {
-                log.progress(`${logPrefix} Original connection: radio returned! Reattaching...`);
-                await transport.read();
-                await transport.send(String(cpuId) + '\r\n');
-                await new Promise(r => setTimeout(r, 500));
-                await transport.read();
-                // Verify with concatenated marker
-                const vMarker = `BL_${Date.now()}`;
-                await transport.send(`PRINT "["+"${vMarker}"+"]".\n`);
-                try {
-                  await transport.waitFor(`[${vMarker}]`, 3000);
-                  recovered = true;
-                  break;
-                } catch {
-                  log.warn(`${logPrefix} Reattach verify failed`);
-                }
-              }
-            }
-
-            // Probe: send PRINT with concatenated marker
-            const ts = Date.now();
-            await probe.send(`PRINT "["+"PROBE_${ts}"+"]".\n`);
-            try {
-              await probe.waitFor(`[PROBE_${ts}]`, 2000);
-              log.progress(`${logPrefix} Probe: radio returned!`);
-              // Wait for original connection to get "Choose a CPU"
-              await delay(3000);
-              // Check original again
-              if (transport?.isOpen()) {
-                const origBuf = transport.peekBuffer();
-                if (origBuf.includes('Choose a CPU')) {
-                  await transport.read();
-                  await transport.send(String(cpuId) + '\r\n');
-                  await new Promise(r => setTimeout(r, 500));
-                  await transport.read();
-                  const vMarker = `BL_${Date.now()}`;
-                  await transport.send(`PRINT "["+"${vMarker}"+"]".\n`);
-                  try {
-                    await transport.waitFor(`[${vMarker}]`, 3000);
-                    recovered = true;
-                  } catch { /* verify failed */ }
-                }
-              }
-              if (!recovered) {
-                // Probe says radio is back but original didn't recover — still ok
-                log.progress(`${logPrefix} Probe confirmed radio, original transport needs reconnect`);
-                recovered = true;
-              }
-              break;
-            } catch {
-              // Still in blackout
-            }
-
-            if (i % 10 === 9) {
-              log.progress(`${logPrefix} Still in blackout... (${i + 1}s)`);
-            }
-          }
-        } catch (err) {
-          log.warn(`${logPrefix} Probe failed: ${err instanceof Error ? err.message : String(err)}`);
-        } finally {
-          await probe.close().catch(() => {});
-        }
+        const recovered = await probeForRadioReturn(conn, log, logPrefix);
 
         if (recovered) {
           log.progress(`${logPrefix} Signal reacquired`);

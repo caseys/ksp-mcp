@@ -1,17 +1,19 @@
 /**
  * Blackout-Resilient Polling Utility
  *
- * Handles radio blackouts gracefully during long-running operations.
- * When connection is lost, continues waiting instead of failing.
- * MechJeb/kOS autopilots continue running on the vessel during blackout.
+ * When connection is lost during a long-running operation:
+ * 1. Protect the TCP socket (suppressReset) so we can watch for recovery
+ * 2. Check peekBuffer() for "Signal lost" text — early detection
+ * 3. On confirmed blackout: launch independent probe connection
+ * 4. Probe polls with concatenated markers until radio returns
+ * 5. Return to caller — caller does forceDisconnect() + ensureConnected()
  *
- * Distinguishes between:
- * - Radio blackout (signal lost) - vessel fine, just out of range
- * - Power loss - vessel exists but CPU unresponsive (batteries dead)
- * - Vessel crash - vessel destroyed, connection stuck
+ * kOS autopilots (MechJeb, WHEN triggers) continue running during blackout.
  */
 
 import type { KosConnection } from '../transport/kos-connection.js';
+import { SocketTransport } from '../transport/socket-transport.js';
+import { config } from '../config/index.js';
 
 /** Simple logger interface for progress and debug messages */
 interface ProgressLogger {
@@ -20,9 +22,6 @@ interface ProgressLogger {
 }
 
 const nullLogger: ProgressLogger = { progress: () => {}, debug: () => {} };
-
-/** Reason for connection failure */
-export type DisconnectReason = 'signal_lost' | 'power_loss' | 'crashed' | 'unknown';
 
 export interface PollOptions<T> {
   /** Function that polls for status. Throws on connection error. */
@@ -49,7 +48,7 @@ export interface PollOptions<T> {
   /** Optional: Called on each successful poll (for custom logging) */
   onPoll?: (result: T) => void;
 
-  /** Optional: kOS connection for detailed failure classification */
+  /** Optional: kOS connection for blackout detection and probe recovery */
   connection?: KosConnection;
 
   /** Optional: AbortSignal to cancel the operation (e.g., from MCP client timeout) */
@@ -68,90 +67,121 @@ export interface PollResult<T> {
 
   /** True if we experienced a blackout during monitoring */
   hadBlackout: boolean;
-
-  /** If connection was lost, the reason why */
-  disconnectReason?: DisconnectReason;
 }
 
 /**
- * Classify why a connection failed using detailed health checks.
- * Uses the same logic as connection-tools.ts for consistency.
+ * Launch an independent probe connection to detect radio return.
  *
- * IMPORTANT: Be conservative - only report 'crashed' if we're very sure.
- * False positives are worse than false negatives here.
+ * The probe connects to kOS telnet on a separate TCP socket, selects the
+ * same CPU, and polls with concatenated PRINT markers. During blackout,
+ * commands echo but produce no output — so only a complete marker in the
+ * response means radio is back.
+ *
+ * Also watches the original transport's peekBuffer() for "Choose a CPU"
+ * which kOS sends on the existing connection when radio returns.
+ *
+ * @returns true if radio contact was restored
  */
-async function classifyConnectionFailure(
-  conn: KosConnection | undefined,
-  errorOutput?: string
-): Promise<DisconnectReason> {
-  // Check error message for signal loss indicators
-  // Matches "Signal lost" from kOS or our own "Signal lost" error
-  if (errorOutput && (errorOutput.includes('Signal lost') || errorOutput.includes('blackout'))) {
-    return 'signal_lost';
-  }
+export async function probeForRadioReturn(
+  conn: KosConnection,
+  logger: ProgressLogger,
+  context: string,
+  timeoutMs: number = 300_000,
+): Promise<boolean> {
+  const transport = conn.getTransport();
+  const cpuId = conn.getState().cpuId;
+  let recovered = false;
 
-  // If we have a connection, try a health check
-  if (conn) {
-    try {
-      // Try a health check command with unique marker
-      const marker = `POLL_CHECK_${Date.now()}`;
-      const result = await conn.queue(`PRINT "${marker}".`, 2000);
+  const probe = new SocketTransport(config.kos.host, config.kos.port);
+  try {
+    await probe.init();
+    await probe.waitFor('Choose a CPU', 5000);
+    logger.progress(`[${context}] Probe: kOS alive, selecting CPU ${cpuId}...`);
 
-      // Check for signal lost message
-      if (result.output.includes('Signal lost')) {
-        return 'signal_lost';
+    await probe.send(String(cpuId) + '\r\n');
+    await new Promise(r => setTimeout(r, 1000));
+    await probe.read(); // Clear attach output + Signal lost text
+
+    const maxIterations = Math.floor(timeoutMs / 1000);
+    for (let i = 0; i < maxIterations; i++) {
+      await delay(1000);
+
+      // Check original transport for "Choose a CPU" (radio returned)
+      if (transport?.isOpen()) {
+        const origBuf = transport.peekBuffer();
+        if (origBuf.includes('Choose a CPU')) {
+          logger.progress(`[${context}] Original connection: radio returned! Reattaching...`);
+          await transport.read();
+          await transport.send(String(cpuId) + '\r\n');
+          await new Promise(r => setTimeout(r, 500));
+          await transport.read();
+          // Verify with concatenated marker
+          const vMarker = `BL_${Date.now()}`;
+          await transport.send(`PRINT "["+"${vMarker}"+"]".\n`);
+          try {
+            await transport.waitFor(`[${vMarker}]`, 3000);
+            recovered = true;
+            break;
+          } catch {
+            logger.progress(`[${context}] Reattach verify failed`);
+          }
+        }
       }
 
-      // Health check succeeded (no throw) - connection is working.
-      // Even empty output is just a transient issue, not real signal loss.
-      // Only the specific "Signal lost" kOS message indicates real blackout.
-      return 'unknown';
-    } catch {
-      // Health check threw - connection is broken
-      // Try Ctrl+D to distinguish power loss from crash
+      // Probe: send PRINT with concatenated marker
+      const ts = Date.now();
+      await probe.send(`PRINT "["+"PROBE_${ts}"+"]".\n`);
       try {
-        const canDetach = await conn.tryDetach(2000);
-        if (canDetach) {
-          return 'power_loss';
-        } else {
-          return 'crashed';
+        await probe.waitFor(`[PROBE_${ts}]`, 2000);
+        logger.progress(`[${context}] Probe: radio returned!`);
+        // Wait for original connection to get "Choose a CPU"
+        await delay(3000);
+        // Check original again
+        if (transport?.isOpen()) {
+          const origBuf = transport.peekBuffer();
+          if (origBuf.includes('Choose a CPU')) {
+            await transport.read();
+            await transport.send(String(cpuId) + '\r\n');
+            await new Promise(r => setTimeout(r, 500));
+            await transport.read();
+            const vMarker = `BL_${Date.now()}`;
+            await transport.send(`PRINT "["+"${vMarker}"+"]".\n`);
+            try {
+              await transport.waitFor(`[${vMarker}]`, 3000);
+              recovered = true;
+            } catch { /* verify failed */ }
+          }
         }
+        if (!recovered) {
+          logger.progress(`[${context}] Probe confirmed radio, original transport needs reconnect`);
+          recovered = true;
+        }
+        break;
       } catch {
-        // Even tryDetach failed - likely crashed
-        return 'crashed';
+        // Still in blackout
+      }
+
+      if (i % 10 === 9) {
+        logger.progress(`[${context}] Still in blackout... (${i + 1}s)`);
       }
     }
+  } catch (err) {
+    logger.progress(`[${context}] Probe failed: ${err instanceof Error ? err.message : String(err)}`);
+  } finally {
+    await probe.close().catch(() => {});
   }
 
-  return 'unknown';
-}
-
-/**
- * Get user-friendly message for disconnect reason.
- * Returns null for 'unknown' since those are transient errors that don't need logging.
- */
-function getDisconnectMessage(reason: DisconnectReason, context: string): string | null {
-  switch (reason) {
-    case 'signal_lost':
-      return `[${context}] Radio blackout - autopilot continues autonomously`;
-    case 'power_loss':
-      return `[${context}] Vessel has no power - waiting for batteries to recharge`;
-    case 'crashed':
-      return `[${context}] Vessel may have crashed - checking...`;
-    case 'unknown':
-      return null; // Don't log transient errors
-    default:
-      return null;
-  }
+  return recovered;
 }
 
 /**
  * Poll with resilience to radio blackouts.
  *
- * Instead of failing when connection is lost, continues waiting
- * until signal returns or timeout is reached.
- *
- * Distinguishes between signal loss (wait), power loss (wait), and crash (fail).
+ * On connection failure:
+ * 1. Protects TCP socket with suppressReset
+ * 2. Checks peekBuffer() for "Signal lost" (early detection)
+ * 3. After 3 consecutive failures, launches probe to detect radio return
+ * 4. Returns { hadBlackout: true } — caller reconnects and decides next steps
  */
 export async function pollWithBlackoutResilience<T>(
   options: PollOptions<T>
@@ -169,161 +199,112 @@ export async function pollWithBlackoutResilience<T>(
   } = options;
 
   const startTime = Date.now();
-  let inBlackout = false;
-  let hadBlackout = false;
-  let blackoutStartTime = 0;
-  let lastBlackoutLogTime = 0;
-  const BLACKOUT_LOG_INTERVAL_MS = 30_000; // Log every 30 seconds during blackout
   let lastResult: T | undefined;
-  let currentReason: DisconnectReason | undefined;
-  let crashConfirmCount = 0;
-  const CRASH_CONFIRM_THRESHOLD = 3; // Require multiple crash readings to confirm
-
-  // Lazy classification: only do expensive network classification after multiple failures
   let consecutiveFailures = 0;
-  const CLASSIFY_AFTER_FAILURES = 3; // First 2 failures are quick retries
 
-  while (Date.now() - startTime < timeoutMs) {
-    try {
-      const result = await poll();
-      lastResult = result;
-      consecutiveFailures = 0; // Reset on success
+  // Protect TCP socket from resetConnection() during polling
+  if (connection) {
+    connection.suppressReset = true;
+  }
 
-      // If we were in blackout, we're back
-      if (inBlackout) {
-        const blackoutDuration = Math.round((Date.now() - blackoutStartTime) / 1000);
-        logger.progress(`[${context}] Signal restored after ${blackoutDuration}s - resuming monitoring`);
-        inBlackout = false;
-        crashConfirmCount = 0;
-      }
+  try {
+    while (Date.now() - startTime < timeoutMs) {
+      // Early blackout detection: check buffer for "Signal lost" text
+      if (connection) {
+        const transport = connection.getTransport();
+        if (transport) {
+          const buf = transport.peekBuffer();
+          if (buf.includes('Signal lost')) {
+            logger.progress(`[${context}] Blackout detected (Signal lost) — launching probe...`);
 
-      // Call custom poll handler (await if async - handlers may do work like staging)
-      // Wrap in try/catch so onPoll errors don't trigger blackout detection.
-      // Rationale: poll() succeeded, so connection was working. If onPoll fails:
-      // - Transient issue (e.g., staging): next poll() will succeed
-      // - Real blackout started during onPoll: next poll() will fail and detect it
-      // This prevents false blackout detection from operational errors.
-      if (onPoll) {
-        try {
-          await onPoll(result);
-        } catch (onPollError) {
-          logger.debug(`[${context}] Handler error (will retry): ${onPollError instanceof Error ? onPollError.message : onPollError}`);
-        }
-      }
+            const remaining = timeoutMs - (Date.now() - startTime);
+            await probeForRadioReturn(connection, logger, context, remaining);
 
-      // Check if operation is complete
-      if (isDone(result)) {
-        // Yield to event loop to flush pending notifications before returning
-        await new Promise(resolve => setImmediate(resolve));
-        return {
-          success: isSuccess(result),
-          result,
-          timedOut: false,
-          hadBlackout,
-          disconnectReason: currentReason,
-        };
-      }
-    } catch (error) {
-      consecutiveFailures++;
-      const errorMsg = error instanceof Error ? error.message : String(error);
-
-      // Lazy classification: for first few failures, assume transient and retry quickly
-      // This avoids expensive network-based classification on every hiccup
-      if (consecutiveFailures < CLASSIFY_AFTER_FAILURES) {
-        logger.debug(`[${context}] Poll timeout (${consecutiveFailures}/${CLASSIFY_AFTER_FAILURES}), retrying...`);
-        await delay(200); // Quick retry
-        continue;
-      }
-
-      // After multiple failures, do full classification
-      logger.debug(`[${context}] ${consecutiveFailures} consecutive failures, classifying connection...`);
-      const classifyStart = Date.now();
-      const reason = await classifyConnectionFailure(connection, errorMsg);
-      const classifyMs = Date.now() - classifyStart;
-      logger.debug(`[${context}] Classification: ${reason} (${classifyMs}ms)`);
-
-      // 'unknown' = transient error (parsing issue, timing, etc.) - just retry
-      if (reason === 'unknown') {
-        // Don't log, don't set blackout - continue to next poll iteration
-        // Small delay to prevent tight looping and allow I/O to flush
-        await delay(100);
-        continue;
-      }
-
-      if (!inBlackout) {
-        // First real failure - log it
-        currentReason = reason;
-        const message = getDisconnectMessage(reason, context);
-        if (message) {
-          logger.progress(message);
-        }
-        inBlackout = true;
-        hadBlackout = true;
-        blackoutStartTime = Date.now();
-        lastBlackoutLogTime = blackoutStartTime;
-
-        // If crashed, start confirmation counter
-        if (reason === 'crashed') {
-          crashConfirmCount = 1;
-        }
-      } else {
-        // Already in blackout - log periodic status updates
-        const now = Date.now();
-        if (now - lastBlackoutLogTime >= BLACKOUT_LOG_INTERVAL_MS) {
-          const elapsedSec = Math.round((now - blackoutStartTime) / 1000);
-          const reasonText = currentReason === 'power_loss' ? 'no power' : 'no signal';
-          logger.progress(`[${context}] Still waiting for ${reasonText} (${elapsedSec}s)...`);
-          lastBlackoutLogTime = now;
-        }
-
-        if (currentReason === 'crashed') {
-          // Already in blackout, re-check if still crashed
-          crashConfirmCount++;
-          if (crashConfirmCount >= CRASH_CONFIRM_THRESHOLD) {
-            // Confirmed crash - abort monitoring
-            logger.progress(`[${context}] Vessel crash confirmed - aborting`);
-            // Yield to event loop to flush pending notifications before returning
-            await new Promise(resolve => setImmediate(resolve));
             return {
               success: false,
               result: lastResult,
               timedOut: false,
               hadBlackout: true,
-              disconnectReason: 'crashed',
             };
           }
         }
       }
 
-      // For signal_lost or power_loss, keep waiting - autopilot runs on the vessel
+      try {
+        const result = await poll();
+        lastResult = result;
+        consecutiveFailures = 0;
+
+        // Call custom poll handler
+        if (onPoll) {
+          try {
+            await onPoll(result);
+          } catch (onPollError) {
+            logger.debug(`[${context}] Handler error (will retry): ${onPollError instanceof Error ? onPollError.message : onPollError}`);
+          }
+        }
+
+        // Check if operation is complete
+        if (isDone(result)) {
+          await new Promise(resolve => setImmediate(resolve));
+          return {
+            success: isSuccess(result),
+            result,
+            timedOut: false,
+            hadBlackout: false,
+          };
+        }
+      } catch {
+        consecutiveFailures++;
+
+        // First 2 failures: quick retry (transient)
+        if (consecutiveFailures < 3) {
+          await delay(200);
+          continue;
+        }
+
+        // 3+ failures: confirmed blackout — launch probe
+        logger.progress(`[${context}] Signal lost — launching probe...`);
+
+        if (connection) {
+          const remaining = timeoutMs - (Date.now() - startTime);
+          await probeForRadioReturn(connection, logger, context, remaining);
+        }
+
+        return {
+          success: false,
+          result: lastResult,
+          timedOut: false,
+          hadBlackout: true,
+        };
+      }
+
+      await delay(pollIntervalMs);
     }
 
-    await delay(pollIntervalMs);
-  }
-
-  // Timeout - try one final poll
-  try {
-    const finalResult = await poll();
-    // Yield to event loop to flush pending notifications before returning
-    await new Promise(resolve => setImmediate(resolve));
-    return {
-      success: isDone(finalResult) && isSuccess(finalResult),
-      result: finalResult,
-      timedOut: true,
-      hadBlackout,
-      disconnectReason: currentReason,
-    };
-  } catch {
-    // Still in blackout at timeout
-    // Yield to event loop to flush pending notifications before returning
-    await new Promise(resolve => setImmediate(resolve));
-    return {
-      success: false,
-      result: lastResult,
-      timedOut: true,
-      hadBlackout,
-      disconnectReason: currentReason,
-    };
+    // Timeout — try one final poll
+    try {
+      const finalResult = await poll();
+      await new Promise(resolve => setImmediate(resolve));
+      return {
+        success: isDone(finalResult) && isSuccess(finalResult),
+        result: finalResult,
+        timedOut: true,
+        hadBlackout: false,
+      };
+    } catch {
+      await new Promise(resolve => setImmediate(resolve));
+      return {
+        success: false,
+        result: lastResult,
+        timedOut: true,
+        hadBlackout: false,
+      };
+    }
+  } finally {
+    if (connection) {
+      connection.suppressReset = false;
+    }
   }
 }
 

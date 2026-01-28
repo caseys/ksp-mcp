@@ -797,6 +797,15 @@ export class KosConnection {
       } catch {
         const elapsed = Date.now() - startTime;
         console.error(`[kos-connection] TIMEOUT: comsTest attempt ${attempt} timed out after ${elapsed}ms (limit: ${effectiveTimeout}ms)`);
+
+        // Fast-fail: check if buffer has blackout indicators
+        // Don't clear buffer — let pollWithBlackoutResilience detect it via peekBuffer
+        const buf = this.transport.peekBuffer();
+        if (buf.includes('Signal lost') || buf.includes('Choose a CPU')) {
+          console.error(`[kos-connection] comsTest: blackout detected in buffer`);
+          return false;
+        }
+
         // First attempt failed - wait and retry
         if (attempt === 1) {
           await new Promise(r => setTimeout(r, 500));

@@ -26,6 +26,7 @@ import { circularize } from '../basic/circularize.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import { fmtVel, fmtDist, formatTime } from '../../utils/format.js';
 import { warpForward } from '../../kos/warp.js';
+import { forceDisconnect, ensureConnected } from '../../../transport/connection-tools.js';
 
 // ============================================================================
 // Target Validation
@@ -515,7 +516,7 @@ async function monitorLanding(
       hasAtmosphere?: boolean;  // Body type for separation trigger selection
     };
   } = {}
-): Promise<{ success: boolean; finalStatus: LandingStatus; error?: string }> {
+): Promise<{ success: boolean; finalStatus: LandingStatus; error?: string; hadBlackout?: boolean }> {
   const {
     timeoutMs = DEFAULT_TIMEOUT_MS,
     pollIntervalMs = DEFAULT_POLL_INTERVAL_MS,
@@ -903,6 +904,7 @@ async function monitorLanding(
       success: false,
       finalStatus: result.result?.status ?? { enabled: false, status: 'Unknown', landingAtTarget: false, predictionReady: false, formatted: '' },
       error: `Landing timeout after ${Math.round(timeoutMs / 60_000)} minutes`,
+      hadBlackout: result.hadBlackout,
     };
   }
 
@@ -911,12 +913,14 @@ async function monitorLanding(
       success: false,
       finalStatus: result.result.status,
       error: 'Landing autopilot stopped before touchdown',
+      hadBlackout: result.hadBlackout,
     };
   }
 
   return {
     success: result.success,
     finalStatus: result.result?.status ?? { enabled: false, status: 'Complete', landingAtTarget: false, predictionReady: false, formatted: '' },
+    hadBlackout: result.hadBlackout,
   };
 }
 
@@ -980,7 +984,7 @@ export const landTool: ToolDefinition = {
   },
   tier: 1,
   handler: async (args, ctx, extra) => {
-    const conn = await ctx.ensureConnected();
+    let conn = await ctx.ensureConnected();
     // Resolve 'auto' to client-appropriate default
     const waitArg = args.wait as boolean | 'auto';
     const wait = waitArg === 'auto' ? ctx.supportsNotifications(extra) : waitArg;
@@ -1236,6 +1240,19 @@ export const landTool: ToolDefinition = {
         const atmCheck = await conn.queue('PRINT SHIP:BODY:ATM:EXISTS.', 2000);
         hasAtmosphere = atmCheck.output.includes('True');
       } catch { /* assume no atmosphere */ }
+
+      // Check for tidally locked body — landing may result in permanent radio blackout
+      try {
+        const tidalCheck = await conn.queue(
+          'SET _sb TO SHIP:BODY. ' +
+          'PRINT ABS(_sb:ROTATIONPERIOD - _sb:ORBIT:PERIOD) / _sb:ORBIT:PERIOD.',
+          3000
+        );
+        const tidalRatio = parseFloat(tidalCheck.output.match(/[\d.eE+-]+/)?.[0] || '1');
+        if (tidalRatio < 0.001) {
+          logger.progress('[Landing] WARNING: Landing on a tidally locked moon — if you land on the far side, you will have PERMANENT radio blackout!');
+        }
+      } catch { /* non-fatal */ }
 
       // Step 0.8b: Scan vessel structure for landing legs and separation stages
       const vesselScan = await scanVesselForLanding(conn, hasAtmosphere);
@@ -1528,6 +1545,19 @@ export const landTool: ToolDefinition = {
             WAIT 10.
             SET SASMODE TO "STABILITYASSIST".
             RCS OFF.
+            IF NOT HOMECONNECTION:ISCONNECTED {
+              PRINT "Landed in blackout - warping to radio contact".
+              SET _MCP_LAND_WARP TO 0.
+              SET _MCP_WARP_DT TO SHIP:BODY:ROTATIONPERIOD / 4.
+              UNTIL HOMECONNECTION:ISCONNECTED OR _MCP_LAND_WARP > 20 {
+                SET _MCP_LAND_WARP TO _MCP_LAND_WARP + 1.
+                PRINT "Warp " + _MCP_LAND_WARP + " - no radio (" + ROUND(_MCP_WARP_DT) + "s jump)".
+                KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + _MCP_WARP_DT).
+                WAIT UNTIL KUNIVERSE:TIMEWARP:WARP = 0.
+                WAIT 15.
+              }
+              IF HOMECONNECTION:ISCONNECTED { PRINT "Radio contact restored!". }
+            }
             RETURN FALSE.
           }
         `.trim().replaceAll('\n', ' ');
@@ -1563,11 +1593,32 @@ export const landTool: ToolDefinition = {
           deferredSeparation: deferredSepConfig,
         });
 
+        // If blackout occurred during monitoring, reconnect and check vessel state
+        // The kOS WHEN trigger handles warp-to-radio autonomously after landing
+        if (monitorResult.hadBlackout) {
+          logger.progress('[Landing] Reconnecting after blackout...');
+          try {
+            await forceDisconnect();
+            conn = await ensureConnected();
+            logger.progress('[Landing] Reconnected after blackout');
+
+            const statusCheck = await conn.queue('PRINT SHIP:STATUS.', 3000);
+            const isLanded = statusCheck.output.includes('LANDED') || statusCheck.output.includes('SPLASHED');
+            if (isLanded) {
+              monitorResult.success = true;
+            }
+          } catch (err) {
+            logger.warn(`[Landing] Reconnect failed: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
+
         // Warp to radio contact if we landed in blackout
-        // (e.g., on far side of a moon)
-        const radioResult = await warpToRadioContact(conn, { logger, context: 'Landing' });
-        if (!radioResult.success && radioResult.error) {
-          logger.warn(`[Landing] ${radioResult.error}`);
+        // (e.g., on far side of a moon — kOS trigger may not have fired yet)
+        if (!monitorResult.hadBlackout) {
+          const radioResult = await warpToRadioContact(conn, { logger, context: 'Landing' });
+          if (!radioResult.success && radioResult.error) {
+            logger.warn(`[Landing] ${radioResult.error}`);
+          }
         }
 
         if (monitorResult.success) {
