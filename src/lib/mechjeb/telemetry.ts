@@ -11,6 +11,7 @@ import type { StatusData } from '../../utils/mcp-status.js';
 import type { KosOperationState } from '../../utils/kos-operation-state.js';
 export type { StatusData } from '../../utils/mcp-status.js';
 import { parseNumber } from './shared.js';
+import { updateTargetCache } from '../tool-types.js';
 import { config } from '../../config/index.js';
 import { ensureConnected } from '../../transport/connection-tools.js';
 import { delay } from '../utils/progress.js';
@@ -546,6 +547,11 @@ export async function getStatusData(
   // Update cache on successful fetch
   cachedStatusData = data;
   cacheTimestamp = Date.now();
+
+  // Update target name cache for parseTarget fuzzy matching
+  if (data.targets) {
+    updateTargetCache(data.targets);
+  }
 
   return data;
 }

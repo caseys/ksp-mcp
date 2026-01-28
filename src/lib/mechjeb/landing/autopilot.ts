@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { ToolDefinition, McpLogger } from '../../tool-types.js';
-import { nullLogger, parseTarget } from '../../tool-types.js';
+import { nullLogger, parseTarget, resolveTargetName } from '../../tool-types.js';
 import { setKosOperation, clearKosOperation } from '../../../utils/kos-operation-state.js';
 import { clearBroadcastLogger } from '../../../utils/mcp-logger.js';
 import { pollWithBlackoutResilience } from '../../../utils/poll-with-resilience.js';
@@ -772,27 +772,6 @@ async function monitorLanding(
           lastLoggedSpeed = speed;
           lastThresholdLogTime = now;
         }
-
-        // Progressive physics warp - only on bodies WITHOUT atmosphere
-        if (!hasAtmosphere && initialBrakingSpeed > 0) {
-          // Calculate progress: 0 = just started, 1 = done
-          const progress = 1 - (speed / initialBrakingSpeed);
-          let targetWarp: number;
-          if (progress < 0.5) {
-            // First half: ramp up (0->0.5 maps to warp 0->3)
-            targetWarp = Math.min(3, Math.floor(progress * 6));
-          } else {
-            // Second half: ramp down (0.5->1.0 maps to warp 3->0)
-            targetWarp = Math.max(0, Math.floor((1 - progress) * 6));
-          }
-          if (targetWarp !== currentWarpLevel) {
-            try {
-              await conn.raw(`SET WARPMODE TO "PHYSICS". SET WARP TO ${targetWarp}.`);
-              currentWarpLevel = targetWarp;
-            } catch { /* ignore */ }
-          }
-        }
-        return;
       }
 
       // Parse final descent altitude from status like "Final descent: 200m above terrain"
@@ -1309,7 +1288,8 @@ export const landTool: ToolDefinition = {
       const thrustLimit = await limitThrustForLanding(conn, logger);
 
       // Step 1: Resolve landing target
-      const targetArg = args.target as string | 'auto';
+      const rawTargetArg = args.target as string | 'auto';
+      const targetArg = rawTargetArg === 'auto' ? 'auto' : await resolveTargetName(conn, rawTargetArg);
       const latitude = args.latitude as number | undefined;
       const longitude = args.longitude as number | undefined;
 
@@ -1348,47 +1328,55 @@ export const landTool: ToolDefinition = {
       }
 
       if (effectiveTarget) {
-        // Target is a vessel name - try to find it and get its position
-        // Note: Use TGTV instead of V to avoid clobbering kOS built-in V() function
-        const vesselResult = await conn.queue(
-          `IF EXISTS(VESSEL("${effectiveTarget}")) { ` +
-          `  SET TGTV TO VESSEL("${effectiveTarget}"). ` +
-          `  IF TGTV:STATUS = "LANDED" OR TGTV:STATUS = "SPLASHED" { ` +
-          `    IF TGTV:BODY:NAME = SHIP:BODY:NAME { ` +
-          `      PRINT "OK|" + TGTV:GEOPOSITION:LAT + "|" + TGTV:GEOPOSITION:LNG. ` +
-          `    } ELSE { PRINT "WRONGBODY|" + TGTV:BODY:NAME. } ` +
-          `  } ELSE { PRINT "NOTLANDED|" + TGTV:STATUS. } ` +
-          `} ELSE { PRINT "NOTFOUND". }`,
-          5000
-        );
-
-        const okMatch = vesselResult.output.match(/OK\|([-\d.]+)\|([-\d.]+)/);
-        if (okMatch) {
-          targetLat = Number.parseFloat(okMatch[1]);
-          targetLng = Number.parseFloat(okMatch[2]);
-          logger.progress(`[Landing] Target vessel "${effectiveTarget}" at ${targetLat.toFixed(2)}°, ${targetLng.toFixed(2)}°`);
-          const targetResult = await setLandingPositionTarget(conn, targetLat, targetLng);
+        // Check if target matches a preset name first
+        const presetKey = Object.keys(PRESETS).find(k => k.toLowerCase() === effectiveTarget.toLowerCase());
+        if (presetKey) {
+          const preset = PRESETS[presetKey];
+          logger.progress(`[Landing] Setting target: ${presetKey}`);
+          const targetResult = await setLandingPositionTarget(conn, preset.lat, preset.lng);
           if (!targetResult.success) {
-            return ctx.errorResponse('land', targetResult.error ?? 'Failed to set position target');
+            return ctx.errorResponse('land', targetResult.error ?? `Failed to set ${presetKey} target`);
           }
-        } else if (vesselResult.output.includes('WRONGBODY')) {
-          const bodyMatch = vesselResult.output.match(/WRONGBODY\|(\w+)/);
-          return ctx.errorResponse('land', `Vessel "${effectiveTarget}" is on ${bodyMatch?.[1] ?? 'different body'}, not current SOI`);
-        } else if (vesselResult.output.includes('NOTLANDED')) {
-          const statusMatch = vesselResult.output.match(/NOTLANDED\|(\w+)/);
-          return ctx.errorResponse('land', `Vessel "${effectiveTarget}" is not landed (status: ${statusMatch?.[1] ?? 'unknown'})`);
+          targetLat = preset.lat;
+          targetLng = preset.lng;
         } else {
-          // Vessel not found - check if target matches a preset name
-          const presetKey = Object.keys(PRESETS).find(k => k.toLowerCase() === effectiveTarget!.toLowerCase());
-          if (presetKey) {
-            const preset = PRESETS[presetKey];
-            logger.progress(`[Landing] Setting target: ${presetKey}`);
-            const targetResult = await setLandingPositionTarget(conn, preset.lat, preset.lng);
-            if (!targetResult.success) {
-              return ctx.errorResponse('land', targetResult.error ?? `Failed to set ${presetKey} target`);
+          // Target is a vessel name - find in target list, set KSP target, validate
+          // Note: EXISTS(VESSEL("name")) doesn't work in kOS — use LIST TARGETS instead
+          const vesselResult = await conn.queue(
+            `SET FOUND TO FALSE. ` +
+            `LIST TARGETS IN TL. FOR TG IN TL { ` +
+            `  IF TG:NAME = "${effectiveTarget}" AND TG:ISTYPE("Vessel") { ` +
+            `    IF TG:STATUS = "LANDED" OR TG:STATUS = "SPLASHED" { ` +
+            `      IF TG:BODY:NAME = SHIP:BODY:NAME { ` +
+            `        SET TARGET TO TG. SET FOUND TO TRUE. PRINT "OK". ` +
+            `      } ELSE { PRINT "WRONGBODY|" + TG:BODY:NAME. } ` +
+            `    } ELSE { PRINT "NOTLANDED|" + TG:STATUS. } ` +
+            `  } ` +
+            `} IF NOT FOUND AND NOT HASTARGET { PRINT "NOTFOUND". }`,
+            8000
+          );
+
+          if (vesselResult.output.includes('OK')) {
+            logger.progress(`[Landing] Target set to vessel "${effectiveTarget}"`);
+            // Fall through — getValidLandingTarget will pick up the landed vessel target
+            const existingTarget = await getValidLandingTarget(conn);
+            if (existingTarget.valid) {
+              targetLat = existingTarget.latitude;
+              targetLng = existingTarget.longitude;
+              const targetResult = await setLandingPositionTarget(conn, targetLat!, targetLng!);
+              if (!targetResult.success) {
+                return ctx.errorResponse('land', targetResult.error ?? 'Failed to set position target');
+              }
+              logger.progress(`[Landing] Target vessel at ${targetLat!.toFixed(2)}°, ${targetLng!.toFixed(2)}°`);
+            } else {
+              return ctx.errorResponse('land', `Vessel "${effectiveTarget}" targeted but could not read coordinates`);
             }
-            targetLat = preset.lat;
-            targetLng = preset.lng;
+          } else if (vesselResult.output.includes('WRONGBODY')) {
+            const bodyMatch = vesselResult.output.match(/WRONGBODY\|(\w+)/);
+            return ctx.errorResponse('land', `Vessel "${effectiveTarget}" is on ${bodyMatch?.[1] ?? 'different body'}, not current SOI`);
+          } else if (vesselResult.output.includes('NOTLANDED')) {
+            const statusMatch = vesselResult.output.match(/NOTLANDED\|(\w+)/);
+            return ctx.errorResponse('land', `Vessel "${effectiveTarget}" is not landed (status: ${statusMatch?.[1] ?? 'unknown'})`);
           } else {
             return ctx.errorResponse('land', `Vessel "${effectiveTarget}" not found`);
           }

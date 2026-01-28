@@ -122,7 +122,7 @@ const POSITIONAL_ARGS: Record<string, string[]> = {
   'change_eccentricity': ['eccentricity'],
   'switch_cpu': ['cpuId'],
   // Landing / Targeting
-  'land': ['action'],
+  'land': ['target'],
   'set_position_target': ['latitude', 'longitude'],
   'configure_landing': ['touchdownSpeed'],
 };

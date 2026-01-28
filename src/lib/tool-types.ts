@@ -223,6 +223,19 @@ export const distanceSchema = z.preprocess(
   z.union([z.number(), z.literal('auto'), z.array(z.union([z.number(), z.literal('auto')]))])
 );
 
+// ==================== Target Name Cache ====================
+// Updated by getStatusData() on each successful fetch.
+// Stores exact names of bodies and vessels in the current SOI.
+let cachedTargetNames: string[] = [];
+
+/**
+ * Update the cached list of target names from status data.
+ * Called by getStatusData() after each successful fetch.
+ */
+export function updateTargetCache(targets: Array<{ name: string }>): void {
+  cachedTargetNames = targets.map(t => t.name);
+}
+
 /**
  * Stock KSP celestial bodies for fuzzy matching.
  * Keys are canonical names, values are common misspellings/STT errors.
@@ -265,25 +278,45 @@ function levenshtein(a: string, b: string): number {
 }
 
 /**
- * Find the best matching KSP body name for a given input.
- * Returns the canonical name if a good match is found, otherwise the original input.
+ * Exact-match a target name against cache and canonical body names.
+ * No fuzzy matching — returns original input if no exact match found.
+ * Used by parseTarget (synchronous zod preprocessor).
  */
-function matchTargetName(input: string): string {
+function exactMatchTargetName(input: string): string {
   const normalized = input.toLowerCase().trim().replaceAll(/\s+/g, '');
 
-  // Exact match on canonical names
+  // Exact match on cached target names (bodies + vessels in SOI)
+  for (const name of cachedTargetNames) {
+    if (name.toLowerCase() === normalized) return name;
+  }
+
+  // Exact match on canonical body names
   for (const canonical of Object.keys(KSP_BODIES)) {
     if (canonical.toLowerCase() === normalized) return canonical;
   }
 
-  // Check aliases/misspellings
+  // Check aliases/misspellings (exact alias match only)
   for (const [canonical, aliases] of Object.entries(KSP_BODIES)) {
     for (const alias of aliases) {
       if (alias.toLowerCase().replaceAll(/\s+/g, '') === normalized) return canonical;
     }
   }
 
-  // Fuzzy match using Levenshtein distance
+  return input;
+}
+
+/**
+ * Full target name matching including fuzzy Levenshtein.
+ * Only matches against bodies — vessel names must be exact.
+ */
+function fuzzyMatchTargetName(input: string): string {
+  const normalized = input.toLowerCase().trim().replaceAll(/\s+/g, '');
+
+  // Try exact match first
+  const exact = exactMatchTargetName(input);
+  if (exact !== input) return exact;
+
+  // Fuzzy match against body names only (not vessels)
   let bestMatch = input;
   let bestScore = Infinity;
   const maxDistance = Math.max(2, Math.floor(normalized.length * 0.4));
@@ -311,13 +344,40 @@ function matchTargetName(input: string): string {
 }
 
 /**
- * Preprocess target name to handle common misspellings and STT errors.
- * Passes through 'auto' unchanged for dynamic resolution.
+ * Preprocess target name for zod schema validation.
+ * Only does exact matching (cache + canonical names + aliases).
+ * No fuzzy matching — unrecognized names pass through for handler resolution.
  */
 export function parseTarget(val: unknown): string | unknown {
   if (typeof val !== 'string') return val;
-  if (val === 'auto') return val;  // Pass through sentinel
-  return matchTargetName(val);
+  if (val === 'auto') return val;
+  return exactMatchTargetName(val);
+}
+
+/**
+ * Resolve a target name with full matching, ensuring cache is populated.
+ * Call this in tool handlers after conn is available.
+ * Does exact match (cache + bodies) then fuzzy Levenshtein against body names.
+ */
+export async function resolveTargetName(conn: KosConnection, input: string): Promise<string> {
+  if (input === 'auto') return input;
+
+  // Populate cache if empty
+  if (cachedTargetNames.length === 0) {
+    try {
+      const { getStatusData } = await import('./mechjeb/telemetry.js');
+      await getStatusData(conn);
+      // Cache is now populated via updateTargetCache callback
+    } catch {
+      // Fall through — match against static body names only
+    }
+  }
+
+  // Try exact match first (includes cache), then fuzzy
+  const exact = exactMatchTargetName(input);
+  if (exact !== input) return exact;
+
+  return fuzzyMatchTargetName(input);
 }
 
 /**
