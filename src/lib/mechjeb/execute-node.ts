@@ -264,8 +264,30 @@ async function runAlignScript(
   // Enable 2x physics warp to speed up rotation (will drop to 1x when error < 30°)
   await conn.raw('SET KUNIVERSE:TIMEWARP:MODE TO "PHYSICS". SET WARP TO 1.', 3000);
 
-  // Start alignment: LOCK STEERING only (no WHEN trigger)
-  // RCS pulses are sent from TypeScript poll loop with calculated duration
+  // Set up stuck-detection WHEN trigger before alignment
+  // Monitors angular velocity — if near zero while still misaligned, resets steering
+  const stuckTrigger = [
+    `SET _MCP_ALIGN_ACTIVE TO TRUE.`,
+    `SET _MCP_STUCK_COUNT TO 0.`,
+    `WHEN _MCP_ALIGN_ACTIVE THEN {`,
+    `  IF SHIP:ANGULARVEL:MAG < 0.005 AND ${angleCheck} > 10 {`,
+    `    SET _MCP_STUCK_COUNT TO _MCP_STUCK_COUNT + 1.`,
+    `    IF _MCP_STUCK_COUNT >= 3 {`,
+    `      UNLOCK STEERING. WAIT 0.`,
+    `      SET frozenUp TO SHIP:UP:VECTOR.`,
+    `      LOCK STEERING TO LOOKDIRUP(${vector}, frozenUp).`,
+    `      SET _MCP_STUCK_COUNT TO 0.`,
+    `      PRINT "Alignment stuck - reset steering".`,
+    `    }`,
+    `  } ELSE {`,
+    `    SET _MCP_STUCK_COUNT TO 0.`,
+    `  }`,
+    `  RETURN _MCP_ALIGN_ACTIVE.`,
+    `}`,
+  ].join(' ');
+  await conn.raw(stuckTrigger, 5000);
+
+  // Start alignment: LOCK STEERING with RCS pulses from TypeScript poll loop
   // Freeze the up vector once so roll doesn't fight during alignment
   const alignCmd = `SAS OFF. SET frozenUp TO SHIP:UP:VECTOR. LOCK STEERING TO LOOKDIRUP(${vector}, frozenUp).`;
   await conn.queue(alignCmd, 5000);
@@ -273,60 +295,67 @@ async function runAlignScript(
   // Poll until aligned or timeout
   let errorAngle = 180;
   let lastOutput = '';
+  const cleanup = async () => {
+    try {
+      await conn.raw('SET _MCP_ALIGN_ACTIVE TO FALSE. SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS". SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
+    } catch { /* best effort */ }
+  };
 
-  while (Date.now() - startTime < timeout) {
-    const result = await conn.queue(
-      `PRINT ROUND(${angleCheck}, 2).`,
-      3000
-    );
-    lastOutput = result.output;
+  try {
+    while (Date.now() - startTime < timeout) {
+      const result = await conn.queue(
+        `PRINT ROUND(${angleCheck}, 2).`,
+        3000
+      );
+      lastOutput = result.output;
 
-    const angle = parseFloat(result.output.trim());
-    if (!isNaN(angle)) {
-      errorAngle = angle;
+      const angle = parseFloat(result.output.trim());
+      if (!isNaN(angle)) {
+        errorAngle = angle;
 
-      if (angle <= targetError) {
-        // Aligned - cleanup: restore warp mode and unlock all controls
-        await conn.raw('SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS". SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
-        return {
-          success: true,
-          method: 'KOS',
-          errorAngle,
-          output: `Aligned to ${errorAngle}°`,
-        };
-      }
-
-      // Drop physics warp when close to aligned for more precise control
-      if (angle < 30) {
-        await conn.raw('SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS".', 2000);
-      }
-
-      // Skip RCS when error < 15° - let reaction wheels handle fine settling
-      // RCS is too powerful and causes oscillation around target
-      if (angle >= 15) {
-        // Send RCS pulses with duration and count based on burn dV and heading error
-        const pulseDuration = calculateRcsPulseDuration(burnDv ?? 100, angle);
-        const pulseCount = calculatePulseCount(burnDv ?? 100, angle);
-
-        // Build command for N pulses in one kOS execution (no round-trips between pulses)
-        let pulseCmd = '';
-        for (let i = 0; i < pulseCount; i++) {
-          pulseCmd += `SET RCS TO TRUE. WAIT ${pulseDuration.toFixed(3)}. SET RCS TO FALSE.`;
-          if (i < pulseCount - 1) {
-            pulseCmd += ` WAIT ${RCS_PULSE_OFF_TIME}. `;
-          }
+        if (angle <= targetError) {
+          await cleanup();
+          return {
+            success: true,
+            method: 'KOS',
+            errorAngle,
+            output: `Aligned to ${errorAngle}°`,
+          };
         }
-        await conn.raw(pulseCmd, 5000);
-      }
-      // else: reaction wheels only via LOCK STEERING
-    }
 
-    // Wait before next poll
-    await new Promise((resolve) => setTimeout(resolve, 2500));
+        // Drop physics warp when close to aligned for more precise control
+        if (angle < 30) {
+          await conn.raw('SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS".', 2000);
+        }
+
+        // Skip RCS when error < 15° - let reaction wheels handle fine settling
+        // RCS is too powerful and causes oscillation around target
+        if (angle >= 15) {
+          // Send RCS pulses with duration and count based on burn dV and heading error
+          const pulseDuration = calculateRcsPulseDuration(burnDv ?? 100, angle);
+          const pulseCount = calculatePulseCount(burnDv ?? 100, angle);
+
+          // Build command for N pulses in one kOS execution (no round-trips between pulses)
+          let pulseCmd = '';
+          for (let i = 0; i < pulseCount; i++) {
+            pulseCmd += `SET RCS TO TRUE. WAIT ${pulseDuration.toFixed(3)}. SET RCS TO FALSE.`;
+            if (i < pulseCount - 1) {
+              pulseCmd += ` WAIT ${RCS_PULSE_OFF_TIME}. `;
+            }
+          }
+          await conn.raw(pulseCmd, 5000);
+        }
+        // else: reaction wheels only via LOCK STEERING
+      }
+
+      // Wait before next poll
+      await new Promise((resolve) => setTimeout(resolve, 2500));
+    }
+  } finally {
+    await cleanup();
   }
 
-  // Timeout - cleanup: restore warp mode and unlock all controls
-  await conn.raw('SET WARP TO 0. SET KUNIVERSE:TIMEWARP:MODE TO "RAILS". SET RCS TO FALSE. UNLOCK STEERING. UNLOCK THROTTLE.', 3000);
+  // Timeout
   console.error(`[execute-node] Alignment timeout, final error: ${errorAngle}°`);
   return {
     success: false,
@@ -435,6 +464,9 @@ export async function executeNode(
 
   const log = logger ?? nullLogger;
   const logPrefix = callerTool ? `[${callerTool} Maneuver]` : '[Maneuver]';
+  // Clean slate: unlock any stuck controls from previous operations
+  await unlockControls(conn);
+
   // Check if a node exists
   const nodeCheck = await conn.queue('PRINT HASNODE.', 2000);
   if (!nodeCheck.success || !nodeCheck.output.includes('True')) {

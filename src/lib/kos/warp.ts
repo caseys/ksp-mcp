@@ -13,6 +13,7 @@ import { formatTime, fmtDist } from '../utils/format.js';
 import { hasTarget } from './target/shared.js';
 import { ManeuverOrchestrator } from '../mechjeb/orchestrator.js';
 import { handlePostSOIArrival } from '../mechjeb/transfer/return-from-moon.js';
+import { unlockControls } from '../mechjeb/shared.js';
 
 const POLL_INTERVAL_MS = 2500;  // Poll every 2.5s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -513,6 +514,9 @@ export async function warpTo(
   const leadTime = options.leadTime ?? 0;
   const timeout = options.timeout ?? DEFAULT_TIMEOUT_MS;
   const logger = options.logger;
+
+  // Clean slate: unlock any stuck controls from previous operations
+  await unlockControls(conn);
 
   switch (target) {
     case 'node': {

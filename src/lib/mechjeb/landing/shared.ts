@@ -307,7 +307,7 @@ export async function startTargetedLanding(
   conn: KosConnection
 ): Promise<{ success: boolean; error?: string }> {
   const result = await conn.queue(
-    'SET LAND TO ADDONS:MJ:LANDING. PRINT LAND:LANDATPOSITIONTARGET().',
+    'SET LAND TO ADDONS:MJ:LANDING. SET LAND:AUTOWARP TO TRUE. PRINT LAND:LANDATPOSITIONTARGET().',
     5000
   );
 
@@ -329,7 +329,7 @@ export async function startUntargetedLanding(
   conn: KosConnection
 ): Promise<{ success: boolean; error?: string }> {
   const result = await conn.queue(
-    'SET LAND TO ADDONS:MJ:LANDING. PRINT LAND:LANDUNTARGETED().',
+    'SET LAND TO ADDONS:MJ:LANDING. SET LAND:AUTOWARP TO TRUE. PRINT LAND:LANDUNTARGETED().',
     5000
   );
 
