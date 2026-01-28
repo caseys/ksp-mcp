@@ -257,15 +257,31 @@ export async function setLandingPositionTarget(
     return { success: false, error: 'Longitude must be between -180 and 180' };
   }
 
+  // Set target and verify it was set correctly on the current body
   const result = await conn.queue(
-    `SET TGT TO ADDONS:MJ:TARGET. PRINT TGT:SETTARGET(${latitude}, ${longitude}).`,
+    `SET TGT TO ADDONS:MJ:TARGET. TGT:SETTARGET(${latitude}, ${longitude}). ` +
+    `IF TGT:POSITIONTARGETEXISTS AND TGT:TARGETBODY = SHIP:BODY:NAME { PRINT "OK". } ` +
+    `ELSE { PRINT "FAIL|" + TGT:POSITIONTARGETEXISTS + "|" + TGT:TARGETBODY. }`,
     5000
   );
 
-  return {
-    success: result.output.includes('True'),
-    error: result.output.includes('True') ? undefined : 'Failed to set position target',
-  };
+  if (result.output.includes('OK')) {
+    return { success: true };
+  }
+
+  // Parse failure info for better error message
+  const failMatch = result.output.match(/FAIL\|(True|False)\|(.+)/i);
+  if (failMatch) {
+    const exists = failMatch[1].toLowerCase() === 'true';
+    const targetBody = failMatch[2].trim();
+    if (!exists) {
+      return { success: false, error: 'Failed to set position target (target not created)' };
+    } else {
+      return { success: false, error: `Position target set for ${targetBody} but ship is at different body` };
+    }
+  }
+
+  return { success: false, error: 'Failed to set position target' };
 }
 
 /**
@@ -306,8 +322,10 @@ export async function hasLandingPositionTarget(conn: KosConnection): Promise<boo
 export async function startTargetedLanding(
   conn: KosConnection
 ): Promise<{ success: boolean; error?: string }> {
+  // Enable autowarp via Node module (landing autopilot reads Core.Node.Autowarp)
   const result = await conn.queue(
-    'SET LAND TO ADDONS:MJ:LANDING. SET LAND:AUTOWARP TO TRUE. PRINT LAND:LANDATPOSITIONTARGET().',
+    'SET ADDONS:MJ:NODE:AUTOWARP TO TRUE. ' +
+    'SET LAND TO ADDONS:MJ:LANDING. PRINT LAND:LANDATPOSITIONTARGET().',
     5000
   );
 
@@ -328,8 +346,10 @@ export async function startTargetedLanding(
 export async function startUntargetedLanding(
   conn: KosConnection
 ): Promise<{ success: boolean; error?: string }> {
+  // Enable autowarp via Node module (landing autopilot reads Core.Node.Autowarp)
   const result = await conn.queue(
-    'SET LAND TO ADDONS:MJ:LANDING. SET LAND:AUTOWARP TO TRUE. PRINT LAND:LANDUNTARGETED().',
+    'SET ADDONS:MJ:NODE:AUTOWARP TO TRUE. ' +
+    'SET LAND TO ADDONS:MJ:LANDING. PRINT LAND:LANDUNTARGETED().',
     5000
   );
 

@@ -34,8 +34,9 @@ import { forceDisconnect, ensureConnected } from '../../../transport/connection-
 
 /**
  * Check if current KSP target is valid for landing:
- * - Position target (surface coordinates), OR
- * - Landed vessel on same body as ship
+ * - Landed vessel on same body as ship (checked FIRST - explicit user target)
+ * - Body target matching current SOI
+ * - MechJeb position target (fallback - may be stale from previous attempts)
  * Returns { valid, lat?, lng?, name? } or { valid: false }
  */
 let myBody:string;
@@ -45,29 +46,7 @@ async function getValidLandingTarget(conn: KosConnection): Promise<{
   longitude?: number;
   name?: string;
 }> {
-  // Check for MechJeb position target first
-  const mjTarget = await conn.queue(
-    'SET TGT TO ADDONS:MJ:TARGET. ' +
-    'IF TGT:POSITIONTARGETEXISTS { PRINT "POS|" + TGT:TARGETLATITUDE + "|" + TGT:TARGETLONGITUDE + "|" + TGT:TARGETBODY. } ' +
-    'ELSE { PRINT "NOPOS". }',
-    3000
-  );
-
-  const posMatch = mjTarget.output.match(/POS\|([-\d.]+)\|([-\d.]+)\|(.+)/);
-  if (posMatch) {
-    const lat = Number.parseFloat(posMatch[1]);
-    const lng = Number.parseFloat(posMatch[2]);
-    const body = posMatch[3].trim();
-
-    // Verify it's on our current body
-    const shipBody = await conn.queue('PRINT SHIP:BODY:NAME.', 2000);
-    myBody = shipBody.output;
-    if (shipBody.output.includes(body)) {
-      return { valid: true, latitude: lat, longitude: lng, name: `Position ${lat.toFixed(2)}°, ${lng.toFixed(2)}°` };
-    }
-  }
-
-  // Check for landed vessel target on same body
+  // Check for landed vessel target FIRST - this is an explicit user target
   const vesselCheck = await conn.queue(
     'IF HASTARGET AND TARGET:ISTYPE("Vessel") { ' +
     '  IF TARGET:STATUS = "LANDED" OR TARGET:STATUS = "SPLASHED" { ' +
@@ -106,6 +85,28 @@ async function getValidLandingTarget(conn: KosConnection): Promise<{
       return { valid: true, latitude: -0.0972, longitude: -74.5577, name: 'KSC (default for Kerbin)' };
     }
     // For other bodies, fall through to findLandingSite (returns valid: false)
+  }
+
+  // Fall back to MechJeb position target (may be stale from previous landing attempts)
+  const mjTarget = await conn.queue(
+    'SET TGT TO ADDONS:MJ:TARGET. ' +
+    'IF TGT:POSITIONTARGETEXISTS { PRINT "POS|" + TGT:TARGETLATITUDE + "|" + TGT:TARGETLONGITUDE + "|" + TGT:TARGETBODY. } ' +
+    'ELSE { PRINT "NOPOS". }',
+    3000
+  );
+
+  const posMatch = mjTarget.output.match(/POS\|([-\d.]+)\|([-\d.]+)\|(.+)/);
+  if (posMatch) {
+    const lat = Number.parseFloat(posMatch[1]);
+    const lng = Number.parseFloat(posMatch[2]);
+    const body = posMatch[3].trim();
+
+    // Verify it's on our current body
+    const shipBody = await conn.queue('PRINT SHIP:BODY:NAME.', 2000);
+    myBody = shipBody.output;
+    if (shipBody.output.includes(body)) {
+      return { valid: true, latitude: lat, longitude: lng, name: `Position ${lat.toFixed(2)}°, ${lng.toFixed(2)}°` };
+    }
   }
 
   return { valid: false };
