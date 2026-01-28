@@ -770,11 +770,26 @@ async function monitorLanding(
         // After seeing same status twice, nudge warp by 1 (max 4x)
         if (consecutiveSameStatusCount >= 2) {
           try {
-            const warpCheck = await conn.queue('PRINT WARP.', 2000);
-            const currentWarp = parseInt(warpCheck.output.match(/(\d+)/)?.[1] ?? '0');
-            if (currentWarp < 4) {
-              await conn.raw(`SET WARP TO ${currentWarp + 1}.`, 2000);
-              log.info(`[Landing] Nudging warp to ${currentWarp + 1}x (waiting for MechJeb)`);
+            // Check if engines burning or in atmosphere to choose warp mode
+            // PHYSICS warp required when engines active or in atmosphere
+            // RAILS warp can be used in vacuum with no thrust
+            const warpStateCheck = await conn.queue(
+              'PRINT "WS|" + WARP + "|" + (SHIP:AVAILABLETHRUST > 0 AND THROTTLE > 0) + "|" + ' +
+              '(SHIP:BODY:ATM:EXISTS AND ALTITUDE < SHIP:BODY:ATM:HEIGHT).',
+              2000
+            );
+            const wsMatch = warpStateCheck.output.match(/WS\|(\d+)\|(True|False)\|(True|False)/i);
+            if (wsMatch) {
+              const currentWarp = parseInt(wsMatch[1]);
+              const enginesActive = wsMatch[2].toLowerCase() === 'true';
+              const inAtmosphere = wsMatch[3].toLowerCase() === 'true';
+
+              if (currentWarp < 4) {
+                // Set appropriate warp mode before increasing
+                const warpMode = (enginesActive || inAtmosphere) ? 'PHYSICS' : 'RAILS';
+                await conn.raw(`SET WARPMODE TO "${warpMode}". SET WARP TO ${currentWarp + 1}.`, 2000);
+                log.info(`[Landing] Nudging warp to ${currentWarp + 1}x ${warpMode} (waiting for MechJeb)`);
+              }
             }
           } catch { /* ignore warp errors */ }
           consecutiveSameStatusCount = 0; // Reset after nudge
@@ -811,6 +826,11 @@ async function monitorLanding(
       }
     },
   });
+
+  // Always reset warp to RAILS mode when poll loop exits
+  try {
+    await conn.raw('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000);
+  } catch { /* ignore cleanup errors */ }
 
   if (result.timedOut && !result.result?.isLanded) {
     return {
