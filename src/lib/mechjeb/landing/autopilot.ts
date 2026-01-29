@@ -22,6 +22,7 @@ import {
 } from './shared.js';
 import { findLandingSite } from './find-site.js';
 import { getVesselStateInfo } from '../../kos/vessel/validate.js';
+import { invalidateStatusCache } from '../telemetry.js';
 import { circularize } from '../basic/circularize.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
 import { fmtVel, fmtDist, formatTime } from '../../utils/format.js';
@@ -965,6 +966,8 @@ export const landTool: ToolDefinition = {
     try {
 
       // Step 0.5: Check orbital safety - handle hyperbolic/unstable approaches
+      // Force fresh telemetry — stale cache can have old eccentricity from pre-circularization
+      invalidateStatusCache();
       const stateInfo = await getVesselStateInfo(conn);
       const { eccentricity, periapsis } = stateInfo;
 
@@ -1091,7 +1094,7 @@ export const landTool: ToolDefinition = {
           // Execute the circularization node
           logger.progress(`[Landing] Executing circularization burn: (${circResult.deltaV != null ? fmtVel(circResult.deltaV) : '?'})...`);
           const { executeNode } = await import('../execute-node.js');
-          const execResult = await executeNode(conn, { timeoutMs: 300_000 });
+          const execResult = await executeNode(conn, { timeoutMs: 300_000, logger, callerTool: 'land' });
           if (!execResult.success) {
             return ctx.errorResponse('land',
               `Circularization burn failed: ${execResult.error}\n` +

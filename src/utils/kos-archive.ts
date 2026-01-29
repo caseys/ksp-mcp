@@ -11,7 +11,7 @@
  */
 
 import { writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import type { KosConnection } from '../transport/kos-connection.js';
 import { getActiveBroadcastLogger } from './mcp-logger.js';
@@ -24,11 +24,9 @@ function logArchive(level: 'info' | 'warn' | 'error', msg: string): void {
   getActiveBroadcastLogger()?.progress(msg);
 }
 
-// Cached paths (discovered once per session)
+// Cached paths — only cache non-null results so we retry on failure
 let cachedKspRoot: string | null = null;
-let kspRootChecked = false;
 let cachedArchivePath: string | null = null;
-let archivePathChecked = false;
 
 /**
  * Get the KSP installation root path.
@@ -40,21 +38,19 @@ let archivePathChecked = false;
  * Returns null if unavailable. Caller decides what to do (fallback to terminal).
  */
 export async function getKspRoot(conn: KosConnection): Promise<string | null> {
-  if (kspRootChecked) {
-    return cachedKspRoot;
-  }
+  if (cachedKspRoot) return cachedKspRoot;
 
   // Priority 1: Environment variable (most reliable)
-  const envRoot = process.env.KSP_ROOT;
+  // Check both KSP_PATH (used by rest of codebase) and KSP_ROOT (legacy)
+  const envRoot = process.env.KSP_PATH || process.env.KSP_ROOT;
   if (envRoot) {
     if (existsSync(envRoot)) {
       cachedKspRoot = envRoot;
-      kspRootChecked = true;
-      logArchive('info', `[kos-archive] KSPROOT: ${cachedKspRoot} (source: KSP_ROOT env var)`);
+      logArchive('info', `[kos-archive] KSPROOT: ${cachedKspRoot} (source: env var)`);
       return cachedKspRoot;
     }
     // Env var set but path doesn't exist - warn once
-    logArchive('warn', `[kos-archive] KSP_ROOT="${envRoot}" does not exist`);
+    logArchive('warn', `[kos-archive] KSP path "${envRoot}" does not exist`);
   }
 
   // Priority 2: Query from kOS.MechJeb2.Addon (dev builds only)
@@ -64,7 +60,6 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
       const root = result.output.trim();
       if (root && existsSync(root)) {
         cachedKspRoot = root;
-        kspRootChecked = true;
         logArchive('info', `[kos-archive] KSPROOT: ${cachedKspRoot} (source: ADDONS:MJ:KSPROOT)`);
         return cachedKspRoot;
       }
@@ -73,16 +68,16 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
     // Silently ignore - addon may not be installed
   }
 
-  // Neither method worked - log helpful message ONCE
+  // Neither method worked — don't cache null so we retry next time
+  // (CPU may have been busy on first attempt)
   if (!envRoot) {
     logArchive('info',
       '[kos-archive] Direct archive write unavailable. ' +
-      'Set KSP_ROOT env var for faster script deployment. ' +
+      'Set KSP_PATH env var for faster script deployment. ' +
       'Using terminal fallback (slower but works).'
     );
   }
 
-  kspRootChecked = true;
   return null;
 }
 
@@ -92,25 +87,52 @@ export async function getKspRoot(conn: KosConnection): Promise<string | null> {
  * Result is cached after first successful lookup.
  */
 export async function getArchivePath(conn: KosConnection): Promise<string | null> {
-  if (archivePathChecked) {
-    return cachedArchivePath;
-  }
+  if (cachedArchivePath) return cachedArchivePath;
 
   const kspRoot = await getKspRoot(conn);
-  if (!kspRoot) {
-    archivePathChecked = true;
-    return null;
-  }
+  if (!kspRoot) return null;
 
   const archivePath = join(kspRoot, 'Ships', 'Script');
 
-  // Validate archive directory exists
+  // Validate archive directory exists — only cache if found
   if (existsSync(archivePath)) {
     cachedArchivePath = archivePath;
   }
 
-  archivePathChecked = true;
   return cachedArchivePath;
+}
+
+/**
+ * Resolve archive path from env var synchronously (no kOS connection needed).
+ * Used for disk-based version checks that don't require kOS terminal.
+ */
+function resolveArchivePathSync(): string | null {
+  const envRoot = process.env.KSP_PATH || process.env.KSP_ROOT;
+  if (!envRoot || !existsSync(envRoot)) return null;
+  const archivePath = join(envRoot, 'Ships', 'Script');
+  if (!existsSync(archivePath)) return null;
+  cachedKspRoot = envRoot;
+  cachedArchivePath = archivePath;
+  return archivePath;
+}
+
+/**
+ * Read a script's version hash directly from the archive on disk.
+ * No kOS connection needed — reads the first line of the file.
+ * Returns the version hash or null if not found/readable.
+ */
+export function readVersionFromArchive(scriptName: string): string | null {
+  const archivePath = cachedArchivePath ?? resolveArchivePathSync();
+  if (!archivePath) return null;
+  const fullPath = join(archivePath, scriptName);
+  if (!existsSync(fullPath)) return null;
+  try {
+    const firstLine = readFileSync(fullPath, 'utf-8').split('\n')[0];
+    const match = firstLine.match(/\/\/\s*version:\s*(\w+)/);
+    return match?.[1] ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -176,31 +198,12 @@ export async function deployScript(
     // Strip 0:/ prefix for archive path
     const archiveRelPath = kosPath.replace(/^0:\//, '');
 
-    // Try direct write first
-    // IMPORTANT: Delete existing file in kOS first to invalidate cache
-    // kOS caches file content, so writing to disk doesn't update kOS's view
-    try {
-      await conn.raw(`IF EXISTS("${kosPath}") { DELETEPATH("${kosPath}"). }`, 3000);
-    } catch {
-      // Ignore delete errors - file may not exist yet
-    }
-
+    // Try direct write to disk (bypasses kOS terminal entirely)
     const directSuccess = await writeToArchive(conn, archiveRelPath, content);
 
     if (directSuccess) {
-      // File is now in archive - verify kOS can see it (should re-read from disk after delete)
-      try {
-        const checkResult = await conn.queue(`PRINT EXISTS("${kosPath}").`, 3000);
-        if (checkResult.success && checkResult.output.includes('True')) {
-          logArchive('info', `[kos-archive] Direct write to ${kosPath} succeeded`);
-          return { success: true, method: 'direct' };
-        }
-        // File written but kOS can't see it - fall through to terminal method
-        logArchive('warn', `[kos-archive] Direct write succeeded but EXISTS check failed for ${kosPath}`);
-      } catch (err) {
-        logArchive('warn', `[kos-archive] Direct write succeeded but EXISTS check threw: ${err}`);
-        // Fall through to terminal method
-      }
+      logArchive('info', `[kos-archive] Direct write to ${kosPath} succeeded`);
+      return { success: true, method: 'direct' };
     } else {
       logArchive('info', `[kos-archive] Direct write to ${kosPath} failed, falling back to terminal`);
     }

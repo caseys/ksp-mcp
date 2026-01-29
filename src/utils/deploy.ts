@@ -9,7 +9,7 @@
  */
 
 import type { KosConnection } from '../transport/kos-connection.js';
-import { deployScript } from './kos-archive.js';
+import { deployScript, readVersionFromArchive } from './kos-archive.js';
 import { getScript, getScriptVersion } from './kos-scripts.js';
 import { getActiveBroadcastLogger } from './mcp-logger.js';
 
@@ -38,6 +38,7 @@ export function resetScriptsVerified(): void {
   scriptsVerified = false;
 }
 
+
 export interface DeployResult {
   success: boolean;
   method?: 'direct' | 'terminal';
@@ -60,35 +61,13 @@ export async function deployStatusScript(conn: KosConnection): Promise<DeployRes
 export async function copyStatusToLocal(conn: KosConnection): Promise<boolean> {
   try {
     // Copy from archive to local
-    await conn.raw(`COPYPATH("${STATUS_PATH}", "${LOCAL_STATUS_PATH}").`, 3000);
+    await conn.raw(`COPYPATH("${STATUS_PATH}", "${LOCAL_STATUS_PATH}").`, 5000);
     return true;
   } catch {
     return false;
   }
 }
 
-/**
- * Read the version string from a deployed script's first line.
- * Returns the version hash or null if not found/readable.
- */
-async function getScriptVersionFromPath(
-  conn: KosConnection,
-  localPath: string
-): Promise<string | null> {
-  try {
-    const result = await conn.queue(
-      `IF EXISTS("${localPath}") { LOCAL lines IS OPEN("${localPath}"):READALL. LOCAL iter IS lines:ITERATOR. IF iter:NEXT { PRINT iter:VALUE. } ELSE { PRINT "[EMPTY]". } } ELSE { PRINT "[NO_FILE]". }`,
-      3000
-    );
-    if (!result.success) return null;
-    const content = result.output.trim();
-    if (content === '[NO_FILE]' || content === '[EMPTY]') return null;
-    const versionMatch = content.match(/\/\/\s*version:\s*(\w+)/);
-    return versionMatch?.[1] ?? null;
-  } catch {
-    return null;
-  }
-}
 
 /**
  * Ensure status script is deployed and available.
@@ -96,43 +75,35 @@ async function getScriptVersionFromPath(
  * Checks version via first-line comment and redeploys if outdated.
  */
 export async function ensureStatusScript(conn: KosConnection): Promise<boolean> {
+  if (scriptsVerified) return true;
+
   const statusVersion = getScriptVersion(STATUS_SCRIPT);
-  logDeploy('info', `[deploy] Current status script version: ${statusVersion}`);
+  logDeploy('info', `[deploy] Status script version: ${statusVersion}`);
 
-  // Check local version first (faster, works during blackout)
-  const localVersion = await getScriptVersionFromPath(conn, LOCAL_STATUS_PATH);
-  logDeploy('info', `[deploy] Ship volume 1 status script version: ${localVersion ?? 'not found'}`);
-
-  if (localVersion === statusVersion) {
-    logDeploy('info', `[deploy] Local version matches - no deployment needed`);
-    return true;
-  }
-
-  // Check archive version
-  const archiveVersion = await getScriptVersionFromPath(conn, STATUS_PATH);
-  logDeploy('info', `[deploy] Archive (volume 0) status script version: ${archiveVersion ?? 'not found'}`);
+  // 1. Check archive version FROM DISK (instant, no kOS needed)
+  const archiveVersion = readVersionFromArchive('mcp_status.ks');
+  logDeploy('info', `[deploy] Archive (disk): ${archiveVersion ?? 'not found'}`);
 
   if (archiveVersion !== statusVersion) {
-    // Archive missing or outdated - deploy fresh
-    logDeploy('info', `[deploy] Deploying status script to archive (need: ${statusVersion})`);
-    const deployResult = await deployStatusScript(conn);
-    if (!deployResult.success) {
-      logDeploy('error', `[deploy] Failed to deploy status script: ${deployResult.error}`);
+    // Archive missing or outdated — deploy to disk
+    logDeploy('info', `[deploy] Deploying to archive (need: ${statusVersion})`);
+    const result = await deployStatusScript(conn);
+    if (!result.success) {
+      logDeploy('error', `[deploy] Failed to deploy: ${result.error}`);
       return false;
     }
-    logDeploy('info', `[deploy] Deployed status script via ${deployResult.method}`);
+    logDeploy('info', `[deploy] Deployed via ${result.method}`);
   }
 
-  // Copy to local volume for blackout resilience
-  logDeploy('info', `[deploy] Copying status script from archive (volume 0) to local (volume 1)`);
+  // 2. Copy archive → volume 1 via kOS (idempotent, needs radio)
   const copied = await copyStatusToLocal(conn);
   if (copied) {
-    logDeploy('info', '[deploy] Copied status script to local volume 1');
+    logDeploy('info', '[deploy] Volume 1 synced');
   } else {
-    logDeploy('warn', '[deploy] Failed to copy status script to local');
-    // Not fatal - archive version still works
+    logDeploy('info', '[deploy] Volume 1 copy failed (CPU not ready or no radio)');
   }
 
+  scriptsVerified = true;
   return true;
 }
 

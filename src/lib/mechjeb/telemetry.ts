@@ -28,7 +28,7 @@ let cacheTimeout = 5000;  // Current timeout (varies with hysteresis)
 
 const CACHE_BASE_TIMEOUT = 5000;    // 5 seconds base
 const CACHE_EXTENSION = 1000;       // +1 second per cache hit
-const CACHE_MAX_TIMEOUT = 15_000;    // Cap at 15 seconds
+const CACHE_MAX_TIMEOUT = 10_000;    // Cap at 10 seconds
 
 /**
  * Invalidate the status data cache.
@@ -454,6 +454,8 @@ export async function getStatusData(
     if (fileNotFound.test(statusResult.output) ||
         fileNotFound.test(statusResult.error || '') ||
         (!hasJsonOutput && !statusResult.output.includes('[MCP_STATUS_END]'))) {
+      const rawPreview = statusResult.output.slice(0, 200).replaceAll('\n', String.raw`\n`);
+      console.error(`[status] No JSON in script output (attempt ${attempt}). Raw: "${rawPreview}"`);
       needsRedeploy = true;
       lastError = 'status script not found';
       break; // Don't retry, need deploy

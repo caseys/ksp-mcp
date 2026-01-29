@@ -248,25 +248,39 @@ export class KosConnection {
       // Select CPU
       await this.transport.send(String(targetCpu!));
 
-      // Brief settling time, then clear terminal to discard stale output
-      await new Promise(r => setTimeout(r, 50));
+      // Wait for stale screen content to fully arrive, then drain it
+      await new Promise(r => setTimeout(r, 200));
+      for (let i = 0; i < 5; i++) {
+        const chunk = await this.transport.read();
+        if (!chunk) break;
+        await new Promise(r => setTimeout(r, 50));
+      }
+
+      // Interrupt any stale programs from previous session + clear input
       if (this.transport.sendKeys) {
+        await this.transport.sendKeys('C-c');
+        await new Promise(r => setTimeout(r, 200));
         await this.transport.sendKeys('C-k');
       }
-      await this.transport.read(); // Discard any remaining buffer
+      await new Promise(r => setTimeout(r, 300));
+      await this.transport.read(); // Discard interrupt/clear response
 
       // Parse connection info from menu output
       this.state = this.parseConnectionInfo(menuOutput, targetCpu!);
 
-      // Verify connection with coms test (may be in radio blackout)
-      const comsOk = await this.comsTest(config.timeouts.command);
-      if (!comsOk) {
-        this.state.lastError = 'Radio blackout - no response from kOS';
-        // Still mark as connected - caller can retry when in range
-      } else {
-        // Print installed script versions
-        await this.printInstalledVersions();
+      // Verify CPU actually executes commands (not stuck or running stale programs)
+      // comsTest sends a PRINT marker and waits for output — also seeds the cache
+      const cpuReady = await this.comsTest(5000);
+      if (!cpuReady) {
+        throw new Error(
+          'CPU not responding after attach. The kOS CPU may be stuck ' +
+          '(e.g., running a program from a previous session). ' +
+          'Try: right-click the CPU part in KSP → Reboot.'
+        );
       }
+
+      // Print installed script versions (best-effort, may timeout during boot)
+      await this.printInstalledVersions();
 
       return this.state;
     } catch (error) {
@@ -378,8 +392,7 @@ export class KosConnection {
       if (!hasRadio) {
         // Reset connection so next call does fresh connect with boot wait
         this.resetConnection();
-        const maxTimeout = config.timeouts.comsTestMax;
-        const effectiveTimeout = Math.min(timeoutMs, maxTimeout);
+        const effectiveTimeout = Math.min(Math.max(timeoutMs, 10_000), config.timeouts.comsTestMax);
         return {
           success: false,
           output: '',
@@ -400,6 +413,9 @@ export class KosConnection {
       await new Promise(resolve => setTimeout(resolve, 100));
       await this.transport.read();
 
+      // Note: raw() does NOT extend comsTest cache because it can't verify
+      // the command actually executed (fire-and-forget). Only queue()/executeRaw()
+      // extend the cache when they receive a sentinel back.
       return { success: true, output: '' };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -533,8 +549,7 @@ export class KosConnection {
       if (!hasRadio) {
         // Reset connection so next call does fresh connect with boot wait
         this.resetConnection();
-        const maxTimeout = config.timeouts.comsTestMax;
-        const effectiveTimeout = Math.min(timeoutMs, maxTimeout);
+        const effectiveTimeout = Math.min(Math.max(timeoutMs, 10_000), config.timeouts.comsTestMax);
         return {
           success: false,
           rawOutput: '',
@@ -574,6 +589,8 @@ export class KosConnection {
         };
       }
 
+      // Command succeeded — radio is working, extend comsTest cache
+      this.lastComsTestPass = Date.now();
       return { success: true, rawOutput, sentinelToken, sentinelCommand };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -764,10 +781,10 @@ export class KosConnection {
   private async comsTest(timeoutMs: number): Promise<boolean> {
     if (!this.transport) return false;
 
-    // Skip if we passed a coms test recently (within 1 second)
-    // This avoids redundant tests during rapid command sequences
+    // Skip if we passed a coms test or successful command recently (within 10s)
+    // Successful commands also refresh this timestamp, creating a rolling window
     const now = Date.now();
-    if (now - this.lastComsTestPass < 1000) {
+    if (now - this.lastComsTestPass < 10_000) {
       return true;
     }
 
@@ -799,7 +816,8 @@ export class KosConnection {
         console.error(`[kos-connection] TIMEOUT: comsTest attempt ${attempt} timed out after ${elapsed}ms (limit: ${effectiveTimeout}ms)`);
 
         // Fast-fail: check if buffer has blackout indicators
-        // Don't clear buffer — let pollWithBlackoutResilience detect it via peekBuffer
+        // Stale "Signal lost" from previous sessions is cleared during connect(),
+        // so any "Signal lost" here is from the current session (real blackout).
         const buf = this.transport.peekBuffer();
         if (buf.includes('Signal lost') || buf.includes('Choose a CPU')) {
           console.error(`[kos-connection] comsTest: blackout detected in buffer`);
