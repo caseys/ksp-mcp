@@ -487,10 +487,30 @@ async function monitorLanding(
 
   const result = await pollWithBlackoutResilience<LandingPollState>({
     poll: async () => {
+      // Always check SHIP:STATUS first - this is the ground truth for landing detection
+      // getLandingStatus can fail after landing when MechJeb returns unexpected values
+      const groundCheck = await conn.queue('PRINT SHIP:STATUS.', 3000);
+      const isLanded = groundCheck.output.includes('LANDED') || groundCheck.output.includes('SPLASHED');
+
+      // If landed, return immediately - no need for MechJeb status
+      if (isLanded) {
+        return {
+          status: {
+            enabled: false,
+            status: 'Landed',
+            landingAtTarget: false,
+            predictionReady: false,
+            formatted: 'Landed',
+          },
+          isLanded: true,
+          wasAborted: false,
+        };
+      }
+
+      // Not landed - get full MechJeb status for progress tracking
       const status = await getLandingStatus(conn);
 
       // Check if landing completed (autopilot disabled itself)
-      let isLanded = false;
       let wasAborted = false;
 
       if (!status.enabled) {
@@ -498,14 +518,10 @@ async function monitorLanding(
         // during blackout recovery or warp transitions
         consecutiveDisabledCount++;
 
-        const groundCheck = await conn.queue('PRINT SHIP:STATUS.', 3000);
-        isLanded = groundCheck.output.includes('LANDED') || groundCheck.output.includes('SPLASHED');
-
         // Only declare abort after multiple consecutive disabled readings
-        // Landing detection is immediate (no need to wait)
-        wasAborted = !isLanded && consecutiveDisabledCount >= ABORT_CONFIRMATION_COUNT;
+        wasAborted = consecutiveDisabledCount >= ABORT_CONFIRMATION_COUNT;
 
-        if (!isLanded && consecutiveDisabledCount < ABORT_CONFIRMATION_COUNT) {
+        if (consecutiveDisabledCount < ABORT_CONFIRMATION_COUNT) {
           log.progress(`[Landing] Autopilot disabled - confirming (${consecutiveDisabledCount}/${ABORT_CONFIRMATION_COUNT})...`);
         }
       } else {
@@ -513,7 +529,7 @@ async function monitorLanding(
         consecutiveDisabledCount = 0;
       }
 
-      return { status, isLanded, wasAborted };
+      return { status, isLanded: false, wasAborted };
     },
 
     isDone: (state) => state.isLanded || state.wasAborted,
@@ -770,23 +786,23 @@ async function monitorLanding(
         // After seeing same status twice, nudge warp by 1 (max 4x)
         if (consecutiveSameStatusCount >= 2) {
           try {
-            // Check if engines burning or in atmosphere to choose warp mode
-            // PHYSICS warp required when engines active or in atmosphere
+            // Check if thrusting or in atmosphere to choose warp mode
+            // PHYSICS warp required when throttle active or in atmosphere
             // RAILS warp can be used in vacuum with no thrust
             const warpStateCheck = await conn.queue(
-              'PRINT "WS|" + WARP + "|" + (SHIP:AVAILABLETHRUST > 0 AND THROTTLE > 0) + "|" + ' +
+              'PRINT "WS|" + WARP + "|" + (THROTTLE > 0) + "|" + ' +
               '(SHIP:BODY:ATM:EXISTS AND ALTITUDE < SHIP:BODY:ATM:HEIGHT).',
               2000
             );
             const wsMatch = warpStateCheck.output.match(/WS\|(\d+)\|(True|False)\|(True|False)/i);
             if (wsMatch) {
               const currentWarp = parseInt(wsMatch[1]);
-              const enginesActive = wsMatch[2].toLowerCase() === 'true';
+              const isThrusting = wsMatch[2].toLowerCase() === 'true';
               const inAtmosphere = wsMatch[3].toLowerCase() === 'true';
 
               if (currentWarp < 4) {
                 // Set appropriate warp mode before increasing
-                const warpMode = (enginesActive || inAtmosphere) ? 'PHYSICS' : 'RAILS';
+                const warpMode = (isThrusting || inAtmosphere) ? 'PHYSICS' : 'RAILS';
                 await conn.raw(`SET WARPMODE TO "${warpMode}". SET WARP TO ${currentWarp + 1}.`, 2000);
                 log.info(`[Landing] Nudging warp to ${currentWarp + 1}x ${warpMode} (waiting for MechJeb)`);
               }

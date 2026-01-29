@@ -866,6 +866,9 @@ export async function executeNode(
     let warpAlignStuckCount = 0;
     let alignedWaitingCount = 0; // Count polls while aligned but MechJeb stuck in WARPALIGN
 
+    // Smart warp nudging - when status repeats, nudge warp forward
+    let consecutiveSameStatusCount = 0;
+
     // Wait for burn completion using pollWithBlackoutResilience
     const result = await pollWithBlackoutResilience<BurnPollState>({
       poll: async () => {
@@ -1024,14 +1027,56 @@ export async function executeNode(
         }
         }
 
+        // Track consecutive same-status for warp nudging
         if (execState !== lastStatus) {
+          consecutiveSameStatusCount = 0;
           log.progress(`${logPrefix} ${statusMsg}`);
           lastStatus = execState;
           lastLogTime = now;
-        } else if (now - lastLogTime >= 20_000) {
+        } else {
+          consecutiveSameStatusCount++;
+
+          // Debug: show counter progress in WARPALIGN/LEAD states
+          if ((execState === 'WARPALIGN' || execState === 'LEAD') && consecutiveSameStatusCount === 1) {
+              log.progress(`${logPrefix} Waiting in ${execState} (1/2 for warp nudge)`);
+            }
+
+          // After 2+ same status polls, nudge warp forward (helps MechJeb waiting states)
+          // Only nudge in WARPALIGN or LEAD states, not during BURN
+          if (consecutiveSameStatusCount >= 2 && (execState === 'WARPALIGN' || execState === 'LEAD')) {
+            try {
+              // Check if thrusting or in atmosphere to choose warp mode
+              // PHYSICS warp required when throttle active or in atmosphere
+              // RAILS warp can be used in vacuum with no thrust
+              const warpStateCheck = await conn.queue(
+                'PRINT "WS|" + WARP + "|" + (THROTTLE > 0) + "|" + ' +
+                '(SHIP:BODY:ATM:EXISTS AND ALTITUDE < SHIP:BODY:ATM:HEIGHT).',
+                2000
+              );
+              const wsMatch = warpStateCheck.output.match(/WS\|(\d+)\|(True|False)\|(True|False)/i);
+              if (wsMatch) {
+                const currentWarp = parseInt(wsMatch[1]);
+                const isThrusting = wsMatch[2].toLowerCase() === 'true';
+                const inAtmosphere = wsMatch[3].toLowerCase() === 'true';
+
+                if (currentWarp < 4) {
+                  // Set appropriate warp mode before increasing
+                  const warpMode = (isThrusting || inAtmosphere) ? 'PHYSICS' : 'RAILS';
+                  await conn.raw(`SET WARPMODE TO "${warpMode}". SET WARP TO ${currentWarp + 1}.`, 2000);
+                  log.progress(`${logPrefix} Nudging warp to ${currentWarp + 1}x ${warpMode}`);
+                } else {
+                  log.progress(`${logPrefix} Warp already at ${currentWarp}x, not nudging`);
+                }
+              }
+            } catch { /* ignore warp errors */ }
+            consecutiveSameStatusCount = 0; // Reset after nudge
+          }
+
           // Log progress every 20 seconds at least
-          log.progress(`${logPrefix} ${statusMsg}`);
-          lastLogTime = now;
+          if (now - lastLogTime >= 20_000) {
+            log.progress(`${logPrefix} ${statusMsg}`);
+            lastLogTime = now;
+          }
         }
       },
     });
@@ -1046,6 +1091,9 @@ export async function executeNode(
 
         // All cleanup commands wrapped in try/catch to prevent stalls if connection dies
         try { await stopWarp(conn); } catch { /* ignore */ }
+
+        // Reset warp to RAILS mode
+        try { await conn.raw('SET WARP TO 0. SET WARPMODE TO "RAILS".', 2000); } catch { /* ignore */ }
 
         // Log completion
         log.progress(`${logPrefix} Burn complete`);
@@ -1110,14 +1158,18 @@ export async function executeNode(
 
             // Step 5: Retrograde RCS bursts for IMPACT/LOW PERIAPSIS (result < 0, periapsis too low)
             // Slow down to arrive slower and have shallower approach
+            // Turn RCS on BEFORE the loop so it's fully active for the first burst
+            if (fineTuneResult < 0) {
+              await conn.raw('RCS ON. WAIT 0.2.', 2000);
+            }
             let rcsAttempts = 0;
             while (fineTuneResult < 0 && rcsAttempts < FINE_TUNE_MAX_ATTEMPTS) {
               rcsAttempts++;
               log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km)`);
 
-              // RCS burst retrograde - ensure RCS is on, then fire backward
+              // RCS burst retrograde (RCS already enabled above)
               // Use SHIP:CONTROL:FORE with value well above deadband (0.05)
-              await conn.raw(`RCS ON. SET SHIP:CONTROL:FORE TO -1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
+              await conn.raw(`SET SHIP:CONTROL:FORE TO -1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
               await delay(300);
 
               fineTuneResult = await fineTuneFunction(conn);

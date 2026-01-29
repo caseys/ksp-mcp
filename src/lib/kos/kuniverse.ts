@@ -318,6 +318,10 @@ export async function switchVessel(
 import { z } from 'zod';
 import type { ToolDefinition } from '../tool-types.js';
 import { handleDisconnect } from '../../transport/connection-tools.js';
+import { delay } from '../utils/progress.js';
+
+// Time to wait after load operations for KSP to fully initialize
+const LOAD_SETTLE_DELAY_MS = 5000;
 
 /**
  * Load save tool definition
@@ -335,15 +339,20 @@ export const loadSaveTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 2,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
+      const logger = ctx.createLogger(extra);
       const result = await quickload(conn, args.saveName as string);
 
       // Disconnect after load since connection will be reset
       await handleDisconnect();
 
       if (result.success) {
+        // Wait for KSP to fully load the save before returning
+        logger.progress(`[LoadSave] Waiting for KSP to load...`);
+        await delay(LOAD_SETTLE_DELAY_MS);
+        logger.progress(`[LoadSave] Ready`);
         return ctx.successResponse('load_save', `Loaded save: ${result.saveName}. Connection reset - reconnect to continue.`);
       } else {
         return ctx.errorResponse('load_save', result.error ?? 'Failed');
@@ -473,15 +482,20 @@ export const loadShipTool: ToolDefinition = {
     openWorldHint: false,
   },
   tier: 2,
-  handler: async (args, ctx) => {
+  handler: async (args, ctx, extra) => {
     try {
       const conn = await ctx.ensureConnected();
+      const logger = ctx.createLogger(extra);
       const result = await launchCraft(conn, args.craftName as string);
 
       // Disconnect after launch since connection will be reset
       await handleDisconnect();
 
       if (result.success) {
+        // Wait for KSP to fully load the craft before returning
+        logger.progress(`[LoadShip] Waiting for KSP to load...`);
+        await delay(LOAD_SETTLE_DELAY_MS);
+        logger.progress(`[LoadShip] Ready`);
         return ctx.successResponse(
           'load_ship',
           `Launched ${result.craftName}. Connection reset - reconnect to continue.`

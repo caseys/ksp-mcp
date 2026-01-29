@@ -410,7 +410,7 @@ function convertKosJson(obj: unknown): unknown {
  */
 export async function getStatusData(
   conn: KosConnection,
-  timeoutMs = 5000,
+  timeoutMs = 10_000,
   forceRefresh = false
 ): Promise<StatusData> {
   // Check cache (unless force refresh requested)
@@ -565,7 +565,7 @@ export async function getShipTelemetry(
   conn: KosConnection,
   options: ShipTelemetryOptions = {}
 ): Promise<ShipTelemetry> {
-  const { timeoutMs = 5000 } = options;
+  const { timeoutMs = 10_000 } = options;
   const lines: string[] = [];
 
   const data = await getStatusData(conn, timeoutMs);

@@ -93,8 +93,13 @@ ELSE IF b:BODY = _moonParent { tgts:ADD(LEXICON("type", "moon", "name", b:NAME, 
 }
 }
 LOCAL _vessels IS LIST(). LIST TARGETS IN _vessels.
+LOCAL _vcount IS 0.
 FOR v IN _vessels {
-IF v <> SHIP AND v:BODY = SHIP:BODY { tgts:ADD(LEXICON("type", "vessel", "name", v:NAME, "distance", ROUND((v:POSITION - SHIP:POSITION):MAG))). }
+IF _vcount >= 10 { BREAK. }
+IF v <> SHIP AND v:BODY = SHIP:BODY AND NOT v:NAME:CONTAINS("Debris") {
+tgts:ADD(LEXICON("type", "vessel", "name", v:NAME, "distance", ROUND((v:POSITION - SHIP:POSITION):MAG))).
+SET _vcount TO _vcount + 1.
+}
 }
 SET s["targets"] TO tgts.
 WRITEJSON(s, "1:/mcp_status.json").

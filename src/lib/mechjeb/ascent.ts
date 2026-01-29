@@ -732,7 +732,7 @@ export class AscentProgram {
     if (settings.verticalRoll !== undefined) {
       commands.push(`SET ${AG}:VERTICALROLL TO ${settings.verticalRoll}.`);
     }
-    if (settings.turnRoll !== undefined) {
+    if (settings.turnRoll !== undefined && settings.turnRoll !== 0) {
       commands.push(`SET ${AG}:TURNROLL TO ${settings.turnRoll}.`);
     } else {
       commands.push(`SET ${AG}:TURNROLL TO 90.`);
