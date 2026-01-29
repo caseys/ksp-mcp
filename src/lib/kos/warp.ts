@@ -14,6 +14,7 @@ import { hasTarget } from './target/shared.js';
 import { ManeuverOrchestrator } from '../mechjeb/orchestrator.js';
 import { handlePostSOIArrival } from '../mechjeb/transfer/return-from-moon.js';
 import { unlockControls } from '../mechjeb/shared.js';
+import { invalidateStatusCache } from '../mechjeb/telemetry.js';
 
 const POLL_INTERVAL_MS = 2500;  // Poll every 2.5s
 const DEFAULT_TIMEOUT_MS = 300_000; // 5 minutes for long warps
@@ -1141,6 +1142,9 @@ export const warpTool: ToolDefinition = {
       } else {
         result = await warpTo(conn, target as WarpTarget, { leadTime, logger });
       }
+
+      // Vessel position changed — invalidate telemetry cache
+      invalidateStatusCache();
 
       if (result.success) {
         let text = `Warp complete. Body: ${result.body}, Altitude: ${fmtDist(result.altitude ?? 0)}`;

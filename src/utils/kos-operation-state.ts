@@ -1,11 +1,12 @@
 /**
  * kOS Operation State Persistence
  *
- * Stores operation state in a file on kOS volume 1.
+ * Stores operation state in a JSON file on kOS volume 1.
  * This persists across Ctrl+C and script restarts.
  *
- * The status script handles reading/writing the operation file.
- * We just run the status script with an operation parameter to set it.
+ * Uses direct WRITEJSON/DELETEPATH commands (fast) instead of
+ * running the full status script (which collects all telemetry).
+ * Reading operation state goes through getStatusData() cache.
  */
 
 import type { KosConnection } from '../transport/kos-connection.js';
@@ -21,29 +22,9 @@ export interface KosOperationState {
   duration: number;
 }
 
-// Status script paths - try local first (blackout resilient), fall back to archive
-const LOCAL_STATUS = '1:/mcp_status.ks';
-const ARCHIVE_STATUS = '0:/mcp_status.ks';
-
-/**
- * Run status script with optional parameter, trying local then archive.
- * Single command with EXISTS check to avoid extra round-trip.
- */
-async function runStatusScript(conn: KosConnection, param?: string): Promise<string> {
-  const paramStr = param !== undefined ? `, "${param}"` : '';
-  // Single command: check EXISTS and run appropriate path
-  // Uses queue() because we need to capture script output
-  const result = await conn.queue(
-    `IF EXISTS("${LOCAL_STATUS}") { RUNPATH("${LOCAL_STATUS}"${paramStr}). } ELSE { RUNPATH("${ARCHIVE_STATUS}"${paramStr}). }`,
-    5000
-  );
-
-  return result.output;
-}
-
 /**
  * Set the operation state on the vessel.
- * Runs the status script with the operation parameter.
+ * Writes directly to the op file via WRITEJSON — no need to run the full status script.
  *
  * @param conn kOS connection
  * @param opType Operation type (ascent, landing, node, maneuver)
@@ -56,17 +37,17 @@ export async function setKosOperation(
   toolName: string,
   target: string = ''
 ): Promise<void> {
-  // Format: opType:toolName:target (using : since | might conflict with kOS)
   const opValue = `${opType}:${toolName}:${target}`;
-  await runStatusScript(conn, opValue);
+  await conn.raw(
+    `WRITEJSON(LEXICON("op", "${opValue}", "ts", TIME:SECONDS), "1:/mcp_op.json").`
+  );
 }
 
 /**
  * Clear the operation state on the vessel.
  */
 export async function clearKosOperation(conn: KosConnection): Promise<void> {
-  // Empty string clears the operation
-  await runStatusScript(conn, '');
+  await conn.raw('IF EXISTS("1:/mcp_op.json") { DELETEPATH("1:/mcp_op.json"). }');
 }
 
 /**

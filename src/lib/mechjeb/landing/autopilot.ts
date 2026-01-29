@@ -1602,6 +1602,8 @@ export const landTool: ToolDefinition = {
             // Ignore errors querying site details
           }
 
+          // Vessel state changed (orbit → surface)
+          invalidateStatusCache();
           // Safety monitor should have already cleared _MCP_OP on landing
           return ctx.successResponse('land',
             `Landing complete!${landingDetails}\nVessel safely on surface.`);
@@ -1610,6 +1612,8 @@ export const landTool: ToolDefinition = {
           if (thrustLimit.limited) {
             await resetThrustLimits(conn, logger);
           }
+          // Vessel state may have changed during failed landing
+          invalidateStatusCache();
           // Clear operation on failure (safety monitor only clears on success)
           await clearKosOperation(conn);
           return ctx.errorResponse('land',

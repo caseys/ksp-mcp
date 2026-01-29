@@ -22,6 +22,7 @@ import { config } from '../../config/index.js';
 import { ManeuverOrchestrator } from './orchestrator.js';
 import { pollWithBlackoutResilience } from '../../utils/poll-with-resilience.js';
 import { warpToRadioContact } from '../../utils/radio-contact.js';
+import { invalidateStatusCache } from './telemetry.js';
 
 // Imports for smart launch parameter resolution
 import { hasTarget } from '../kos/target/shared.js';
@@ -758,11 +759,9 @@ export class AscentProgram {
       commands.push(`SET ${AG}:OVERRIDEWARPTOPLANE TO ${settings.overrideWarpToPlane ? 'TRUE' : 'FALSE'}.`);
     }
 
-    // Execute commands one at a time for reliability
-    // Batch commands can overwhelm the kOS telnet connection
-    for (const cmd of commands) {
-      await this.conn.raw(cmd);
-      await delay(50);  // Small delay between commands
+    // Batch all SET commands into a single raw() call
+    if (commands.length > 0) {
+      await this.conn.raw(commands.join(' '));
     }
   }
 
@@ -945,37 +944,18 @@ export class AscentProgram {
       }
     } else {
       // Normal orbit mode - enable autopilot and stage manually
-      let autopilotEngaged = false;
-      for (let attempt = 1; attempt <= 10; attempt++) {
+      await this.conn.raw('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
+      await delay(300);
+
+      // Verify autopilot engaged, retry once if needed
+      const verifyResult = await this.conn.queue('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.', 3000);
+      if (!verifyResult.output.toLowerCase().includes('true')) {
         await this.conn.raw('SET ADDONS:MJ:ASCENT:ENABLED TO TRUE.');
         await delay(500);
-
-        for (let verifyAttempt = 1; verifyAttempt <= 3; verifyAttempt++) {
-          const verifyResult = await this.conn.queue('SET _E TO ADDONS:MJ:ASCENT:ENABLED. PRINT _E.', 3000);
-          if (verifyResult.output.toLowerCase().includes('true')) {
-            autopilotEngaged = true;
-            break;
-          }
-          if (verifyResult.output.toLowerCase().includes('false')) {
-            break;
-          }
-          await delay(200);
-        }
-
-        if (autopilotEngaged) break;
-        this.logger.info(`[Ascent] Autopilot not engaged yet (attempt ${attempt}/10)`);
-        await delay(300);
-      }
-
-      if (!autopilotEngaged) {
-        this.logger.warn('[Ascent] Autopilot may not have engaged after 10 attempts, proceeding anyway');
       }
 
       // Release controls
-      await this.conn.raw('UNLOCK THROTTLE.');
-      await delay(100);
-      await this.conn.raw('SAS OFF.');
-      await delay(100);
+      await this.conn.raw('UNLOCK THROTTLE. SAS OFF.');
 
       // Check if we need to stage
       const statusResult = await this.conn.queue('PRINT SHIP:STATUS.', 3000);
@@ -1333,7 +1313,8 @@ export const launchAscentTool: ToolDefinition = {
             return ctx.errorResponse('launch', 'Ascent failed - periapsis below atmosphere');
           }
         } finally {
-          // Clear operation state when waiting for completion
+          // Vessel state changed (ground → orbit or failed mid-flight)
+          invalidateStatusCache();
           await clearKosOperation(conn);
           clearBroadcastLogger();
         }
@@ -1352,7 +1333,8 @@ export const launchAscentTool: ToolDefinition = {
           `${launchMsg}\nPoll status for progress. MechJeb is flying.`);
       }
     } catch (error) {
-      // Clear operation state on error
+      // Vessel state may have changed during failed launch
+      invalidateStatusCache();
       try {
         await clearKosOperation(conn);
       } catch { /* ignore cleanup errors */ }

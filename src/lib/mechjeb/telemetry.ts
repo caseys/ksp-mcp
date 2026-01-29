@@ -24,11 +24,11 @@ const TELEMETRY_DELAY_MS = 0;
 // Cache with hysteresis: base timeout extends on hits, resets on miss
 let cachedStatusData: StatusData | null = null;
 let cacheTimestamp = 0;
-let cacheTimeout = 5000;  // Current timeout (varies with hysteresis)
+let cacheTimeout = 10_000;  // Current timeout (varies with hysteresis)
 
-const CACHE_BASE_TIMEOUT = 5000;    // 5 seconds base
-const CACHE_EXTENSION = 1000;       // +1 second per cache hit
-const CACHE_MAX_TIMEOUT = 10_000;    // Cap at 10 seconds
+const CACHE_BASE_TIMEOUT = 10_000;   // 10 seconds base
+const CACHE_EXTENSION = 1000;        // +1 second per cache hit
+const CACHE_MAX_TIMEOUT = 15_000;    // Cap at 15 seconds
 
 /**
  * Invalidate the status data cache.
