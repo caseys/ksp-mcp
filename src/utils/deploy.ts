@@ -60,8 +60,13 @@ export async function deployStatusScript(conn: KosConnection): Promise<DeployRes
  */
 export async function copyStatusToLocal(conn: KosConnection): Promise<boolean> {
   try {
-    // Copy from archive to local
-    await conn.raw(`COPYPATH("${STATUS_PATH}", "${LOCAL_STATUS_PATH}").`, 5000);
+    // Guard with HOMECONNECTION check — if archive (volume 0) is out of range,
+    // COPYPATH throws a verbose kOS error that aborts the entire command line,
+    // preventing any sentinel from firing and causing queue() to hang.
+    await conn.raw(
+      `IF HOMECONNECTION:ISCONNECTED { COPYPATH("${STATUS_PATH}", "${LOCAL_STATUS_PATH}"). }`,
+      5000
+    );
     return true;
   } catch {
     return false;

@@ -265,6 +265,10 @@ export async function setLandingPositionTarget(
     5000
   );
 
+  if (!result.success) {
+    return { success: false, error: result.error ?? 'Failed to set position target' };
+  }
+
   if (result.output.includes('OK')) {
     return { success: true };
   }

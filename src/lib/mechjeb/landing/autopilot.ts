@@ -491,6 +491,14 @@ async function monitorLanding(
       // Always check SHIP:STATUS first - this is the ground truth for landing detection
       // getLandingStatus can fail after landing when MechJeb returns unexpected values
       const groundCheck = await conn.queue('PRINT SHIP:STATUS.', 3000);
+
+      // Throw on any failure so pollWithBlackoutResilience counts it immediately
+      // Without this, we'd proceed to getLandingStatus() for a second failing queue()
+      // call, doubling the time before a failure is counted
+      if (!groundCheck.success) {
+        throw new Error(groundCheck.error || 'Ground check failed');
+      }
+
       const isLanded = groundCheck.output.includes('LANDED') || groundCheck.output.includes('SPLASHED');
 
       // If landed, return immediately - no need for MechJeb status
@@ -784,8 +792,10 @@ async function monitorLanding(
         consecutiveSameStatusCount = 0;
       } else {
         consecutiveSameStatusCount++;
-        // After seeing same status twice, nudge warp by 1 (max 4x)
-        if (consecutiveSameStatusCount >= 2) {
+        // After seeing same status twice, nudge warp by 1 (RAILS max 2/3x, PHYSICS max 4x)
+        // Skip during active maneuvers — MechJeb controls warp itself during burns
+        const isBurning = /course correction|braking|final descent/i.test(rawStatus);
+        if (consecutiveSameStatusCount >= 2 && !isBurning) {
           try {
             // Check if thrusting or in atmosphere to choose warp mode
             // PHYSICS warp required when throttle active or in atmosphere
@@ -801,9 +811,10 @@ async function monitorLanding(
               const isThrusting = wsMatch[2].toLowerCase() === 'true';
               const inAtmosphere = wsMatch[3].toLowerCase() === 'true';
 
-              if (currentWarp < 4) {
-                // Set appropriate warp mode before increasing
-                const warpMode = (isThrusting || inAtmosphere) ? 'PHYSICS' : 'RAILS';
+              const warpMode = (isThrusting || inAtmosphere) ? 'PHYSICS' : 'RAILS';
+              // RAILS warp max 2 (3x) during landing to avoid radio blackout
+              const maxWarp = warpMode === 'RAILS' ? 2 : 4;
+              if (currentWarp < maxWarp) {
                 await conn.raw(`SET WARPMODE TO "${warpMode}". SET WARP TO ${currentWarp + 1}.`, 2000);
                 log.info(`[Landing] Nudging warp to ${currentWarp + 1}x ${warpMode} (waiting for MechJeb)`);
               }

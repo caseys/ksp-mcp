@@ -384,6 +384,14 @@ export class KosConnection {
     }
 
     try {
+      // Check for blackout indicators BEFORE clearing buffer
+      // The read() below consumes buffer contents, so peekBuffer must come first
+      const pendingBuf = this.transport.peekBuffer();
+      if (pendingBuf.includes('Signal lost') || pendingBuf.includes('Choose a CPU')) {
+        this.resetConnection();
+        return { success: false, output: '', error: 'Radio loss detected - Signal lost in buffer' };
+      }
+
       // Clear any pending output from transport buffer
       await this.transport.read();
 
@@ -541,6 +549,17 @@ export class KosConnection {
     }
 
     try {
+      // Check for blackout indicators BEFORE clearing buffer
+      // The read() below consumes buffer contents, so peekBuffer must come first
+      const pendingBuf = this.transport.peekBuffer();
+      if (pendingBuf.includes('Signal lost') || pendingBuf.includes('Choose a CPU')) {
+        this.resetConnection();
+        return {
+          success: false, rawOutput: '', sentinelToken: '', sentinelCommand: '',
+          error: 'Radio loss detected - Signal lost in buffer',
+        };
+      }
+
       // Clear any pending output from transport buffer
       await this.transport.read();
 
@@ -591,6 +610,8 @@ export class KosConnection {
 
       // Command succeeded — radio is working, extend comsTest cache
       this.lastComsTestPass = Date.now();
+      // Strip PUA terminal control chars so marker/content extraction works cleanly
+      rawOutput = this.stripUnicodeCommands(rawOutput);
       return { success: true, rawOutput, sentinelToken, sentinelCommand };
     } catch (error) {
       const errorMsg = error instanceof Error ? error.message : String(error);
@@ -781,10 +802,11 @@ export class KosConnection {
   private async comsTest(timeoutMs: number): Promise<boolean> {
     if (!this.transport) return false;
 
-    // Skip if we passed a coms test or successful command recently (within 10s)
-    // Successful commands also refresh this timestamp, creating a rolling window
+    // Skip if we passed a coms test or successful command recently
+    // Use shorter cache during blackout-sensitive operations (suppressReset = polling loop)
+    const cacheMs = this._suppressReset ? 2000 : 10_000;
     const now = Date.now();
-    if (now - this.lastComsTestPass < 10_000) {
+    if (now - this.lastComsTestPass < cacheMs) {
       return true;
     }
 
@@ -1054,11 +1076,13 @@ export class KosConnection {
       .digest('hex')
       .slice(0, 8)
       .toUpperCase();
-    const token = `[MCP.${this.commandSequence.toString(36).toUpperCase()}.${hash}]`;
+    const tokenInner = `MCP.${this.commandSequence.toString(36).toUpperCase()}.${hash}`;
+    const token = `[${tokenInner}]`;
     this.commandSequence = (this.commandSequence + 1) % Number.MAX_SAFE_INTEGER;
     return {
       token,
-      command: `PRINT "${token}".`,
+      // Concatenate so the full token never appears in the echo (same strategy as markers)
+      command: `PRINT "["+"${tokenInner}"+"]".`,
     };
   }
 

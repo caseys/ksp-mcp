@@ -214,10 +214,20 @@ const ALIGN_THRESHOLD = 5; // degrees - consider aligned below this
 const WARPALIGN_STUCK_THRESHOLD = 3; // Warn after 3 polls with no angle change (~6 seconds)
 
 // Fine tune phase configuration
-const FINE_TUNE_ENGINE_BURST_MS = 100;  // Short engine pulse duration
-const FINE_TUNE_RCS_BURST_MS = 200;     // RCS pulse duration (increased for effectiveness)
-const FINE_TUNE_MAX_ATTEMPTS = 15;      // Max attempts per direction (increased for far encounters)
-const FINE_TUNE_THRUST_LIMIT = 15;      // Engine thrust limit %
+const FINE_TUNE_MIN_BURST_MS = 50;     // Minimum burst duration
+const FINE_TUNE_MAX_BURST_MS = 5000;   // Maximum burst duration (5 seconds)
+const FINE_TUNE_MAX_ATTEMPTS = 15;     // Max attempts per direction (safety limit)
+const FINE_TUNE_THRUST_LIMIT = 15;     // Engine thrust limit %
+const FINE_TUNE_TARGET_REDUCTION = 0.25; // Target 25% error reduction per burst
+
+/** Calculate initial burst duration based on error magnitude */
+function initialBurstDuration(errorMeters: number): number {
+  const absKm = Math.abs(errorMeters) / 1000;
+  if (absKm > 500) return 1000;
+  if (absKm > 100) return 500;
+  if (absKm > 10) return 200;
+  return 100;
+}
 
 /** Options for alignHeading() */
 interface AlignHeadingOptions {
@@ -1036,14 +1046,19 @@ export async function executeNode(
         } else {
           consecutiveSameStatusCount++;
 
-          // Debug: show counter progress in WARPALIGN/LEAD states
-          if ((execState === 'WARPALIGN' || execState === 'LEAD') && consecutiveSameStatusCount === 1) {
+          // Debug: show counter progress for warp nudge candidates
+          if ((execState === 'WARPALIGN' || execState === 'LEAD' || execState === 'BURN') && consecutiveSameStatusCount === 1) {
               log.progress(`${logPrefix} Waiting in ${execState} (1/2 for warp nudge)`);
             }
 
-          // After 2+ same status polls, nudge warp forward (helps MechJeb waiting states)
-          // Only nudge in WARPALIGN or LEAD states, not during BURN
-          if (consecutiveSameStatusCount >= 2 && (execState === 'WARPALIGN' || execState === 'LEAD')) {
+          // After 2+ same status polls, nudge warp forward
+          // Nudge in WARPALIGN/LEAD (waiting states) and BURN (when dV remaining is large)
+          const shouldNudgeWarp = consecutiveSameStatusCount >= 2 && (
+            execState === 'WARPALIGN' ||
+            execState === 'LEAD' ||
+            (execState === 'BURN' && state.dvRemaining > 100)
+          );
+          if (shouldNudgeWarp) {
             try {
               // Check if thrusting or in atmosphere to choose warp mode
               // PHYSICS warp required when throttle active or in atmosphere
@@ -1145,34 +1160,68 @@ export async function executeNode(
 
             // Step 4: Prograde engine bursts for FAR ENCOUNTER (result > 0, periapsis too high)
             // Speed up to arrive faster and penetrate deeper into target's gravity well
+            // Burst duration adapts based on running average of error reduction
+            let engineBurstMs = initialBurstDuration(fineTuneResult);
+            const engineHistory: Array<{ delta: number; duration: number }> = [];
+
             while (fineTuneResult > 0 && engineAttempts < FINE_TUNE_MAX_ATTEMPTS) {
               engineAttempts++;
-              log.progress(`${logPrefix} Engine burst ${engineAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: +${Math.round(fineTuneResult / 1000)}km)`);
+              log.progress(`${logPrefix} Engine burst ${engineAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: +${Math.round(fineTuneResult / 1000)}km, ${engineBurstMs}ms)`);
 
-              // Brief engine burn while aligned prograde
-              await conn.raw(`LOCK THROTTLE TO 1. WAIT ${FINE_TUNE_ENGINE_BURST_MS / 1000}. LOCK THROTTLE TO 0.`, 3000);
+              const errorBefore = fineTuneResult;
+              await conn.raw(
+                `LOCK THROTTLE TO 1. WAIT ${engineBurstMs / 1000}. LOCK THROTTLE TO 0.`,
+                Math.max(3000, engineBurstMs + 2000)
+              );
               await delay(500);
 
               fineTuneResult = await fineTuneFunction(conn);
+              const errorDelta = errorBefore - fineTuneResult;
+
+              // Adapt burst duration based on measured efficiency
+              if (errorDelta > 0) {
+                engineHistory.push({ delta: errorDelta, duration: engineBurstMs });
+                const avgDelta = engineHistory.reduce((s, h) => s + h.delta, 0) / engineHistory.length;
+                const avgDuration = engineHistory.reduce((s, h) => s + h.duration, 0) / engineHistory.length;
+                const efficiency = avgDelta / avgDuration; // error-meters per ms
+                const targetDelta = Math.abs(fineTuneResult) * FINE_TUNE_TARGET_REDUCTION;
+                engineBurstMs = Math.round(Math.max(FINE_TUNE_MIN_BURST_MS, Math.min(FINE_TUNE_MAX_BURST_MS, targetDelta / efficiency)));
+              }
             }
 
             // Step 5: Retrograde RCS bursts for IMPACT/LOW PERIAPSIS (result < 0, periapsis too low)
             // Slow down to arrive slower and have shallower approach
-            // Turn RCS on BEFORE the loop so it's fully active for the first burst
             if (fineTuneResult < 0) {
-              await conn.raw('RCS ON. WAIT 0.2.', 2000);
+              await conn.queue('RCS ON.', 2000);
+              await delay(200);
             }
             let rcsAttempts = 0;
+            let rcsBurstMs = initialBurstDuration(fineTuneResult);
+            const rcsHistory: Array<{ delta: number; duration: number }> = [];
+
             while (fineTuneResult < 0 && rcsAttempts < FINE_TUNE_MAX_ATTEMPTS) {
               rcsAttempts++;
-              log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km)`);
+              log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km, ${rcsBurstMs}ms)`);
 
-              // RCS burst retrograde (RCS already enabled above)
-              // Use SHIP:CONTROL:FORE with value well above deadband (0.05)
-              await conn.raw(`SET SHIP:CONTROL:FORE TO -1. WAIT ${FINE_TUNE_RCS_BURST_MS / 1000}. SET SHIP:CONTROL:FORE TO 0.`, 3000);
+              const errorBefore = fineTuneResult;
+              await conn.raw(
+                `SET SHIP:CONTROL:FORE TO -1. WAIT ${rcsBurstMs / 1000}. SET SHIP:CONTROL:FORE TO 0.`,
+                Math.max(3000, rcsBurstMs + 2000)
+              );
               await delay(300);
 
               fineTuneResult = await fineTuneFunction(conn);
+              const errorDelta = Math.abs(errorBefore) - Math.abs(fineTuneResult);
+
+              // Adapt burst duration based on measured efficiency
+              if (errorDelta > 0) {
+                rcsHistory.push({ delta: errorDelta, duration: rcsBurstMs });
+                const avgDelta = rcsHistory.reduce((s, h) => s + h.delta, 0) / rcsHistory.length;
+                const avgDuration = rcsHistory.reduce((s, h) => s + h.duration, 0) / rcsHistory.length;
+                const efficiency = avgDelta / avgDuration;
+                const targetDelta = Math.abs(fineTuneResult) * FINE_TUNE_TARGET_REDUCTION;
+                rcsBurstMs = Math.round(Math.max(FINE_TUNE_MIN_BURST_MS, Math.min(FINE_TUNE_MAX_BURST_MS, targetDelta / efficiency)));
+              }
             }
 
             // Cleanup RCS controls
