@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, queryWrongEncounterDetails, parseNumber, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, queryWrongEncounterDetails, parseNumber, getBodyPeriapsisTargets, type BodyPeriapsisTargets, type ManeuverResult } from '../shared.js';
 import type { FineTuneFunction } from '../execute-node.js';
 import { getTargetValidationInfo, type TargetInfo } from '../../kos/target/validate.js';
 import { validateVesselState, ORBITAL_REQUIREMENTS, getVesselStateInfo } from '../../kos/vessel/validate.js';
@@ -115,9 +115,9 @@ function getSmartPeriapsis(planetInfo: PlanetInfo): SmartPeriapsisResult {
   if (planetInfo.hasAtmosphere) {
     const atmH = planetInfo.atmosphereHeight;
     return {
-      targetPeriapsis: atmH - 20_000,
-      idealMin: atmH * 0.5,
-      idealMax: 250_000,
+      targetPeriapsis: atmH + 20_000,
+      idealMin: atmH + 10_000,
+      idealMax: atmH + 500_000,
       advice: `Use adjust_orbit for capture burn or land`,
       planetType: 'atmospheric',
     };
@@ -125,9 +125,9 @@ function getSmartPeriapsis(planetInfo: PlanetInfo): SmartPeriapsisResult {
 
   // Airless body: circularize
   return {
-    targetPeriapsis: 50_000,
-    idealMin: 35_000,
-    idealMax: 250_000,
+    targetPeriapsis: 20_000,
+    idealMin: 10_000,
+    idealMax: 500_000,
     advice: `Circularize to establish orbit`,
     planetType: 'airless',
   };
@@ -463,8 +463,7 @@ async function createCourseCorrectFineTune(
   }
 
   const atmHeight = parseNumber(atmResult.output.trim()) ?? 0;
-  const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-  const maxOptimalPe = minSafePe + 50_000;
+  const { acceptableMin: minSafePe, courseCorrectThreshold: maxOptimalPe } = getBodyPeriapsisTargets(atmHeight);
 
   // Return fine-tune function that checks periapsis against optimal range
   return async (conn: KosConnection): Promise<number> => {
@@ -844,11 +843,13 @@ export const courseCorrectTool: ToolDefinition = {
       let targetDistance = args.targetDistance as number;
       const shouldExecute = args.execute as boolean;
       let smartAdvice: string | undefined;
+      let convTargets: BodyPeriapsisTargets | undefined;
 
       // Smart periapsis selection for planets/moons
       if (target) {
         const planetInfo = await queryPlanetInfo(conn, target);
         if (planetInfo) {
+          convTargets = getBodyPeriapsisTargets(planetInfo.atmosphereHeight);
           const smart = getSmartPeriapsis(planetInfo);
           smartAdvice = smart.advice;
 
@@ -897,7 +898,6 @@ export const courseCorrectTool: ToolDefinition = {
         targetDistance = MAX_DISTANCE;
       }
 
-      const TOLERANCE = 0.25; // 25% tolerance for actual result
       const MAX_BURNS = 3; // Max correction burns
 
       // History for secant method: [{input, result}, ...]
@@ -1029,8 +1029,11 @@ export const courseCorrectTool: ToolDefinition = {
         // Record for secant method
         history.push({ input: inputPe, result: actualPe });
 
-        // Check if we're within tolerance
-        if (error <= TOLERANCE) {
+        // Check if periapsis is in optimal range (or within 25% for non-body targets)
+        const converged = convTargets
+          ? (actualPe >= convTargets.acceptableMin && actualPe <= convTargets.courseCorrectThreshold)
+          : (error <= 0.25);
+        if (converged) {
           const encounterInfo = await queryTargetEncounterInfo(conn);
           let text = `Course corrected (${totalBurns} burn${totalBurns !== 1 ? 's' : ''})`;
           text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(actualPe / 1000).toFixed(0)}km`;
@@ -1068,17 +1071,18 @@ export const courseCorrectTool: ToolDefinition = {
 
       // Max burns reached
       const encounterInfo = await queryTargetEncounterInfo(conn);
-      const finalError = Math.abs(actualPe - targetDistance) / targetDistance;
       let text = `Partial correction (${totalBurns} burn${totalBurns !== 1 ? 's' : ''})`;
       text += `\nTarget: ${(targetDistance / 1000).toFixed(0)}km → Achieved: ${(actualPe / 1000).toFixed(0)}km`;
 
       if (encounterInfo && encounterInfo.targetType === 'body') {
-        // Use smart advice if available, otherwise default
         const nextStep = smartAdvice ?? 'Warp to SOI, then circularize';
-        if (finalError <= TOLERANCE) {
+        const finalConverged = convTargets
+          ? (actualPe >= convTargets.acceptableMin && actualPe <= convTargets.courseCorrectThreshold)
+          : (Math.abs(actualPe - targetDistance) / targetDistance <= 0.25);
+        if (finalConverged) {
           text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
           text += `\nNext: ${nextStep}`;
-        } else if (actualPe >= 10_000) {
+        } else if (actualPe >= (convTargets?.acceptableMin ?? 10_000)) {
           text += `\nEncounter: ${encounterInfo.targetName} (acceptable)`;
           text += `\nNext: ${nextStep}`;
         } else {

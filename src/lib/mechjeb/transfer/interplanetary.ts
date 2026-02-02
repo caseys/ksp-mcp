@@ -4,7 +4,7 @@
 
 import { z } from 'zod';
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { executeManeuverCommand, queryTargetEncounterInfo, type ManeuverResult } from '../shared.js';
+import { executeManeuverCommand, queryTargetEncounterInfo, formatEncounterGuidance, type ManeuverResult } from '../shared.js';
 import { validateTarget } from '../../kos/target/validate.js';
 import { validateVesselState } from '../../kos/vessel/validate.js';
 import { ManeuverOrchestrator } from '../orchestrator.js';
@@ -60,27 +60,8 @@ export async function interplanetaryTransfer(
   if (hasExistingTransfer && encounterInfo?.targetType === 'body') {
     const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
     const atmHeight = encounterInfo.atmosphereHeight ?? 0;
-    const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-    const optimalMaxPe = minSafePe + 50_000;
-    const targetPeKm = Math.round(minSafePe / 1000);
-
-    // Build response with labels (not raw numbers - LLMs misuse them)
     let text = `WARNING: Transfer to ${targetName} already in progress, no changes made.`;
-
-    if (peAlt < minSafePe) {
-      text += `\nEncounter: ${targetName} (UNSAFE - `;
-      text += atmHeight > 0 ? `below atmosphere)` : `too low)`;
-      text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
-    } else if (peAlt <= optimalMaxPe) {
-      text += `\nEncounter: ${targetName} (optimal)`;
-      text += `\nNext: warp to SOI, then circularize`;
-    } else if (peAlt <= 500_000) {
-      text += `\nEncounter: ${targetName} (acceptable)`;
-      text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
-    } else {
-      text += `\nEncounter: ${targetName} (far encounter)`;
-      text += `\nNext: course_correct to ${targetPeKm}km`;
-    }
+    text += formatEncounterGuidance(targetName, peAlt, atmHeight);
 
     return { success: true, warning: text };
   }
@@ -160,25 +141,7 @@ export const interplanetaryTransferTool: ToolDefinition = {
         if (encounterInfo && encounterInfo.targetType === 'body') {
           const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
           const atmHeight = encounterInfo.atmosphereHeight ?? 0;
-          const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-          const optimalMaxPe = minSafePe + 50_000;
-          const targetPeKm = Math.round(minSafePe / 1000);
-
-          // Use labels, not raw numbers - LLMs pick up numbers and reuse them incorrectly
-          if (peAlt < minSafePe) {
-            text += `\nEncounter: ${encounterInfo.targetName} (UNSAFE - `;
-            text += atmHeight > 0 ? `below atmosphere)` : `too low)`;
-            text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
-          } else if (peAlt <= optimalMaxPe) {
-            text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
-            text += `\nNext: warp to SOI, then circularize`;
-          } else if (peAlt <= 500_000) {
-            text += `\nEncounter: ${encounterInfo.targetName} (acceptable)`;
-            text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
-          } else {
-            text += `\nEncounter: ${encounterInfo.targetName} (far encounter)`;
-            text += `\nNext: course_correct to ${targetPeKm}km`;
-          }
+          text += formatEncounterGuidance(encounterInfo.targetName, peAlt, atmHeight);
         }
 
         return ctx.successResponse('interplanetary', text);

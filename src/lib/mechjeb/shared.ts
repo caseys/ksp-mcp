@@ -5,6 +5,67 @@
 import type { KosConnection } from '../../transport/kos-connection.js';
 import type { McpLogger } from '../tool-types.js';
 
+// ============================================================================
+// Periapsis Target Constants
+// ============================================================================
+
+/** Periapsis targets relative to atmosphere top (or surface for airless bodies) */
+export interface BodyPeriapsisTargets {
+  /** Target orbit altitude: +20km above atm/surface */
+  goal: number;
+  /** Below this = UNSAFE: +10km above atm/surface */
+  acceptableMin: number;
+  /** Above this = advise course_correct: +50km above atm/surface */
+  courseCorrectThreshold: number;
+  /** Above this = far encounter: +500km above atm/surface */
+  acceptableMax: number;
+}
+
+/**
+ * Get periapsis targets for a body based on its atmosphere height.
+ * All targets are relative to atmosphere top (or surface if no atmosphere).
+ *
+ * For Mun (airless): goal=20km, min=10km, threshold=50km, max=500km
+ * For Laythe (atm 50km): goal=70km, min=60km, threshold=100km, max=550km
+ */
+export function getBodyPeriapsisTargets(atmHeight: number): BodyPeriapsisTargets {
+  return {
+    goal: atmHeight + 20_000,
+    acceptableMin: atmHeight + 10_000,
+    courseCorrectThreshold: atmHeight + 50_000,
+    acceptableMax: atmHeight + 500_000,
+  };
+}
+
+/**
+ * Format encounter guidance text for LLM consumption.
+ * Uses structured prefixes (Encounter:, Next:, REQUIRED:) that small LLMs parse reliably.
+ *
+ * @param targetName Name of the target body
+ * @param peAlt Periapsis altitude in meters (above surface)
+ * @param atmHeight Atmosphere height in meters (0 if no atmosphere)
+ * @returns Formatted guidance string (starts with \n)
+ */
+export function formatEncounterGuidance(targetName: string, peAlt: number, atmHeight: number): string {
+  const targets = getBodyPeriapsisTargets(atmHeight);
+  const goalKm = Math.round(targets.goal / 1000);
+
+  if (peAlt < targets.acceptableMin) {
+    const reason = atmHeight > 0 ? 'below atmosphere' : 'too low';
+    return `\nEncounter: ${targetName} (UNSAFE - ${reason})` +
+           `\nREQUIRED: course_correct`;
+  } else if (peAlt <= targets.courseCorrectThreshold) {
+    return `\nEncounter: ${targetName} (optimal)` +
+           `\nNext: warp to SOI, then circularize`;
+  } else if (peAlt <= targets.acceptableMax) {
+    return `\nEncounter: ${targetName} (acceptable)` +
+           `\nNext: course_correct for ${goalKm}km orbit`;
+  } else {
+    return `\nEncounter: ${targetName} (far encounter)` +
+           `\nNext: course_correct for ${goalKm}km orbit`;
+  }
+}
+
 /**
  * Unlock steering and throttle controls.
  * Call this after errors to ensure the vessel isn't left in a locked state.

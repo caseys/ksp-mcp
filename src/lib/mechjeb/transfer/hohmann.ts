@@ -3,7 +3,7 @@
  */
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
-import { queryNodeInfo, queryTargetEncounterInfo, queryWrongEncounterDetails, sanitizeError, parseNumber, type ManeuverResult } from '../shared.js';
+import { queryNodeInfo, queryTargetEncounterInfo, queryWrongEncounterDetails, sanitizeError, parseNumber, formatEncounterGuidance, getBodyPeriapsisTargets, type ManeuverResult } from '../shared.js';
 import type { FineTuneFunction } from '../execute-node.js';
 import { clearNodes } from '../../kos/nodes.js';
 import { validateTarget } from '../../kos/target/validate.js';
@@ -247,27 +247,8 @@ export async function hohmannTransfer(
   if (hasExistingTransfer && encounterInfo?.targetType === 'body') {
     const peAlt = encounterInfo.periapsisInTargetSOI ?? 0;
     const atmHeight = encounterInfo.atmosphereHeight ?? 0;
-    const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-    const optimalMaxPe = minSafePe + 50_000;
-    const targetPeKm = Math.round(minSafePe / 1000);
-
-    // Build response with labels (not raw numbers - LLMs misuse them)
     let text = `WARNING: Transfer to ${targetName} already in progress, no changes made.`;
-
-    if (peAlt < minSafePe) {
-      text += `\nEncounter: ${targetName} (UNSAFE - `;
-      text += atmHeight > 0 ? `below atmosphere)` : `too low)`;
-      text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
-    } else if (peAlt <= optimalMaxPe) {
-      text += `\nEncounter: ${targetName} (optimal)`;
-      text += `\nNext: warp to SOI, then circularize`;
-    } else if (peAlt <= 500_000) {
-      text += `\nEncounter: ${targetName} (acceptable)`;
-      text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
-    } else {
-      text += `\nEncounter: ${targetName} (far encounter)`;
-      text += `\nNext: course_correct to ${targetPeKm}km`;
-    }
+    text += formatEncounterGuidance(targetName, peAlt, atmHeight);
 
     return { success: true, warning: text };
   }
@@ -595,10 +576,8 @@ export const hohmannTransferTool: ToolDefinition = {
         );
         if (atmResult.success) {
           const atmHeight = parseNumber(atmResult.output.trim()) ?? 0;
-          // Optimal periapsis range: 40-90km above atmosphere (or 40-90km if no atmosphere)
-          const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-          const maxOptimalPe = minSafePe + 50_000;
-          fineTuneFunction = createHohmannFineTune(minSafePe, maxOptimalPe);
+          const targets = getBodyPeriapsisTargets(atmHeight);
+          fineTuneFunction = createHohmannFineTune(targets.acceptableMin, targets.courseCorrectThreshold);
         }
       }
 
@@ -624,25 +603,7 @@ export const hohmannTransferTool: ToolDefinition = {
         if (finalEncounterInfo && finalEncounterInfo.targetType === 'body') {
           const peAlt = finalEncounterInfo.periapsisInTargetSOI ?? 0;
           const finalAtmoHeight = finalEncounterInfo.atmosphereHeight ?? 0;
-          const finalMinSafePe = finalAtmoHeight > 0 ? finalAtmoHeight + 40_000 : 40_000;
-          const optimalMaxPe = finalMinSafePe + 50_000;
-          const targetPeKm = Math.round(finalMinSafePe / 1000);
-
-          // Use labels, not raw numbers - LLMs pick up numbers and reuse them incorrectly
-          if (peAlt < finalMinSafePe) {
-            text += `\nEncounter: ${finalEncounterInfo.targetName} (UNSAFE - `;
-            text += finalAtmoHeight > 0 ? `below atmosphere)` : `too low)`;
-            text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
-          } else if (peAlt <= optimalMaxPe) {
-            text += `\nEncounter: ${finalEncounterInfo.targetName} (optimal)`;
-            text += `\nNext: warp to SOI, then circularize`;
-          } else if (peAlt <= 500_000) {
-            text += `\nEncounter: ${finalEncounterInfo.targetName} (acceptable)`;
-            text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
-          } else {
-            text += `\nEncounter: ${finalEncounterInfo.targetName} (far encounter)`;
-            text += `\nNext: course_correct to ${targetPeKm}km`;
-          }
+          text += formatEncounterGuidance(finalEncounterInfo.targetName, peAlt, finalAtmoHeight);
         } else if (result.closeApproach) {
           // Close approach without SOI encounter (common for low-gravity bodies like Minmus)
           const caTime = formatTime(result.closeApproach.time);

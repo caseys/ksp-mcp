@@ -13,7 +13,7 @@ import { getVesselStateInfo, validateVesselState, ORBITING_ONLY_REQUIREMENTS, ty
 import type { ToolDefinition } from '../../tool-types.js';
 import { executeSchema, autoTargetSchema } from '../../tool-types.js';
 import { formatTime,  fmtVel } from '../../utils/format.js';
-import { parseNumber } from '../shared.js';
+import { parseNumber, formatEncounterGuidance, getBodyPeriapsisTargets } from '../shared.js';
 import type { FineTuneFunction } from '../execute-node.js';
 import type { KosConnection } from '../../../transport/kos-connection.js';
 
@@ -154,27 +154,8 @@ export const transferTool: ToolDefinition = {
               const peAlt = encounterInfo.periapsisInTargetSOI;
 
               if (peAlt != null && peAlt > 0) {
-                // Use atmosphere-aware thresholds
                 const atmHeight = encounterInfo.atmosphereHeight ?? 0;
-                const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-                const optimalMaxPe = minSafePe + 50_000;
-                const targetPeKm = Math.round(minSafePe / 1000);
-
-                // Use labels, not raw numbers - LLMs pick up numbers and reuse them incorrectly
-                if (peAlt < minSafePe) {
-                  text += `\nEncounter: ${encounterInfo.targetName} (UNSAFE - `;
-                  text += atmHeight > 0 ? `below atmosphere)` : `too low)`;
-                  text += `\nREQUIRED: course_correct with targetDistance ${targetPeKm}km`;
-                } else if (peAlt <= optimalMaxPe) {
-                  text += `\nEncounter: ${encounterInfo.targetName} (optimal)`;
-                  text += `\nNext: warp to SOI, then circularize`;
-                } else if (peAlt <= 500_000) {
-                  text += `\nEncounter: ${encounterInfo.targetName} (acceptable)`;
-                  text += `\nNext: course_correct to ${targetPeKm}km for efficient capture`;
-                } else {
-                  text += `\nEncounter: ${encounterInfo.targetName} (far encounter)`;
-                  text += `\nNext: course_correct to ${targetPeKm}km`;
-                }
+                text += formatEncounterGuidance(encounterInfo.targetName, peAlt, atmHeight);
               } else {
                 text += `\nEncounter: ${encounterInfo.targetName}`;
                 text += `\nNext: course_correct to verify approach`;
@@ -363,8 +344,7 @@ async function createTransferFineTune(conn: KosConnection, _targetName: string):
   }
 
   const atmHeight = parseNumber(atmResult.output.trim()) ?? 0;
-  const minSafePe = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
-  const maxOptimalPe = minSafePe + 50_000;
+  const { acceptableMin: minSafePe, courseCorrectThreshold: maxOptimalPe } = getBodyPeriapsisTargets(atmHeight);
 
   // Return fine-tune function that checks periapsis against optimal range
   return async (conn: KosConnection): Promise<number> => {
