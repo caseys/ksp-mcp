@@ -127,15 +127,15 @@ export const adjustOrbitTool: ToolDefinition = {
       const atmHeight = bodyMatch ? Number.parseInt(bodyMatch[1]) : 0;
       const bodyName = bodyMatch ? bodyMatch[2].trim() : 'body';
 
-      // Minimum safe altitude: atmo + 40km, or 40km for airless bodies (matches hohmann.ts)
-      const minSafeAlt = atmHeight > 0 ? atmHeight + 40_000 : 40_000;
+      // Capture periapsis target: 20km above surface/atmosphere
+      const capturePe = atmHeight + 20_000;
 
       // Check for crash trajectory (periapsis below surface or atmosphere)
       const isCrashTrajectory = currentPe < 0 || (atmHeight > 0 && currentPe < atmHeight);
 
       if (isCrashTrajectory) {
         // Emergency recovery: time-based burn to raise periapsis, then circularize
-        const crashPe = Math.max(targetPe, minSafeAlt);  // At least minimum safe
+        const crashPe = Math.max(targetPe, capturePe);  // At least capture target
 
         logger.progress(`[AdjustOrbit] Crash trajectory (Pe=${fmtDist(currentPe)}), emergency raise to ${fmtDist(crashPe)}`);
 

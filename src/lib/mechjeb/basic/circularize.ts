@@ -197,9 +197,15 @@ export const circularizeTool: ToolDefinition = {
       if (isCrashTrajectory || isHyperbolic) {
         const situation = isCrashTrajectory ? `Crash trajectory (Pe=${Math.round(peKm)}km)` : `Hyperbolic orbit (ecc=${currentEcc.toFixed(2)})`;
 
-        // Determine target periapsis
+        // Determine target periapsis: 20km above surface/atmosphere
         const altitudeArg = args.altitude as number | undefined;
-        const targetPe = altitudeArg ?? Math.max(peM, 100_000);  // Default to Pe or 100km minimum
+        const atmQuery = await conn.queue(
+          'IF SHIP:BODY:ATM:EXISTS { PRINT SHIP:BODY:ATM:HEIGHT. } ELSE { PRINT 0. }',
+          2000
+        );
+        const captureAtmHeight = Number.parseInt(atmQuery.success ? atmQuery.output.match(/\d+/)?.[0] ?? '0' : '0');
+        const capturePe = captureAtmHeight + 20_000;
+        const targetPe = altitudeArg ?? capturePe;
 
         logger.progress(`[Circularize] ${situation} — fixing periapsis to ${fmtDist(targetPe)}`);
 
@@ -221,8 +227,16 @@ export const circularizeTool: ToolDefinition = {
             `Execute to continue with circularization.`);
         }
 
+        // Validate capture periapsis is in acceptable window (15-30km above atm)
+        const postCapture = await conn.queue('PRINT ROUND(PERIAPSIS).', 2000);
+        const actualPe = Number.parseFloat(postCapture.success ? postCapture.output.match(/[-\d.]+/)?.[0] ?? '0' : '0');
+        const peAboveAtm = actualPe - captureAtmHeight;
+        if (peAboveAtm < 15_000 || peAboveAtm > 30_000) {
+          logger.warn(`[Circularize] Capture Pe ${fmtDist(actualPe)} outside target window (${fmtDist(captureAtmHeight + 15_000)}–${fmtDist(captureAtmHeight + 30_000)})`);
+        }
+
         // Continue to circularization below
-        logger.progress(`[Circularize] Periapsis fixed, proceeding with circularization`);
+        logger.progress(`[Circularize] Periapsis fixed to ${fmtDist(actualPe)}, proceeding with circularization`);
       }
 
       // Check if already circular (skip if we just fixed periapsis)
