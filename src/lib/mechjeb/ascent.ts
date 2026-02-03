@@ -442,7 +442,7 @@ export class AscentHandle {
       // Computed orbit quality tiers
       survivable: boolean;  // periapsis >= atmHeight
       successful: boolean;  // periapsis >= 95% target
-      goodOrbit: boolean;   // successful AND ecc < 0.01
+      goodOrbit: boolean;   // successful AND ecc < 0.005
     }
 
     const result = await pollWithBlackoutResilience<AscentPollState>({
@@ -481,7 +481,7 @@ export class AscentHandle {
         // Orbit quality tiers
         const survivable = periapsis >= atmHeight;  // Above atmosphere
         const successful = periapsis >= this.targetAltitude * 0.95;  // Within 95% of target
-        const goodOrbit = successful && eccentricity < 0.01;  // Successful AND nearly circular
+        const goodOrbit = successful && eccentricity < 0.005;  // Successful AND nearly circular
 
         return { enabled, status, apoapsis, periapsis, body, eccentricity, survivable, successful, goodOrbit };
       },
@@ -572,8 +572,12 @@ export class AscentHandle {
 
         // Check if we need to auto-fix the orbit
         // Survivable but not successful = above atmosphere but below target
-        if (survivable && !successful) {
-          this.logger.warn(`[Ascent] Orbit below target (${fmtNum(periapsis/1000)}km vs ${fmtNum(this.targetAltitude * 0.95 / 1000)}km) - circularizing...`);
+        if (survivable && !goodOrbit) {
+          if (!successful) {
+            this.logger.warn(`[Ascent] Orbit below target (${fmtNum(periapsis/1000)}km vs ${fmtNum(this.targetAltitude * 0.95 / 1000)}km) - circularizing...`);
+          } else {
+            this.logger.info(`[Ascent] Orbit eccentric (ecc=${eccentricity.toFixed(3)}) - circularizing...`);
+          }
 
           const orchestrator = new ManeuverOrchestrator(this.conn);
           const fixResult = await orchestrator.changeEccentricity(0, 'X_FROM_NOW', {
@@ -595,7 +599,7 @@ export class AscentHandle {
               periapsis = Number.parseInt(postMatch[2]);
               eccentricity = Number.parseFloat(postMatch[3]);
               successful = periapsis >= this.targetAltitude * 0.95;
-              goodOrbit = successful && eccentricity < 0.01;
+              goodOrbit = successful && eccentricity < 0.005;
             }
             //this.logger.progress(`[Ascent] Orbit corrected to ${formatOrbit(apoapsis, periapsis)}, ecc=${eccentricity.toFixed(4)}`);
           } else {
@@ -1298,10 +1302,10 @@ export const launchAscentTool: ToolDefinition = {
               lines.push(`Next: Use transfer tool to go to ${target}.`);
             } else {
               // Add guidance based on orbit quality
-              if (ecc < 0.01) {
+              if (ecc < 0.005) {
                 lines.push('Orbit is nearly circular - ready for maneuvers.');
               } else if (ecc < 0.05) {
-                lines.push('Orbit is circular and stable.');
+                lines.push('Orbit is slightly elliptical but stable.');
               } else {
                 lines.push(`Orbit is elliptical (ecc=${ecc.toFixed(3)}) - consider circularizing if needed.`);
               }

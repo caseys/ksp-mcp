@@ -474,11 +474,18 @@ export async function executeNode(
 
   // Safety: reject nodes with negative periapsis (crash trajectory)
   // Only check on elliptical orbits — NEXTNODE:ORBIT:PERIAPSIS errors on hyperbolic
+  // Skip check if node orbit has a next patch (SOI transition) — negative periapsis
+  // around the current body is expected for escape/transfer trajectories.
   const preNodeEcc = await queryNumber(conn, 'ORBIT:ECCENTRICITY');
   if (preNodeEcc < 1) {
-    const nodePeResult = await conn.queue('PRINT ROUND(NEXTNODE:ORBIT:PERIAPSIS).', 3000);
-    const nodePeM = Number.parseFloat(nodePeResult.success ? nodePeResult.output.match(/[-\d.]+/)?.[0] ?? '0' : '0');
-    if (nodePeM < 0) {
+    const nodePeCheck = await conn.queue(
+      'PRINT ROUND(NEXTNODE:ORBIT:PERIAPSIS) + "|" + NEXTNODE:ORBIT:HASNEXTPATCH.',
+      3000
+    );
+    const peCheckMatch = nodePeCheck.success ? nodePeCheck.output.match(/([-\d.]+)\|(True|False)/i) : null;
+    const nodePeM = peCheckMatch ? Number.parseFloat(peCheckMatch[1]) : 0;
+    const hasNextPatch = peCheckMatch ? peCheckMatch[2].toLowerCase() === 'true' : false;
+    if (nodePeM < 0 && !hasNextPatch) {
       log.info(`${logPrefix} Node periapsis: ${Math.round(nodePeM / 1000)}km — clearing crash node`);
       await clearNodes(conn);
       return {
@@ -486,6 +493,9 @@ export async function executeNode(
         nodesExecuted: 0,
         error: `Planned node results in periapsis ${Math.round(nodePeM / 1000)}km below surface. Aborting — node would crash into body.`,
       };
+    }
+    if (nodePeM < 0 && hasNextPatch) {
+      log.info(`${logPrefix} Node periapsis: ${Math.round(nodePeM / 1000)}km but has SOI transition — allowing escape trajectory`);
     }
   }
 
@@ -1191,10 +1201,6 @@ export async function executeNode(
 
             // Step 5: Retrograde RCS bursts for IMPACT/LOW PERIAPSIS (result < 0, periapsis too low)
             // Slow down to arrive slower and have shallower approach
-            if (fineTuneResult < 0) {
-              await conn.queue('RCS ON.', 2000);
-              await delay(200);
-            }
             let rcsAttempts = 0;
             let rcsBurstMs = initialBurstDuration(fineTuneResult);
             const rcsHistory: Array<{ delta: number; duration: number }> = [];
@@ -1204,9 +1210,9 @@ export async function executeNode(
               log.progress(`${logPrefix} RCS burst ${rcsAttempts}/${FINE_TUNE_MAX_ATTEMPTS} (error: ${Math.round(fineTuneResult / 1000)}km, ${rcsBurstMs}ms)`);
 
               const errorBefore = fineTuneResult;
-              await conn.raw(
-                `SET SHIP:CONTROL:FORE TO -1. WAIT ${rcsBurstMs / 1000}. SET SHIP:CONTROL:FORE TO 0.`,
-                Math.max(3000, rcsBurstMs + 2000)
+              await conn.queue(
+                `RCS ON. WAIT 0.1. SET SHIP:CONTROL:FORE TO -1. WAIT ${rcsBurstMs / 1000}. SET SHIP:CONTROL:FORE TO 0.`,
+                Math.max(5000, rcsBurstMs + 3000)
               );
               await delay(300);
 
