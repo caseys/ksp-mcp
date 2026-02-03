@@ -4,10 +4,10 @@
 
 import type { KosConnection } from '../../../transport/kos-connection.js';
 import { executeManeuverCommand, type ManeuverResult } from '../shared.js';
-import { validateVesselState, ORBITAL_REQUIREMENTS } from '../../kos/vessel/validate.js';
 
 /**
  * Create a maneuver node to adjust periapsis.
+ * Callers are responsible for validating vessel state before calling.
  *
  * @param conn kOS connection
  * @param altitude Target periapsis altitude in meters
@@ -20,12 +20,6 @@ export async function adjustPeriapsis(
   timeRef = 'APOAPSIS',
   xFromNowSeconds?: number
 ): Promise<ManeuverResult> {
-  // Validate vessel state: must not be on ground
-  const validation = await validateVesselState(conn, ORBITAL_REQUIREMENTS, 'adjust_periapsis');
-  if (!validation.valid) {
-    return { success: false, error: validation.error };
-  }
-
   // Build command - use CHANGEPETIMED for X_FROM_NOW (thread-safe, no shared state)
   let cmd: string;
   if (timeRef === 'X_FROM_NOW' && xFromNowSeconds !== undefined) {

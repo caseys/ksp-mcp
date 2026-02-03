@@ -1511,17 +1511,23 @@ export const landTool: ToolDefinition = {
             SET SASMODE TO "STABILITYASSIST".
             RCS OFF.
             IF NOT HOMECONNECTION:ISCONNECTED {
-              PRINT "Landed in blackout - warping to radio contact".
-              SET _MCP_LAND_WARP TO 0.
-              SET _MCP_WARP_DT TO SHIP:BODY:ROTATIONPERIOD / 4.
-              UNTIL HOMECONNECTION:ISCONNECTED OR _MCP_LAND_WARP > 20 {
-                SET _MCP_LAND_WARP TO _MCP_LAND_WARP + 1.
-                PRINT "Warp " + _MCP_LAND_WARP + " - no radio (" + ROUND(_MCP_WARP_DT) + "s jump)".
-                KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + _MCP_WARP_DT).
-                WAIT UNTIL KUNIVERSE:TIMEWARP:WARP = 0.
-                WAIT 15.
+              LOCAL bodyRef IS SHIP:BODY.
+              LOCAL tidalRatio IS ABS(bodyRef:ROTATIONPERIOD - bodyRef:ORBIT:PERIOD) / bodyRef:ORBIT:PERIOD.
+              IF tidalRatio < 0.001 {
+                PRINT "Landed in permanent radio blackout (tidally locked body).".
+              } ELSE {
+                PRINT "Landed in blackout - warping to radio contact".
+                SET _MCP_LAND_WARP TO 0.
+                SET _MCP_WARP_DT TO bodyRef:ROTATIONPERIOD / 4.
+                UNTIL HOMECONNECTION:ISCONNECTED OR _MCP_LAND_WARP > 20 {
+                  SET _MCP_LAND_WARP TO _MCP_LAND_WARP + 1.
+                  PRINT "Warp " + _MCP_LAND_WARP + " - no radio (" + ROUND(_MCP_WARP_DT) + "s jump)".
+                  KUNIVERSE:TIMEWARP:WARPTO(TIME:SECONDS + _MCP_WARP_DT).
+                  WAIT UNTIL KUNIVERSE:TIMEWARP:WARP = 0.
+                  WAIT 15.
+                }
+                IF HOMECONNECTION:ISCONNECTED { PRINT "Radio contact restored!". }
               }
-              IF HOMECONNECTION:ISCONNECTED { PRINT "Radio contact restored!". }
             }
             RETURN FALSE.
           }

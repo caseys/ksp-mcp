@@ -1,7 +1,9 @@
 // -------------------- roll helper --------------------
-IF NOT EXISTS(ROLL_TRIM_INSTALLED) {
+IF DEFINED ROLL_TRIM_INSTALLED {
+    // Already installed in this CPU session, skip.
+} ELSE {
 
-    SET ROLL_TRIM_INSTALLED TO TRUE;
+    SET ROLL_TRIM_INSTALLED TO TRUE.
 
     // -------------------- configuration --------------------
     SET ROLL_TRIM_ENABLED TO TRUE.
@@ -54,7 +56,7 @@ IF NOT EXISTS(ROLL_TRIM_INSTALLED) {
     }.
 
     // -------------------- control loop --------------------
-    WHEN TIME:SECONDS > LAST_T + 0.25 {
+    WHEN TIME:SECONDS > LAST_T + 0.25 THEN {
 
         SET LAST_T TO TIME:SECONDS.
 
@@ -67,6 +69,7 @@ IF NOT EXISTS(ROLL_TRIM_INSTALLED) {
         SET target TO GET_TARGET_ROLL(ROLL_MODE).
         APPLY_ROLL_TRIM(target).
 
-    } PRESERVE.
+        PRESERVE.
+    }
 
 }

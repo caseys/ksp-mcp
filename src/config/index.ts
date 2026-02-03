@@ -101,7 +101,7 @@ export const config = Object.freeze({
     /** Timeout for initial socket connection */
     connect: Number.parseInt(process.env.KOS_TIMEOUT_CONNECT ?? '10000', 10),
     /** Timeout waiting for CPU menu to appear */
-    cpuMenu: Number.parseInt(process.env.KOS_TIMEOUT_CPU_MENU ?? '5000', 10),
+    cpuMenu: Number.parseInt(process.env.KOS_TIMEOUT_CPU_MENU ?? '10000', 10),
     /** Timeout waiting for REBOOT response */
     reboot: Number.parseInt(process.env.KOS_TIMEOUT_REBOOT ?? '8000', 10),
     /** Timeout waiting for "Proceed" message */

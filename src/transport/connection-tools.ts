@@ -128,7 +128,7 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
   if (conn.isConnected() && !needsReconnect) {
     // Check if kOS dropped us back to CPU menu (e.g. save reload)
     const buffer = conn.getTransport()?.peekBuffer() ?? '';
-    if (buffer.includes('Choose a CPU')) {
+    if (buffer.includes('Choose a CPU') || buffer.includes('Detaching')) {
       // kOS returned to menu — fall through to reconnect
       resetScriptsVerified();
     } else {
@@ -160,6 +160,15 @@ async function tryConnect(options?: EnsureConnectedOptions): Promise<KosConnecti
     } catch (err) {
       // Non-fatal - scripts may deploy lazily if needed
       console.error(`[connection] Script pre-deploy failed: ${err instanceof Error ? err.message : err}`);
+    }
+
+    // Run roll helper to install background trim correction.
+    // Uses volume 1 (local) for radio-blackout resilience.
+    // The script's DEFINED guard prevents double-installation within a CPU session.
+    try {
+      await conn.raw('IF EXISTS("1:/mcp_roll_helper.ks") { RUNPATH("1:/mcp_roll_helper.ks"). }', 3000);
+    } catch (err) {
+      console.error(`[connection] Roll helper run failed: ${err instanceof Error ? err.message : err}`);
     }
 
     return conn;

@@ -27,6 +27,10 @@ const STATUS_SCRIPT = 'mcp-status.ks';
 const STATUS_PATH = '0:/mcp_status.ks';
 const LOCAL_STATUS_PATH = '1:/mcp_status.ks';
 
+const ROLL_HELPER_SCRIPT = 'mcp_roll_helper.ks';
+const ROLL_HELPER_PATH = '0:/mcp_roll_helper.ks';
+const LOCAL_ROLL_HELPER_PATH = '1:/mcp_roll_helper.ks';
+
 // Cache: once scripts are verified this session, skip re-checking
 let scriptsVerified = false;
 
@@ -113,6 +117,60 @@ export async function ensureStatusScript(conn: KosConnection): Promise<boolean> 
 }
 
 /**
+ * Deploy roll helper script to archive.
+ */
+export async function deployRollHelper(conn: KosConnection): Promise<DeployResult> {
+  const { content } = getScript(ROLL_HELPER_SCRIPT);
+  return deployScript(conn, ROLL_HELPER_PATH, content);
+}
+
+/**
+ * Copy roll helper from archive to local volume.
+ */
+export async function copyRollHelperToLocal(conn: KosConnection): Promise<boolean> {
+  try {
+    await conn.raw(
+      `IF HOMECONNECTION:ISCONNECTED { COPYPATH("${ROLL_HELPER_PATH}", "${LOCAL_ROLL_HELPER_PATH}"). }`,
+      5000
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Ensure roll helper script is deployed and available.
+ * Same pattern as ensureStatusScript — check archive version, redeploy if outdated.
+ */
+export async function ensureRollHelper(conn: KosConnection): Promise<boolean> {
+  const rollVersion = getScriptVersion(ROLL_HELPER_SCRIPT);
+  logDeploy('info', `[deploy] Roll helper version: ${rollVersion}`);
+
+  const archiveVersion = readVersionFromArchive('mcp_roll_helper.ks');
+  logDeploy('info', `[deploy] Roll helper archive (disk): ${archiveVersion ?? 'not found'}`);
+
+  if (archiveVersion !== rollVersion) {
+    logDeploy('info', `[deploy] Deploying roll helper (need: ${rollVersion})`);
+    const result = await deployRollHelper(conn);
+    if (!result.success) {
+      logDeploy('error', `[deploy] Failed to deploy roll helper: ${result.error}`);
+      return false;
+    }
+    logDeploy('info', `[deploy] Roll helper deployed via ${result.method}`);
+  }
+
+  const copied = await copyRollHelperToLocal(conn);
+  if (copied) {
+    logDeploy('info', '[deploy] Roll helper volume 1 synced');
+  } else {
+    logDeploy('info', '[deploy] Roll helper volume 1 copy failed (CPU not ready or no radio)');
+  }
+
+  return true;
+}
+
+/**
  * Ensure all MCP scripts are deployed with correct versions.
  * Call this at startup/connection time to avoid deployment during operations.
  *
@@ -126,12 +184,13 @@ export async function ensureAllScripts(conn: KosConnection): Promise<boolean> {
   }
 
   const statusOk = await ensureStatusScript(conn);
+  const rollOk = await ensureRollHelper(conn);
 
-  if (statusOk) {
+  if (statusOk && rollOk) {
     scriptsVerified = true;
   }
 
-  return statusOk;
+  return statusOk && rollOk;
 }
 
 // Re-export for external use

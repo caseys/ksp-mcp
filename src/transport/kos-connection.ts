@@ -139,15 +139,16 @@ export class KosConnection {
       throw new Error('Transport not initialized');
     }
 
-    // First try: wait for menu directly (fast path - 500ms timeout)
+    // First try: wait for menu directly.
+    // Allow generous timeout — TERMINAL-TYPE subnegotiation with kOS can
+    // delay the menu by 5-6s while kOS processes the terminal type response.
     try {
-      return await this.transport.waitFor('Choose a CPU', 500);
+      return await this.transport.waitFor('Choose a CPU', timeoutMs);
     } catch {
-      // Menu didn't appear - might be in a session
+      // Menu didn't appear - might be in an existing session
     }
 
     // Send Ctrl+D to exit any existing session back to CPU menu
-    // No delay needed - event-driven waitFor will detect menu immediately
     await this.transport.sendKeys?.('C-d');
 
     // Second try: wait for menu after Ctrl+D
@@ -157,7 +158,7 @@ export class KosConnection {
       // Still no menu - try Enter as fallback
     }
 
-    // Try Enter to wake up idle menu (no delay needed)
+    // Try Enter to wake up idle menu
     await this.transport.send('\r\n');
 
     // Final try
@@ -179,7 +180,7 @@ export class KosConnection {
         this.transport = await this.createTransport();
       }
 
-      // Initialize transport (starts TCP connection)
+      // Initialize transport (starts TCP connection + telnet NAWS negotiation)
       await this.transport.init();
 
       // Wait for CPU menu to appear (tries Enter key to wake up if needed)
@@ -245,15 +246,39 @@ export class KosConnection {
         }
       }
 
-      // Select CPU
+      // Flush pending telnet negotiate responses before CPU selection.
+      // NAWS and TERMINAL-TYPE responses may still be in-flight to kOS;
+      // wait for kOS to finish processing them before sending the selection.
+      await new Promise(r => setTimeout(r, 500));
+
+      // Select CPU — NAWS terminal resize may cause the server to redraw
+      // the menu after our selection. Loop to handle re-menus.
       await this.transport.send(String(targetCpu!));
 
-      // Wait for stale screen content to fully arrive, then drain it
-      await new Promise(r => setTimeout(r, 200));
-      for (let i = 0; i < 5; i++) {
-        const chunk = await this.transport.read();
-        if (!chunk) break;
-        await new Promise(r => setTimeout(r, 50));
+      for (let nawsAttempt = 0; nawsAttempt < 3; nawsAttempt++) {
+        // Wait up to 3s for any response after CPU selection
+        try {
+          await this.transport.waitFor(/Choose a CPU|[>\]]/, 3000);
+        } catch {
+          // Timeout — no menu or prompt arrived
+        }
+        // Let trailing data settle (kOS sends in chunks)
+        await new Promise(r => setTimeout(r, 300));
+        const content = await this.transport.read();
+
+        if (!content.includes('Choose a CPU')) {
+          // Not a re-menu — we're past the CPU selection
+          break;
+        }
+
+        // NAWS re-menu appeared — re-select CPU
+        if (!content.includes('> ')) {
+          try {
+            await this.transport.waitFor(/>\s*$/, 500);
+            await this.transport.read();
+          } catch { /* continue anyway */ }
+        }
+        await this.transport.send(String(targetCpu!));
       }
 
       // Interrupt any stale programs from previous session + clear input
@@ -263,7 +288,13 @@ export class KosConnection {
         await this.transport.sendKeys('C-k');
       }
       await new Promise(r => setTimeout(r, 300));
-      await this.transport.read(); // Discard interrupt/clear response
+      await this.transport.read();
+
+      // CLEARSCREEN before terminal width prevents old content flooding on NAWS resize.
+      // Bundled in one send to avoid extra round-trip.
+      await this.transport.send('CLEARSCREEN. SET CONFIG:DEFAULTWIDTH TO 240. SET CONFIG:DEFAULTHEIGHT TO 24. SET TERMINAL:WIDTH TO 240.');
+      await new Promise(r => setTimeout(r, 200));
+      await this.transport.read(); // Discard echo
 
       // Parse connection info from menu output
       this.state = this.parseConnectionInfo(menuOutput, targetCpu!);
@@ -273,9 +304,8 @@ export class KosConnection {
       const cpuReady = await this.comsTest(5000);
       if (!cpuReady) {
         throw new Error(
-          'CPU not responding after attach. The kOS CPU may be stuck ' +
-          '(e.g., running a program from a previous session). ' +
-          'Try: right-click the CPU part in KSP → Reboot.'
+          'CPU not responding after attach. ' +
+          'Try: reconnect, then REBOOT. Last resort: load_save or load_ship.'
         );
       }
 
@@ -384,10 +414,16 @@ export class KosConnection {
     }
 
     try {
+      // Re-check transport after acquiring lock — resetConnection() may have
+      // nulled it while we were waiting for the lock
+      if (!this.transport) {
+        return { success: false, output: '', error: 'Not connected to kOS' };
+      }
+
       // Check for blackout indicators BEFORE clearing buffer
       // The read() below consumes buffer contents, so peekBuffer must come first
       const pendingBuf = this.transport.peekBuffer();
-      if (pendingBuf.includes('Signal lost') || pendingBuf.includes('Choose a CPU')) {
+      if (pendingBuf.includes('Signal lost') || pendingBuf.includes('Choose a CPU') || pendingBuf.includes('Detaching')) {
         this.resetConnection();
         return { success: false, output: '', error: 'Radio loss detected - Signal lost in buffer' };
       }
@@ -400,11 +436,11 @@ export class KosConnection {
       if (!hasRadio) {
         // Reset connection so next call does fresh connect with boot wait
         this.resetConnection();
-        const effectiveTimeout = Math.min(Math.max(timeoutMs, 10_000), config.timeouts.comsTestMax);
+        const effectiveTimeout = Math.min(Math.max(timeoutMs, 5000), config.timeouts.comsTestMax);
         return {
           success: false,
           output: '',
-          error: `Radio loss detected - coms test timed out after ${effectiveTimeout}ms (2 attempts)`,
+          error: `Radio loss detected - coms test timed out after ${effectiveTimeout}ms (4 attempts)`,
         };
       }
 
@@ -549,10 +585,19 @@ export class KosConnection {
     }
 
     try {
+      // Re-check transport after acquiring lock — resetConnection() may have
+      // nulled it while we were waiting for the lock
+      if (!this.transport) {
+        return {
+          success: false, rawOutput: '', sentinelToken: '', sentinelCommand: '',
+          error: 'Not connected to kOS',
+        };
+      }
+
       // Check for blackout indicators BEFORE clearing buffer
       // The read() below consumes buffer contents, so peekBuffer must come first
       const pendingBuf = this.transport.peekBuffer();
-      if (pendingBuf.includes('Signal lost') || pendingBuf.includes('Choose a CPU')) {
+      if (pendingBuf.includes('Signal lost') || pendingBuf.includes('Choose a CPU') || pendingBuf.includes('Detaching')) {
         this.resetConnection();
         return {
           success: false, rawOutput: '', sentinelToken: '', sentinelCommand: '',
@@ -568,13 +613,13 @@ export class KosConnection {
       if (!hasRadio) {
         // Reset connection so next call does fresh connect with boot wait
         this.resetConnection();
-        const effectiveTimeout = Math.min(Math.max(timeoutMs, 10_000), config.timeouts.comsTestMax);
+        const effectiveTimeout = Math.min(Math.max(timeoutMs, 5000), config.timeouts.comsTestMax);
         return {
           success: false,
           rawOutput: '',
           sentinelToken: '',
           sentinelCommand: '',
-          error: `Radio loss detected - coms test timed out after ${effectiveTimeout}ms (2 attempts)`,
+          error: `Radio loss detected - coms test timed out after ${effectiveTimeout}ms (4 attempts)`,
         };
       }
 
@@ -592,10 +637,13 @@ export class KosConnection {
       let rawOutput: string;
       try {
         rawOutput = await this.transport.waitFor(sentinelPattern, timeoutMs);
+        // Flush stray bytes that arrive after sentinel (terminal echo artifacts)
+        await new Promise(r => setTimeout(r, 20));
+        await this.transport.read();
       } catch {
         // Sentinel didn't appear - check if stuck at CPU menu
         const buffer = await this.transport.read();
-        if (buffer.includes('Choose a CPU') || buffer.includes('kOS Terminal Server')) {
+        if (buffer.includes('Choose a CPU') || buffer.includes('kOS Terminal Server') || buffer.includes('Detaching')) {
           this.resetConnection();
           throw new Error(`Connection stuck at CPU menu - reset triggered. Retry command.`);
         }
@@ -810,13 +858,14 @@ export class KosConnection {
       return true;
     }
 
-    // Use passed timeout, but ensure minimum of 10s and cap at comsTestMax
+    // Use passed timeout, but ensure minimum of 5s and cap at comsTestMax
     // Minimum is needed because hard drive spin-up and buffered data may delay response
-    const minTimeout = 10_000;
+    const minTimeout = 5000;
     const maxTimeout = config.timeouts.comsTestMax;
     const effectiveTimeout = Math.min(Math.max(timeoutMs, minTimeout), maxTimeout);
 
-    for (let attempt = 1; attempt <= 2; attempt++) {
+    const maxAttempts = 4;
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const startTime = Date.now();
       const marker = `MCP_COMS_TEST-${startTime}`;
 
@@ -827,12 +876,19 @@ export class KosConnection {
       await this.transport.send(`\u000BPRINT "${marker}".`);
 
       // Wait for marker in output, not echo - use negative lookbehind to skip quoted echo
+      // Combined pattern also matches detach indicators for fast abort
       const markerPattern = new RegExp(`(?<!")${marker}`);
+      const combinedPattern = new RegExp(`(?<!")${marker}|Detaching from|Choose a CPU|Signal lost`);
       try {
-        await this.transport.waitFor(markerPattern, effectiveTimeout);
-        // Marker appeared → radio contact confirmed
-        this.lastComsTestPass = Date.now();
-        return true;
+        const result = await this.transport.waitFor(combinedPattern, effectiveTimeout);
+        if (markerPattern.test(result)) {
+          // Marker appeared → radio contact confirmed
+          this.lastComsTestPass = Date.now();
+          return true;
+        }
+        // Abort indicator matched — connection lost, fail immediately
+        console.error(`[kos-connection] comsTest: connection lost (detach/menu in output)`);
+        return false;
       } catch {
         const elapsed = Date.now() - startTime;
         console.error(`[kos-connection] TIMEOUT: comsTest attempt ${attempt} timed out after ${elapsed}ms (limit: ${effectiveTimeout}ms)`);
@@ -841,18 +897,18 @@ export class KosConnection {
         // Stale "Signal lost" from previous sessions is cleared during connect(),
         // so any "Signal lost" here is from the current session (real blackout).
         const buf = this.transport.peekBuffer();
-        if (buf.includes('Signal lost') || buf.includes('Choose a CPU')) {
+        if (buf.includes('Signal lost') || buf.includes('Choose a CPU') || buf.includes('Detaching')) {
           console.error(`[kos-connection] comsTest: blackout detected in buffer`);
           return false;
         }
 
-        // First attempt failed - wait and retry
-        if (attempt === 1) {
+        // Retry with brief pause between attempts
+        if (attempt < maxAttempts) {
           await new Promise(r => setTimeout(r, 500));
           continue;
         }
-        // Both attempts failed
-        console.error(`[kos-connection] TIMEOUT: comsTest failed after 2 attempts - radio loss likely`);
+        // All attempts failed
+        console.error(`[kos-connection] TIMEOUT: comsTest failed after ${maxAttempts} attempts - radio loss likely`);
         return false;
       }
     }
@@ -981,15 +1037,27 @@ export class KosConnection {
 
 
   /**
-   * Strip kOS UnicodeCommand sequences from output.
+   * Strip kOS UnicodeCommand sequences and ANSI escape codes from output.
    *
    * kOS uses Private Use Area chars (U+E000-U+F8FF) for terminal control.
-   * Some commands have trailing parameter bytes that must also be stripped:
+   * In xterm mode, kOS also sends ANSI escape sequences (ESC[...letter)
+   * for cursor positioning, screen clearing, and title changes.
+   *
+   * PUA commands with trailing parameter bytes:
    * - TELEPORTCURSOR (0xE006): + col byte + row byte
    * - RESIZESCREEN (0xE016): + width byte + height byte
    * - TITLEBEGIN (0xE004): + chars until TITLEEND (0xE005)
    */
   private stripUnicodeCommands(input: string): string {
+    // First pass: strip ANSI escape sequences (ESC[ ... letter and ESC]...BEL/ST)
+    // CSI: \x1B[ followed by params and a letter (e.g., \x1B[2;1H, \x1B[2J, \x1B[?47h)
+    // OSC: \x1B] followed by text until BEL (\x07) or ST (\x1B\\) (e.g., window title)
+    // Also strip \x1B[8;rows;colst (xterm resize)
+    // eslint-disable-next-line no-control-regex -- intentional: stripping ANSI escape sequences
+    input = input.replaceAll(/\u001B\[[0-9;?]*[A-Za-z]/g, '');
+    // eslint-disable-next-line no-control-regex -- intentional: stripping OSC sequences
+    input = input.replaceAll(/\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)/g, '');
+
     const result: string[] = [];
     let i = 0;
 

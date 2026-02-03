@@ -428,10 +428,18 @@ export async function getStatusData(
   let lastError = '';
   let needsRedeploy = false;
 
-  for (let attempt = 1; attempt <= 10; attempt++) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
     // Small delay between retries to let connection stabilize
     if (attempt > 1) {
       await new Promise(r => setTimeout(r, 50));
+    }
+    // Ensure terminal width before status — it can reset to 80 after reboot/reconnect.
+    // Must be a separate raw() call: SET TERMINAL:WIDTH triggers {Please resize}
+    // which redraws the screen and corrupts queue() output parsing.
+    const widthResult = await conn.raw('SET TERMINAL:WIDTH TO 240.', 2000);
+    if (!widthResult.success) {
+      // raw() resets the connection on comsTest failure — propagate immediately
+      throw new Error(widthResult.error || 'Connection lost before status');
     }
     // Run status script - try volume 1 first (faster, survives radio blackout)
     // If only on volume 0 (archive), copy to volume 1 for next time, then run from volume 0
@@ -441,8 +449,9 @@ export async function getStatusData(
       timeoutMs
     );
 
-    // Check for radio loss - don't retry, fail immediately
-    if (statusResult.error?.includes('Radio loss detected')) {
+    // Check for connection/radio errors - don't retry, fail immediately
+    if (statusResult.error?.includes('Radio loss') ||
+        statusResult.error?.includes('Not connected')) {
       throw new Error(statusResult.error);
     }
 
@@ -472,9 +481,14 @@ export async function getStatusData(
     // 1. Raw WRITEJSON format: {"entries": [...], "$type": "..."}
     // 2. Stripped format: {"v":"...", "soi":"...", ...}
     const endMarkerIdx = statusResult.output.indexOf('[MCP_STATUS_END]');
-    const outputToParse = endMarkerIdx > 0
+    // Strip terminal line-wrap newlines BEFORE searching for JSON markers.
+    // kOS terminal wraps at 80 chars inserting \n which can land between { and "v",
+    // causing indexOf('{"v"') to fail. Status output is single-line JSON so any
+    // embedded newlines are wrapping artifacts.
+    const outputToParse = (endMarkerIdx > 0
       ? statusResult.output.slice(0, Math.max(0, endMarkerIdx))
-      : statusResult.output;
+      : statusResult.output
+    ).replaceAll(/[\r\n]+/g, '');
 
     // Find the JSON object - try stripped format first (starts with {"v"), then raw kOS format
     let firstBrace = outputToParse.indexOf('{"v"');
@@ -517,6 +531,10 @@ export async function getStatusData(
       // ensureStatusScript deploys to volume 0 and tries to copy to volume 1,
       // but copy may fail, so we check both paths
       // Uses queue() because we need to parse script JSON output
+      const retryWidth = await conn.raw('SET TERMINAL:WIDTH TO 240.', 2000);
+      if (!retryWidth.success) {
+        throw new Error(retryWidth.error || 'Connection lost before status retry');
+      }
       const retryResult = await conn.queue(
         'IF EXISTS("1:/mcp_status.ks") { RUNPATH("1:/mcp_status.ks"). } ELSE IF EXISTS("0:/mcp_status.ks") { RUNPATH("0:/mcp_status.ks"). } ELSE { PRINT "ERROR: mcp_status.ks not found on any volume". }',
         timeoutMs
